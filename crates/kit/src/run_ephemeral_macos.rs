@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use color_eyre::{Result, eyre::{bail, eyre, Context}};
-use tracing::info;
+use tracing::{info, debug};
 
 // --- Data structures ---
 
@@ -170,6 +170,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     fs::create_dir_all(&cache_base)?;
 
     let machine = detect_machine_name()?;
+    let rootful = is_machine_rootful(&machine);
+    debug!("podman machine '{}' ({})", machine, if rootful { "rootful" } else { "rootless" });
     let digest = ensure_image_and_get_digest(&opts.image)?;
     let digest_short = &digest[..16.min(digest.len())];
     info!("image digest: {}...", digest_short);
@@ -185,11 +187,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // Step 1+2: kernel extract + SquashFS creation (parallel)
     let step2_handle = if !Path::new(&squashfs_path).exists() {
         let mc = machine.clone();
+        let rf = rootful;
         let img = opts.image.clone();
         let sp = squashfs_path.clone();
         Some(std::thread::spawn(move || -> Result<()> {
             info!("creating SquashFS image (lz4)...");
-            create_squashfs_image(&mc, &img, &sp)
+            create_squashfs_image(&mc, rf, &img, &sp)
         }))
     } else {
         info!("using cached SquashFS: {}", squashfs_path);
@@ -571,8 +574,8 @@ fn is_machine_rootful(machine: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn create_squashfs_image(machine: &str, image: &str, output_path: &str) -> Result<()> {
-    if is_machine_rootful(machine) {
+fn create_squashfs_image(machine: &str, rootful: bool, image: &str, output_path: &str) -> Result<()> {
+    if rootful {
         let mount_output = Command::new("podman")
             .args(["machine", "ssh", machine,
                 "podman", "image", "mount", image])
