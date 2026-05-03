@@ -44,6 +44,8 @@ sha2 = "0.10"
 which = "7.0"
 cpio = "0.4"
 
+# macOS-only: libkrun.dylib is linked via #[link(name = "krun")] in run_ephemeral_macos.rs
+
 # Linux-only dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
 bcvk-qemu = { path = "../bcvk-qemu" }

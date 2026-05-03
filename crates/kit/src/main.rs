@@ -60,6 +60,12 @@ mod utils;
 #[cfg(target_os = "linux")]
 mod varlink_ipc;
 
+// macOS-only modules (libkrun backend)
+#[cfg(target_os = "macos")]
+mod ephemeral_macos;
+#[cfg(target_os = "macos")]
+mod run_ephemeral_macos;
+
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]
 pub const CONTAINER_STATEDIR: &str = "/var/lib/bcvk";
@@ -104,8 +110,8 @@ enum InternalsCmds {
     DumpCliJson,
 }
 
-/// Stub subcommands for macOS (shows error message when run)
-#[cfg(not(target_os = "linux"))]
+/// Stub subcommands for unsupported platforms
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[derive(Debug, Subcommand)]
 pub enum StubEphemeralCommands {
     /// Run bootc containers as ephemeral VMs
@@ -139,8 +145,12 @@ enum Commands {
     #[clap(subcommand)]
     Ephemeral(ephemeral::EphemeralCommands),
 
-    // macOS stub: ephemeral command exists but errors out
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    /// Manage ephemeral VMs for bootc containers (libkrun backend)
+    #[clap(subcommand)]
+    Ephemeral(ephemeral_macos::EphemeralCommands),
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     /// Manage ephemeral VMs for bootc containers (not available on this platform)
     #[clap(subcommand)]
     Ephemeral(StubEphemeralCommands),
@@ -260,13 +270,14 @@ fn main() -> Result<(), Report> {
         #[cfg(target_os = "linux")]
         Commands::Ephemeral(cmd) => cmd.run()?,
 
-        // macOS stub: ephemeral command exists but errors out
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        Commands::Ephemeral(cmd) => cmd.run()?,
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         Commands::Ephemeral(_) => {
             return Err(color_eyre::eyre::eyre!(
-                "The 'ephemeral' command is not available on macOS.\n\
-                 bcvk requires Linux with KVM/QEMU for VM operations.\n\
-                 See https://github.com/bootc-dev/bcvk/issues/21 for more information."
+                "The 'ephemeral' command is not available on this platform.\n\
+                 bcvk requires Linux with KVM/QEMU or macOS with libkrun for VM operations."
             ));
         }
 
