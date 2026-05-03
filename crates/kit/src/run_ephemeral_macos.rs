@@ -182,24 +182,25 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     let boot_dir = cache_base.join(format!("boot-{}", digest_short));
     fs::create_dir_all(&boot_dir)?;
-    let squashfs_path = format!("/private/tmp/bcvk/rootfs-{}.squashfs", digest_short);
+    let squashfs_cache = format!("/private/tmp/bcvk/rootfs-{}.squashfs", digest_short);
+    let squashfs_path = format!("/private/tmp/bcvk/{}-rootfs.squashfs", vm_name);
     let vmlinuz_path = boot_dir.join("vmlinuz");
     let image_path = boot_dir.join("Image");
     let initramfs_orig = boot_dir.join("initramfs-orig.img");
-    let initramfs_path = boot_dir.join("initramfs.img");
+    let initramfs_path = cache_base.join(format!("{}-initramfs.img", vm_name));
 
     // Step 1+2: kernel extract + SquashFS creation (parallel)
-    let step2_handle = if !Path::new(&squashfs_path).exists() {
+    let step2_handle = if !Path::new(&squashfs_cache).exists() {
         let mc = machine.clone();
         let rf = rootful;
         let img = opts.image.clone();
-        let sp = squashfs_path.clone();
+        let sc = squashfs_cache.clone();
         Some(std::thread::spawn(move || -> Result<()> {
             info!("creating SquashFS image (lz4)...");
-            create_squashfs_image(&mc, rf, &img, &sp)
+            create_squashfs_image(&mc, rf, &img, &sc)
         }))
     } else {
-        info!("using cached SquashFS: {}", squashfs_path);
+        info!("using cached SquashFS: {}", squashfs_cache);
         None
     };
 
@@ -254,9 +255,19 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         h.join().map_err(|_| eyre!("squashfs creation thread panicked"))??;
     }
 
+    // CoW clone SquashFS for this VM (allows concurrent use of same image)
+    let _ = fs::remove_file(&squashfs_path);
+    let clone_status = Command::new("cp")
+        .args(["-c", &squashfs_cache, &squashfs_path])
+        .status()
+        .context("cloning SquashFS")?;
+    if !clone_status.success() {
+        fs::copy(&squashfs_cache, &squashfs_path).context("copying SquashFS")?;
+    }
+
     // 5. gvproxy + vfkit
-    let gvproxy_sock = cache_base.join(format!("gvproxy-{}.sock", digest_short));
-    let services_sock = cache_base.join(format!("gvproxy-svc-{}.sock", digest_short));
+    let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
+    let services_sock = cache_base.join(format!("{}-gvproxy-svc.sock", vm_name));
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
     let services_sock_str = services_sock.to_string_lossy().to_string();
     info!("starting gvproxy...");
