@@ -198,7 +198,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     if !vmlinuz_path.exists() || !initramfs_orig.exists() {
         info!("extracting kernel and initramfs...");
-        extract_kernel(&opts.image, &boot_dir)?;
+        extract_kernel(&machine, &opts.image, &boot_dir)?;
         fs::rename(boot_dir.join("initramfs.img"), &initramfs_orig)?;
     }
 
@@ -516,15 +516,43 @@ fn ensure_image_and_get_digest(image: &str) -> Result<String> {
     Ok(digest.trim_start_matches("sha256:").to_string())
 }
 
-fn extract_kernel(image: &str, boot_dir: &Path) -> Result<()> {
-    let output = Command::new("podman")
-        .args(["run", "--rm", "-v", &format!("{}:/out", boot_dir.display()), image,
-            "bash", "-c",
-            "KVER=$(ls /usr/lib/modules/ | head -1) && \
-             cp /usr/lib/modules/$KVER/vmlinuz /out/vmlinuz && \
-             cp /usr/lib/modules/$KVER/initramfs.img /out/initramfs.img"])
+fn extract_kernel(machine: &str, image: &str, boot_dir: &Path) -> Result<()> {
+    let boot_dir_str = boot_dir.to_string_lossy();
+
+    // Get kernel version first
+    let kver_output = Command::new("podman")
+        .args(["machine", "ssh", machine,
+            "podman", "run", "--rm", image, "ls", "/usr/lib/modules/"])
         .output()
-        .context("running podman to extract kernel")?;
+        .context("detecting kernel version")?;
+    let kver = String::from_utf8_lossy(&kver_output.stdout)
+        .lines().next().unwrap_or("").trim().to_string();
+    if kver.is_empty() || !kver_output.status.success() {
+        bail!("No kernel found in image '{}'.\n\
+               Checked: /usr/lib/modules/<version>/vmlinuz + initramfs.img\n\
+               This image may not be a bootable container (bootc) image.", image);
+    }
+    info!("kernel version: {}", kver);
+
+    // Extract vmlinuz via podman run cat > file (works with both rootful and rootless)
+    let vmlinuz_src = format!("/usr/lib/modules/{}/vmlinuz", kver);
+    let initramfs_src = format!("/usr/lib/modules/{}/initramfs.img", kver);
+
+    let output = Command::new("podman")
+        .args(["machine", "ssh", machine, &format!(
+            "podman run --rm {} cat {} > {}/vmlinuz", image, vmlinuz_src, boot_dir_str)])
+        .output()
+        .context("extracting vmlinuz")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to extract vmlinuz: {}", stderr.trim());
+    }
+
+    let output = Command::new("podman")
+        .args(["machine", "ssh", machine, &format!(
+            "podman run --rm {} cat {} > {}/initramfs.img", image, initramfs_src, boot_dir_str)])
+        .output()
+        .context("extracting initramfs")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("No kernel found in image '{}'.\n\
@@ -567,13 +595,12 @@ fn create_squashfs_image(machine: &str, image: &str, output_path: &str) -> Resul
     } else {
         info!("rootless mode: using podman unshare for SquashFS creation");
         let script = format!(
-            "MERGED=$(podman image mount {}) && \
-             mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet",
+            "podman unshare sh -c 'MERGED=$(podman image mount {}) && \
+             mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet'",
             image, output_path
         );
         let output = Command::new("podman")
-            .args(["machine", "ssh", machine,
-                "podman", "unshare", "sh", "-c", &script])
+            .args(["machine", "ssh", machine, &script])
             .output().context("running mksquashfs via podman unshare")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
