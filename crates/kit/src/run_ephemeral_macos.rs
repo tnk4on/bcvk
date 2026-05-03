@@ -521,41 +521,17 @@ fn ensure_image_and_get_digest(image: &str) -> Result<String> {
 
 fn extract_kernel(machine: &str, image: &str, boot_dir: &Path) -> Result<()> {
     let boot_dir_str = boot_dir.to_string_lossy();
-
-    // Get kernel version first
-    let kver_output = Command::new("podman")
-        .args(["machine", "ssh", machine,
-            "podman", "run", "--rm", image, "ls", "/usr/lib/modules/"])
-        .output()
-        .context("detecting kernel version")?;
-    let kver = String::from_utf8_lossy(&kver_output.stdout)
-        .lines().next().unwrap_or("").trim().to_string();
-    if kver.is_empty() || !kver_output.status.success() {
-        bail!("No kernel found in image '{}'.\n\
-               Checked: /usr/lib/modules/<version>/vmlinuz + initramfs.img\n\
-               This image may not be a bootable container (bootc) image.", image);
-    }
-    info!("kernel version: {}", kver);
-
-    // Extract vmlinuz via podman run cat > file (works with both rootful and rootless)
-    let vmlinuz_src = format!("/usr/lib/modules/{}/vmlinuz", kver);
-    let initramfs_src = format!("/usr/lib/modules/{}/initramfs.img", kver);
-
+    let script = format!(
+        "KVER=$(podman run --rm {image} ls /usr/lib/modules/ | head -1) && \
+         [ -n \"$KVER\" ] && \
+         podman run --rm {image} cat /usr/lib/modules/$KVER/vmlinuz > {boot}/vmlinuz && \
+         podman run --rm {image} cat /usr/lib/modules/$KVER/initramfs.img > {boot}/initramfs.img",
+        image = image, boot = boot_dir_str
+    );
     let output = Command::new("podman")
-        .args(["machine", "ssh", machine, &format!(
-            "podman run --rm {} cat {} > {}/vmlinuz", image, vmlinuz_src, boot_dir_str)])
+        .args(["machine", "ssh", machine, &script])
         .output()
-        .context("extracting vmlinuz")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to extract vmlinuz: {}", stderr.trim());
-    }
-
-    let output = Command::new("podman")
-        .args(["machine", "ssh", machine, &format!(
-            "podman run --rm {} cat {} > {}/initramfs.img", image, initramfs_src, boot_dir_str)])
-        .output()
-        .context("extracting initramfs")?;
+        .context("extracting kernel from container image")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("No kernel found in image '{}'.\n\
