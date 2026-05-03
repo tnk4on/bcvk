@@ -10,7 +10,7 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    find_vfkit, start_gvproxy, expose_ssh_port, wait_for_ssh, generate_mac,
+    find_vfkit, find_available_ssh_port, start_gvproxy, expose_ssh_port, wait_for_ssh, generate_mac,
 };
 
 #[derive(Parser, Debug)]
@@ -27,8 +27,8 @@ pub struct VmRunOpts {
     pub ssh_key: Option<String>,
     #[clap(long, default_value = "root")]
     pub ssh_user: String,
-    #[clap(long, default_value = "2222")]
-    pub ssh_port: u16,
+    #[clap(long, help = "SSH port (default: auto-allocate)")]
+    pub ssh_port: Option<u16>,
     /// Display VM console in GUI window
     #[clap(long)]
     pub gui: bool,
@@ -101,10 +101,13 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
 
+    let ssh_port = opts.ssh_port.unwrap_or_else(find_available_ssh_port);
+    info!("SSH port: {}", ssh_port);
+
     info!("setting up SSH port forwarding...");
     for attempt in 0..15u32 {
-        match expose_ssh_port(&services_sock_str, "192.168.127.2", opts.ssh_port) {
-            Ok(_) => { info!("SSH port {} forwarded", opts.ssh_port); break; }
+        match expose_ssh_port(&services_sock_str, "192.168.127.2", ssh_port) {
+            Ok(_) => { info!("SSH port {} forwarded", ssh_port); break; }
             Err(e) if attempt < 14 => {
                 let backoff = 200 * 2u64.pow(attempt.min(4));
                 std::thread::sleep(std::time::Duration::from_millis(backoff));
@@ -114,14 +117,14 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     }
 
     let key_path = std::path::Path::new(&ssh_key_path);
-    wait_for_ssh(opts.ssh_port, key_path, &opts.ssh_user)?;
+    wait_for_ssh(ssh_port, key_path, &opts.ssh_user)?;
 
     let metadata = VmMetadata {
         name: vm_name.clone(),
         disk_image: opts.disk.clone(),
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
-        ssh_port: opts.ssh_port,
+        ssh_port,
         ssh_key: ssh_key_path.clone(),
         ssh_user: opts.ssh_user.clone(),
         cpus: vcpus,
@@ -135,7 +138,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     metadata.save()?;
 
     println!("VM '{}' is running", vm_name);
-    println!("  ssh -p {} -i {} {}@localhost", opts.ssh_port, ssh_key_path, opts.ssh_user);
+    println!("  ssh -p {} -i {} {}@localhost", ssh_port, ssh_key_path, opts.ssh_user);
     println!();
     println!("To connect:  bcvk vm ssh {}", vm_name);
     println!("To stop:     bcvk vm stop {}", vm_name);

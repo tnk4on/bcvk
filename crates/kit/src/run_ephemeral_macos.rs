@@ -307,12 +307,15 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
     let ssh_key_path = cache_base.join("ephemeral-key");
 
+    let ssh_port = find_available_ssh_port();
+    debug!("allocated SSH port: {}", ssh_port);
+
     let metadata = EphemeralVmMetadata {
         name: vm_name.clone(),
         image: opts.image.clone(),
         pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
-        ssh_port: 2222,
+        ssh_port,
         ssh_key: ssh_key_path.to_string_lossy().to_string(),
         serial_log: String::new(),
         log_path: None,
@@ -327,7 +330,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     };
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
-        let ssh_port: u16 = 2222;
 
         info!("setting up SSH port forwarding...");
         for attempt in 0..15u32 {
@@ -408,7 +410,7 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         image: opts.image.clone(),
         pid: child.id(),
         gvproxy_pid: 0,
-        ssh_port: 2222,
+        ssh_port: 0,
         ssh_key: cache_base.join("ephemeral-key").to_string_lossy().to_string(),
         serial_log: String::new(),
         log_path: Some(log_path.to_string_lossy().to_string()),
@@ -637,6 +639,25 @@ pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Resu
 }
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
+
+pub fn find_available_ssh_port() -> u16 {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    const PORT_RANGE_START: u16 = 2222;
+    const PORT_RANGE_END: u16 = 3000;
+    for _ in 0..100 {
+        let port = rng.random_range(PORT_RANGE_START..PORT_RANGE_END);
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    for port in PORT_RANGE_START..PORT_RANGE_END {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    PORT_RANGE_START
+}
 
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     use crate::ssh_options::CommonSshOptions;
