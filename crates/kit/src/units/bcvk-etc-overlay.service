@@ -4,8 +4,8 @@ DefaultDependencies=no
 ConditionPathExists=/etc/initrd-release
 Before=initrd-fs.target
 # Must run after sysroot.mount and initrd-parse-etc.service which scans /sysroot/etc/fstab
-After=sysroot.mount initrd-parse-etc.service
-Requires=sysroot.mount
+After=initrd-root-fs.target
+Requires=initrd-root-fs.target
 
 [Service]
 Type=oneshot

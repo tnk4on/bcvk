@@ -3,8 +3,8 @@ Description=Setup ephemeral /var from image content
 DefaultDependencies=no
 ConditionPathExists=/etc/initrd-release
 Before=initrd-fs.target
-After=sysroot.mount initrd-parse-etc.service
-Requires=sysroot.mount
+After=initrd-root-fs.target
+Requires=initrd-root-fs.target
 
 [Service]
 Type=oneshot
