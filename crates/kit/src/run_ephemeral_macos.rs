@@ -575,40 +575,27 @@ fn is_machine_rootful(machine: &str) -> bool {
 }
 
 fn create_squashfs_image(machine: &str, rootful: bool, image: &str, output_path: &str) -> Result<()> {
-    if rootful {
-        let mount_output = Command::new("podman")
-            .args(["machine", "ssh", machine,
-                "podman", "image", "mount", image])
-            .output().context("running podman image mount")?;
-        let merged = String::from_utf8_lossy(&mount_output.stdout).trim().to_string();
-        if merged.is_empty() {
-            bail!("podman image mount returned empty path. \
-                   If using rootless machine, run: podman machine set --rootful");
-        }
-        info!("container rootfs: {}", merged);
-
-        let output = Command::new("podman")
-            .args(["machine", "ssh", machine,
-                "mksquashfs", &merged, output_path, "-noappend", "-comp", "lz4", "-b", "1M", "-quiet"])
-            .output().context("running mksquashfs")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("mksquashfs failed: {}", stderr.trim());
-        }
+    let script = if rootful {
+        format!(
+            "MERGED=$(podman image mount {}) && \
+             mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet",
+            image, output_path
+        )
     } else {
         info!("rootless mode: using podman unshare for SquashFS creation");
-        let script = format!(
+        format!(
             "podman unshare sh -c 'MERGED=$(podman image mount {}) && \
              mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet'",
             image, output_path
-        );
-        let output = Command::new("podman")
-            .args(["machine", "ssh", machine, &script])
-            .output().context("running mksquashfs via podman unshare")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("mksquashfs failed (rootless): {}", stderr.trim());
-        }
+        )
+    };
+
+    let output = Command::new("podman")
+        .args(["machine", "ssh", machine, &script])
+        .output().context("running mksquashfs")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("mksquashfs failed: {}", stderr.trim());
     }
     Ok(())
 }
