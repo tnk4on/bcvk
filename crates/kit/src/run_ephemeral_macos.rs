@@ -176,6 +176,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let digest_short = &digest[..16.min(digest.len())];
     info!("image digest: {}...", digest_short);
 
+    let vm_name = opts.name.clone()
+        .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
+    let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
+
     let boot_dir = cache_base.join(format!("boot-{}", digest_short));
     fs::create_dir_all(&boot_dir)?;
     let squashfs_path = format!("/private/tmp/bcvk/rootfs-{}.squashfs", digest_short);
@@ -225,7 +229,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         if pad > 0 { f.write_all(&vec![0u8; pad as usize])?; }
         f.write_all(&cpio_data)?;
 
-        let ssh_key_path = cache_base.join("ephemeral-key");
         if opts.ssh_keygen || !opts.execute.is_empty() {
             info!("generating SSH keypair...");
             let _ = fs::remove_file(&ssh_key_path);
@@ -302,10 +305,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .stderr(vfkit_log_file)
         .spawn()
         .context("failed to start vfkit")?;
-
-    let vm_name = opts.name.clone()
-        .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
-    let ssh_key_path = cache_base.join("ephemeral-key");
 
     let ssh_port = find_available_ssh_port();
     debug!("allocated SSH port: {}", ssh_port);
@@ -411,7 +410,7 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         pid: child.id(),
         gvproxy_pid: 0,
         ssh_port: 0,
-        ssh_key: cache_base.join("ephemeral-key").to_string_lossy().to_string(),
+        ssh_key: cache_base.join(format!("{}-key", vm_name)).to_string_lossy().to_string(),
         serial_log: String::new(),
         log_path: Some(log_path.to_string_lossy().to_string()),
         created: chrono::Utc::now().to_rfc3339(),
