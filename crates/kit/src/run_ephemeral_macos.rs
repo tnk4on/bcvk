@@ -308,7 +308,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 
     info!("launching vfkit...");
-    let vfkit_log = cache_base.join("vfkit.log");
+    let vfkit_log = cache_base.join(format!("{}-vfkit.log", vm_name));
     let vfkit_log_file = fs::File::create(&vfkit_log)?;
     let mut vfkit_child = Command::new(&vfkit_bin)
         .args(&vfkit_args)

@@ -9,6 +9,16 @@ use color_eyre::eyre::bail;
 
 use crate::run_ephemeral_macos::{self, EphemeralVmMetadata};
 
+#[derive(Debug, clap::Parser)]
+pub struct RunSshOpts {
+    #[command(flatten)]
+    pub run_opts: run_ephemeral_macos::RunEphemeralOpts,
+
+    /// SSH command to execute (optional, defaults to interactive shell)
+    #[arg(trailing_var_arg = true)]
+    pub ssh_args: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum EphemeralCommands {
     /// Run bootc containers as ephemeral VMs
@@ -17,13 +27,17 @@ pub enum EphemeralCommands {
 
     /// Run ephemeral VM and SSH into it
     #[clap(name = "run-ssh")]
-    RunSsh(run_ephemeral_macos::RunEphemeralOpts),
+    RunSsh(RunSshOpts),
 
     /// Connect to a running ephemeral VM via SSH
     #[clap(name = "ssh")]
     Ssh {
         /// VM name
         name: String,
+
+        /// Additional SSH arguments (e.g. -v, -L, commands to execute)
+        #[clap(allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// List ephemeral VM containers
@@ -48,10 +62,10 @@ impl EphemeralCommands {
         match self {
             EphemeralCommands::Run(opts) => run_ephemeral_macos::run(opts),
             EphemeralCommands::RunSsh(mut opts) => {
-                opts.ssh_keygen = true;
-                run_ephemeral_macos::run(opts)
+                opts.run_opts.ssh_keygen = true;
+                run_ephemeral_macos::run(opts.run_opts)
             }
-            EphemeralCommands::Ssh { name } => cmd_ssh(&name),
+            EphemeralCommands::Ssh { name, args } => cmd_ssh(&name, &args),
             EphemeralCommands::Ps { json } => cmd_ps(json),
             EphemeralCommands::RmAll { force } => cmd_rm_all(force),
         }
@@ -124,27 +138,29 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ssh(name: &str) -> Result<()> {
+fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     let vm = EphemeralVmMetadata::load(name)?;
     if !vm.is_alive() {
         EphemeralVmMetadata::remove(name);
         bail!("VM '{}' is not running", name);
     }
 
-    // Try to set up SSH port forwarding (may already be set up)
-    let cache_base = std::path::PathBuf::from("/private/tmp/bcvk");
-    for entry in std::fs::read_dir(&cache_base).into_iter().flatten() {
-        if let Ok(e) = entry {
-            let fname = e.file_name().to_string_lossy().to_string();
-            if fname.starts_with("gvproxy-svc-") && fname.ends_with(".sock") {
-                let _ = run_ephemeral_macos::expose_ssh_port(
-                    &e.path().to_string_lossy(), "192.168.127.2", vm.ssh_port);
-                break;
-            }
-        }
+    // Try to set up SSH port forwarding via VM-specific gvproxy socket
+    let svc_sock = format!("/private/tmp/bcvk/{}-gvproxy-svc.sock", name);
+    if std::path::Path::new(&svc_sock).exists() {
+        let _ = run_ephemeral_macos::expose_ssh_port(&svc_sock, "192.168.127.2", vm.ssh_port);
     }
 
     let key_path = std::path::Path::new(&vm.ssh_key);
-    run_ephemeral_macos::run_ssh_interactive(vm.ssh_port, key_path, "root")?;
+    if args.is_empty() {
+        run_ephemeral_macos::run_ssh_interactive(vm.ssh_port, key_path, "root")?;
+    } else {
+        let combined = shlex::try_join(args.iter().map(|s| s.as_str()))
+            .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH command: {}", e))?;
+        let status = run_ephemeral_macos::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
     Ok(())
 }
