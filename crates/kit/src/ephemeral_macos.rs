@@ -91,7 +91,7 @@ fn cmd_ps(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<50} {}", "NAME", "IMAGE", "SSH");
+    println!("{:<24} {:<50} SSH", "NAME", "IMAGE");
     for vm in &live {
         println!("{:<24} {:<50} ssh -p {} -i {} root@localhost",
             vm.name, vm.image, vm.ssh_port, vm.ssh_key);
@@ -123,13 +123,17 @@ fn cmd_rm_all(force: bool) -> Result<()> {
 
     for vm in &vms {
         if vm.is_alive() {
-            let _ = Command::new("kill")
+            if let Err(e) = Command::new("kill")
                 .args([&vm.pid.to_string()])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                .stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                tracing::warn!("failed to kill VM process {}: {}", vm.pid, e);
+            }
             if vm.gvproxy_pid > 0 {
-                let _ = Command::new("kill")
+                if let Err(e) = Command::new("kill")
                     .args([&vm.gvproxy_pid.to_string()])
-                    .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    .stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                    tracing::warn!("failed to kill gvproxy {}: {}", vm.gvproxy_pid, e);
+                }
             }
         }
         EphemeralVmMetadata::remove(&vm.name);

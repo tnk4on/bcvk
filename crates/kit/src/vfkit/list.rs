@@ -16,7 +16,7 @@ pub fn run(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<20} {:<10} {:<30} {}", "NAME", "STATE", "DISK", "SSH");
+    println!("{:<20} {:<10} {:<30} SSH", "NAME", "STATE", "DISK");
     for vm in &vms {
         let state = if vm.is_alive() { "running" } else { "stopped" };
         println!("{:<20} {:<10} {:<30} ssh -p {} -i {} {}@localhost",

@@ -37,10 +37,12 @@ pub struct EphemeralVmMetadata {
 
 #[allow(dead_code)]
 impl EphemeralVmMetadata {
+    /// Return the directory path for ephemeral VM metadata files.
     pub fn vms_dir() -> std::path::PathBuf {
         std::path::PathBuf::from("/private/tmp/bcvk/vms")
     }
 
+    /// Save metadata to a JSON file in the VMs directory.
     pub fn save(&self) -> Result<()> {
         let dir = Self::vms_dir();
         fs::create_dir_all(&dir)?;
@@ -49,17 +51,20 @@ impl EphemeralVmMetadata {
         Ok(())
     }
 
+    /// Remove metadata file for the named VM.
     pub fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
         let _ = fs::remove_file(path);
     }
 
+    /// Load metadata for the named VM from its JSON file.
     pub fn load(name: &str) -> Result<Self> {
         let path = Self::vms_dir().join(format!("{}.json", name));
         let data = fs::read_to_string(&path)?;
         Ok(serde_json::from_str(&data)?)
     }
 
+    /// List all ephemeral VM metadata from the VMs directory.
     pub fn list_all() -> Result<Vec<Self>> {
         let dir = Self::vms_dir();
         if !dir.exists() { return Ok(Vec::new()); }
@@ -76,6 +81,7 @@ impl EphemeralVmMetadata {
         Ok(vms)
     }
 
+    /// Check if the VM process is still alive via kill -0.
     pub fn is_alive(&self) -> bool {
         Command::new("kill")
             .args(["-0", &self.pid.to_string()])
@@ -118,6 +124,7 @@ fn default_vcpus() -> u32 {
     2
 }
 
+/// Parse memory specification string (e.g. "4G", "2048M") to megabytes.
 pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
@@ -154,6 +161,7 @@ impl Drop for VmCleanup {
 
 // --- Main entry point ---
 
+/// Run an ephemeral VM from a container image using vfkit + SquashFS.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together (GUI requires foreground process)");
@@ -588,6 +596,7 @@ fn create_squashfs_image(machine: &str, rootful: bool, image: &str, output_path:
     Ok(())
 }
 
+/// Find the vfkit binary, checking PATH and Podman PKG location.
 pub fn find_vfkit() -> Result<String> {
     if let Ok(path) = which::which("vfkit") {
         return Ok(path.to_string_lossy().to_string());
@@ -599,10 +608,15 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
+/// Fixed MAC address matching gvproxy's DHCP static lease for 192.168.127.2.
+const GVPROXY_STATIC_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
+
+/// Generate the fixed MAC address for gvproxy DHCP static lease.
 pub fn generate_mac() -> [u8; 6] {
-    [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee]
+    GVPROXY_STATIC_MAC
 }
 
+/// Start a gvproxy instance with the given socket paths.
 pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::process::Child> {
     let _ = fs::remove_file(gvproxy_sock);
     let _ = fs::remove_file(services_sock);
@@ -626,6 +640,7 @@ pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::pro
     Ok(child)
 }
 
+/// Expose SSH port forwarding via gvproxy's HTTP API.
 pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Result<()> {
     let body = format!(
         r#"{{"local":":{}","remote":"{}:22","protocol":"tcp"}}"#,
@@ -650,6 +665,7 @@ pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Resu
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
 
+/// Find an available TCP port for SSH forwarding in range 2222-3000.
 pub fn find_available_ssh_port() -> u16 {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -669,6 +685,7 @@ pub fn find_available_ssh_port() -> u16 {
     PORT_RANGE_START
 }
 
+/// Wait for SSH connectivity with exponential backoff (240s timeout).
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
@@ -697,6 +714,7 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     }
 }
 
+/// Execute a command via SSH and return the exit status.
 pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
@@ -710,6 +728,7 @@ pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) ->
         .map_err(|e| eyre!("ssh failed: {}", e))
 }
 
+/// Start an interactive SSH session with TTY allocation.
 pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
@@ -721,4 +740,53 @@ pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
         .status()
         .map_err(|e| eyre!("ssh failed: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_memory_to_mb() {
+        let cases = [
+            ("4G", 4096),
+            ("4g", 4096),
+            ("2048M", 2048),
+            ("2048m", 2048),
+            ("512", 512),
+            ("1G", 1024),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(
+                parse_memory_to_mb(input).unwrap(),
+                *expected,
+                "parse_memory_to_mb({:?})",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_memory_to_mb_errors() {
+        assert!(parse_memory_to_mb("").is_err());
+        assert!(parse_memory_to_mb("abc").is_err());
+    }
+
+    #[test]
+    fn test_generate_mac() {
+        let mac = generate_mac();
+        assert_eq!(mac, GVPROXY_STATIC_MAC);
+    }
+
+    #[test]
+    fn test_default_vcpus() {
+        assert_eq!(default_vcpus(), 2);
+    }
+
+    #[test]
+    fn test_find_available_ssh_port() {
+        let port = find_available_ssh_port();
+        assert!((2222..3000).contains(&port));
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
 }
