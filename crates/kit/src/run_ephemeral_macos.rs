@@ -16,22 +16,35 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use color_eyre::{Result, eyre::{bail, eyre, Context}};
-use tracing::{info, debug};
+use color_eyre::{
+    eyre::{bail, eyre, Context},
+    Result,
+};
+use tracing::{debug, info};
 
 // --- Data structures ---
 
+/// Metadata for a running ephemeral VM, persisted as JSON for `ps` and `ssh`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct EphemeralVmMetadata {
+    /// VM name used as identifier for resource isolation.
     pub name: String,
+    /// Container image reference used to boot the VM.
     pub image: String,
+    /// PID of the vfkit process.
     pub pid: u32,
+    /// PID of the gvproxy network proxy process.
     pub gvproxy_pid: u32,
+    /// Host-side SSH port forwarded to the VM.
     pub ssh_port: u16,
+    /// Path to the SSH private key for this VM.
     pub ssh_key: String,
+    /// Path to the serial console log file.
     pub serial_log: String,
+    /// Path to the vfkit process log file.
     pub log_path: Option<String>,
+    /// ISO 8601 timestamp when the VM was created.
     pub created: String,
 }
 
@@ -67,11 +80,15 @@ impl EphemeralVmMetadata {
     /// List all ephemeral VM metadata from the VMs directory.
     pub fn list_all() -> Result<Vec<Self>> {
         let dir = Self::vms_dir();
-        if !dir.exists() { return Ok(Vec::new()); }
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
         let mut vms = Vec::new();
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(meta) = serde_json::from_str::<Self>(&data) {
                     vms.push(meta);
@@ -93,21 +110,28 @@ impl EphemeralVmMetadata {
     }
 }
 
+/// Options for launching an ephemeral VM via vfkit.
 #[derive(clap::Parser, Debug)]
 pub struct RunEphemeralOpts {
     /// Container image to boot
     pub image: String,
-    #[clap(long, help = "Number of vCPUs")]
+    /// Number of vCPUs
+    #[clap(long)]
     pub vcpus: Option<u32>,
-    #[clap(long, default_value = "4G", help = "Memory size (e.g. 4G, 2048M, or plain number for MB)")]
+    /// Memory size (e.g. "4G", "2048M", or plain number for MB)
+    #[clap(long, default_value = "4G")]
     pub memory: String,
+    /// Generate a temporary SSH key pair for VM access
     #[clap(long = "ssh-keygen", short = 'K')]
     pub ssh_keygen: bool,
+    /// Command(s) to execute via SSH after boot
     #[clap(long)]
     pub execute: Vec<String>,
-    #[clap(long, help = "VM name for identification")]
+    /// VM name for identification and resource isolation
+    #[clap(long)]
     pub name: Option<String>,
-    #[clap(long = "karg", help = "Additional kernel command line arguments")]
+    /// Additional kernel command line arguments
+    #[clap(long = "karg")]
     pub kernel_args: Vec<String>,
     /// Display VM console in GUI window
     #[clap(long)]
@@ -147,12 +171,20 @@ struct VmCleanup {
 impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
-        if let Err(e) = Command::new("kill").arg(self.vfkit_pid.to_string())
-            .stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        if let Err(e) = Command::new("kill")
+            .arg(self.vfkit_pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
             tracing::warn!("failed to kill vfkit (PID {}): {}", self.vfkit_pid, e);
         }
-        if let Err(e) = Command::new("kill").arg(self.gvproxy_pid.to_string())
-            .stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        if let Err(e) = Command::new("kill")
+            .arg(self.gvproxy_pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
             tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
         }
         EphemeralVmMetadata::remove(&self.vm_name);
@@ -179,12 +211,18 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     let machine = detect_machine_name()?;
     let rootful = is_machine_rootful(&machine);
-    debug!("podman machine '{}' ({})", machine, if rootful { "rootful" } else { "rootless" });
+    debug!(
+        "podman machine '{}' ({})",
+        machine,
+        if rootful { "rootful" } else { "rootless" }
+    );
     let digest = ensure_image_and_get_digest(&opts.image)?;
     let digest_short = &digest[..16.min(digest.len())];
     info!("image digest: {}...", digest_short);
 
-    let vm_name = opts.name.clone()
+    let vm_name = opts
+        .name
+        .clone()
         .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
 
@@ -226,7 +264,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             info!("decompressing kernel (vmlinuz → Image)...");
             extract_uncompressed_kernel(&vp, &ip)
         }))
-    } else { None };
+    } else {
+        None
+    };
 
     fs::copy(&initramfs_orig, &initramfs_path)?;
     {
@@ -235,7 +275,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let mut f = OpenOptions::new().append(true).open(&initramfs_path)?;
         let sz = f.seek(SeekFrom::End(0))?;
         let pad = sz.next_multiple_of(4) - sz;
-        if pad > 0 { f.write_all(&vec![0u8; pad as usize])?; }
+        if pad > 0 {
+            f.write_all(&vec![0u8; pad as usize])?;
+        }
         f.write_all(&cpio_data)?;
 
         if opts.ssh_keygen || !opts.execute.is_empty() {
@@ -243,24 +285,38 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             let _ = fs::remove_file(&ssh_key_path);
             let _ = fs::remove_file(ssh_key_path.with_extension("pub"));
             let status = Command::new("ssh-keygen")
-                .args(["-t", "ed25519", "-f", &ssh_key_path.to_string_lossy(), "-N", "", "-q"])
+                .args([
+                    "-t",
+                    "ed25519",
+                    "-f",
+                    &ssh_key_path.to_string_lossy(),
+                    "-N",
+                    "",
+                    "-q",
+                ])
                 .status()?;
-            if !status.success() { bail!("ssh-keygen failed (exit code: {:?})", status.code()); }
+            if !status.success() {
+                bail!("ssh-keygen failed (exit code: {:?})", status.code());
+            }
             let pubkey = fs::read_to_string(ssh_key_path.with_extension("pub"))?;
             let ssh_cpio = create_ssh_setup_cpio(pubkey.trim())?;
             let pos = f.seek(SeekFrom::End(0))?;
             let pad = pos.next_multiple_of(4) - pos;
-            if pad > 0 { f.write_all(&vec![0u8; pad as usize])?; }
+            if pad > 0 {
+                f.write_all(&vec![0u8; pad as usize])?;
+            }
             f.write_all(&ssh_cpio)?;
         }
         info!("initramfs prepared");
     }
 
     if let Some(h) = step3_handle {
-        h.join().map_err(|_| eyre!("kernel decompression thread panicked"))??;
+        h.join()
+            .map_err(|_| eyre!("kernel decompression thread panicked"))??;
     }
     if let Some(h) = step2_handle {
-        h.join().map_err(|_| eyre!("squashfs creation thread panicked"))??;
+        h.join()
+            .map_err(|_| eyre!("squashfs creation thread panicked"))??;
     }
 
     // CoW clone SquashFS for this VM (allows concurrent use of same image)
@@ -282,9 +338,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let mut gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
 
     let mut cmdline_parts: Vec<&str> = vec![
-        "root=/dev/vda", "ro", "rootfstype=squashfs",
-        "console=tty0", "console=hvc0", "loglevel=4",
-        "selinux=0", "net.ifnames=0",
+        "root=/dev/vda",
+        "ro",
+        "rootfstype=squashfs",
+        "console=tty0",
+        "console=hvc0",
+        "loglevel=4",
+        "selinux=0",
+        "net.ifnames=0",
         "systemd.journald.storage=volatile",
     ];
     let user_args: Vec<&str> = opts.kernel_args.iter().map(|s| s.as_str()).collect();
@@ -292,24 +353,37 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let cmdline = cmdline_parts.join(" ");
 
     let mac = generate_mac();
-    let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    let mac_str = format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
 
     let bootloader_arg = format!(
         "linux,kernel={},initrd={},cmdline=\"{}\"",
-        image_path.display(), initramfs_path.display(), cmdline
+        image_path.display(),
+        initramfs_path.display(),
+        cmdline
     );
 
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
     let mut vfkit_args = vec![
-        "--cpus".to_string(), vcpus.to_string(),
-        "--memory".to_string(), memory_mb.to_string(),
-        "--bootloader".to_string(), bootloader_arg,
-        "--device".to_string(), format!("virtio-blk,path={}", squashfs_path),
-        "--device".to_string(), format!("virtio-net,unixSocketPath={},mac={}", gvproxy_sock_str, mac_str),
-        "--device".to_string(), "virtio-rng".to_string(),
+        "--cpus".to_string(),
+        vcpus.to_string(),
+        "--memory".to_string(),
+        memory_mb.to_string(),
+        "--bootloader".to_string(),
+        bootloader_arg,
+        "--device".to_string(),
+        format!("virtio-blk,path={}", squashfs_path),
+        "--device".to_string(),
+        format!(
+            "virtio-net,unixSocketPath={},mac={}",
+            gvproxy_sock_str, mac_str
+        ),
+        "--device".to_string(),
+        "virtio-rng".to_string(),
     ];
     if opts.gui {
         vfkit_args.push("--gui".to_string());
@@ -348,12 +422,15 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     };
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
-
         info!("setting up SSH port forwarding...");
         for attempt in 0..15u32 {
             match expose_ssh_port(&services_sock_str, "192.168.127.2", ssh_port) {
-                Ok(_) => { info!("SSH port {} forwarded", ssh_port); break; }
+                Ok(_) => {
+                    info!("SSH port {} forwarded", ssh_port);
+                    break;
+                }
                 Err(e) if attempt < 14 => {
+                    debug!("SSH port forward attempt {}: {}", attempt, e);
                     let backoff = 200 * 2u64.pow(attempt.min(4));
                     std::thread::sleep(Duration::from_millis(backoff));
                 }
@@ -374,7 +451,11 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             return Ok(());
         }
 
-        info!("SSH ready: ssh -p {} -i {} root@localhost", ssh_port, ssh_key_path.display());
+        info!(
+            "SSH ready: ssh -p {} -i {} root@localhost",
+            ssh_port,
+            ssh_key_path.display()
+        );
 
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
@@ -389,7 +470,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
-    let _ = gvproxy_child.kill();
+    if let Err(e) = gvproxy_child.kill() {
+        tracing::debug!("failed to kill gvproxy: {}", e);
+    }
     EphemeralVmMetadata::remove(&vm_name);
     Ok(())
 }
@@ -399,13 +482,16 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     fs::create_dir_all(&cache_base)?;
     let digest = ensure_image_and_get_digest(&opts.image)?;
     let digest_short = &digest[..16.min(digest.len())];
-    let vm_name = opts.name.clone()
+    let vm_name = opts
+        .name
+        .clone()
         .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
     let log_path = cache_base.join(format!("bcvk-{}.log", vm_name));
     let log_file = fs::File::create(&log_path)?;
 
     let exe = std::env::current_exe()?;
-    let mut args: Vec<String> = std::env::args().skip(1)
+    let mut args: Vec<String> = std::env::args()
+        .skip(1)
         .filter(|a| a != "--detach" && a != "-d")
         .collect();
     if !args.contains(&"-K".to_string()) && !args.contains(&"--ssh-keygen".to_string()) {
@@ -429,7 +515,10 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         pid: child.id(),
         gvproxy_pid: 0,
         ssh_port: 0,
-        ssh_key: cache_base.join(format!("{}-key", vm_name)).to_string_lossy().to_string(),
+        ssh_key: cache_base
+            .join(format!("{}-key", vm_name))
+            .to_string_lossy()
+            .to_string(),
         serial_log: String::new(),
         log_path: Some(log_path.to_string_lossy().to_string()),
         created: chrono::Utc::now().to_rfc3339(),
@@ -470,24 +559,45 @@ fn create_ssh_setup_cpio(pubkey: &str) -> Result<Vec<u8>> {
 
     let dropin = "[Unit]\nWants=bcvk-ssh-setup.service\n";
 
-    let write_entry = |buf: &mut Vec<u8>, path: &str, data: &[u8], executable: bool| -> std::io::Result<()> {
-        let mode = if executable { 0o100755 } else { 0o100644 };
-        let builder = NewcBuilder::new(path).mode(mode).uid(0).gid(0);
-        let mut writer = builder.write(buf, data.len() as u32);
-        writer.write_all(data)?;
-        writer.finish()?;
-        Ok(())
-    };
+    let write_entry =
+        |buf: &mut Vec<u8>, path: &str, data: &[u8], executable: bool| -> std::io::Result<()> {
+            let mode = if executable { 0o100755 } else { 0o100644 };
+            let builder = NewcBuilder::new(path).mode(mode).uid(0).gid(0);
+            let mut writer = builder.write(buf, data.len() as u32);
+            writer.write_all(data)?;
+            writer.finish()?;
+            Ok(())
+        };
 
     let write_dir = |buf: &mut Vec<u8>, path: &str| -> std::io::Result<()> {
-        NewcBuilder::new(path).mode(0o040755).uid(0).gid(0).write(buf, 0).finish()?;
+        NewcBuilder::new(path)
+            .mode(0o040755)
+            .uid(0)
+            .gid(0)
+            .write(buf, 0)
+            .finish()?;
         Ok(())
     };
 
     write_dir(&mut buf, "usr/lib/bcvk")?;
-    write_entry(&mut buf, "usr/lib/bcvk/setup-ssh.sh", script.as_bytes(), true)?;
-    write_entry(&mut buf, "usr/lib/systemd/system/bcvk-ssh-setup.service", service.as_bytes(), false)?;
-    write_entry(&mut buf, "usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf", dropin.as_bytes(), false)?;
+    write_entry(
+        &mut buf,
+        "usr/lib/bcvk/setup-ssh.sh",
+        script.as_bytes(),
+        true,
+    )?;
+    write_entry(
+        &mut buf,
+        "usr/lib/systemd/system/bcvk-ssh-setup.service",
+        service.as_bytes(),
+        false,
+    )?;
+    write_entry(
+        &mut buf,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf",
+        dropin.as_bytes(),
+        false,
+    )?;
     cpio::newc::trailer(&mut buf).map_err(|e| eyre!("cpio trailer: {e}"))?;
     Ok(buf)
 }
@@ -504,11 +614,16 @@ fn extract_uncompressed_kernel(vmlinuz_path: &Path, output_path: &Path) -> Resul
         if payload_offset + payload_size > data.len() {
             bail!("zboot payload extends beyond file");
         }
-        info!("zboot header: payload at 0x{:x}, size 0x{:x}", payload_offset, payload_size);
+        info!(
+            "zboot header: payload at 0x{:x}, size 0x{:x}",
+            payload_offset, payload_size
+        );
         (payload_offset, payload_offset + payload_size)
     } else {
         let magic = [0x28u8, 0xb5, 0x2f, 0xfd];
-        let p = data.windows(4).position(|w| w == magic)
+        let p = data
+            .windows(4)
+            .position(|w| w == magic)
             .ok_or_else(|| eyre!("zstd magic not found in vmlinuz"))?;
         info!("zstd payload at offset 0x{:x} (no zboot header)", p);
         (p, data.len())
@@ -533,16 +648,25 @@ fn detect_machine_name() -> Result<String> {
         .args(["machine", "info", "--format", "{{.Host.CurrentMachine}}"])
         .output()?;
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() { bail!("no podman machine is running"); }
+    if name.is_empty() {
+        bail!("no podman machine is running");
+    }
     Ok(name)
 }
 
 fn ensure_image_and_get_digest(image: &str) -> Result<String> {
-    let status = Command::new("podman").args(["image", "exists", image])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+    let status = Command::new("podman")
+        .args(["image", "exists", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
     if !status.success() {
         info!("pulling image {}...", image);
-        if !Command::new("podman").args(["pull", image]).status()?.success() {
+        if !Command::new("podman")
+            .args(["pull", image])
+            .status()?
+            .success()
+        {
             bail!("failed to pull image: {}", image);
         }
     }
@@ -560,7 +684,8 @@ fn extract_kernel(machine: &str, image: &str, boot_dir: &Path) -> Result<()> {
          [ -n \"$KVER\" ] && \
          podman run --rm {image} cat /usr/lib/modules/$KVER/vmlinuz > {boot}/vmlinuz && \
          podman run --rm {image} cat /usr/lib/modules/$KVER/initramfs.img > {boot}/initramfs.img",
-        image = image, boot = boot_dir_str
+        image = image,
+        boot = boot_dir_str
     );
     let output = Command::new("podman")
         .args(["machine", "ssh", machine, &script])
@@ -568,10 +693,14 @@ fn extract_kernel(machine: &str, image: &str, boot_dir: &Path) -> Result<()> {
         .context("extracting kernel from container image")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("No kernel found in image '{}'.\n\
+        bail!(
+            "No kernel found in image '{}'.\n\
                Checked: /usr/lib/modules/<version>/vmlinuz + initramfs.img\n\
                This image may not be a bootable container (bootc) image.\n\
-               {}", image, stderr.trim());
+               {}",
+            image,
+            stderr.trim()
+        );
     }
     Ok(())
 }
@@ -584,7 +713,12 @@ fn is_machine_rootful(machine: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn create_squashfs_image(machine: &str, rootful: bool, image: &str, output_path: &str) -> Result<()> {
+fn create_squashfs_image(
+    machine: &str,
+    rootful: bool,
+    image: &str,
+    output_path: &str,
+) -> Result<()> {
     let script = if rootful {
         format!(
             "MERGED=$(podman image mount {}) && \
@@ -602,7 +736,8 @@ fn create_squashfs_image(machine: &str, rootful: bool, image: &str, output_path:
 
     let output = Command::new("podman")
         .args(["machine", "ssh", machine, &script])
-        .output().context("running mksquashfs")?;
+        .output()
+        .context("running mksquashfs")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("mksquashfs failed: {}", stderr.trim());
@@ -653,16 +788,21 @@ pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::pro
     let _ = fs::remove_file(services_sock);
     let child = Command::new(&gvproxy_bin)
         .args([
-            "-listen-vfkit", &format!("unixgram://{}", gvproxy_sock),
-            "-ssh-port", "-1",
-            "-services", &format!("unix://{}", services_sock),
+            "-listen-vfkit",
+            &format!("unixgram://{}", gvproxy_sock),
+            "-ssh-port",
+            "-1",
+            "-services",
+            &format!("unix://{}", services_sock),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .context("failed to start gvproxy. Ensure gvproxy is installed (included in Podman)")?;
     for _ in 0..50 {
-        if Path::new(gvproxy_sock).exists() { break; }
+        if Path::new(gvproxy_sock).exists() {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     if !Path::new(gvproxy_sock).exists() {
@@ -681,7 +821,8 @@ pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Resu
     let request = format!(
         "POST /services/forwarder/expose HTTP/1.1\r\nHost: unix\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
+        body.len(),
+        body
     );
     std::io::Write::write_all(&mut stream, request.as_bytes())?;
     std::io::Write::flush(&mut stream)?;
@@ -689,7 +830,10 @@ pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Resu
     let _ = std::io::Read::read(&mut stream, &mut response);
     let response_str = String::from_utf8_lossy(&response);
     if !response_str.contains("200") {
-        bail!("gvproxy expose failed: {}", response_str.trim_end_matches('\0'));
+        bail!(
+            "gvproxy expose failed: {}",
+            response_str.trim_end_matches('\0')
+        );
     }
     Ok(())
 }
@@ -739,14 +883,25 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
                 return Ok(());
             }
         }
-        let backoff = if attempt < 2 { 500 } else if attempt < 4 { 1000 } else { 2000 };
+        let backoff = if attempt < 2 {
+            500
+        } else if attempt < 4 {
+            1000
+        } else {
+            2000
+        };
         std::thread::sleep(Duration::from_millis(backoff));
         attempt += 1;
     }
 }
 
 /// Execute a command via SSH and return the exit status.
-pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) -> Result<std::process::ExitStatus> {
+pub fn run_ssh_command(
+    port: u16,
+    key_path: &Path,
+    user: &str,
+    command: &str,
+) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
     let user_host = format!("{}@localhost", user);
@@ -754,13 +909,19 @@ pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) ->
     cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
     ssh_opts.apply_to_command(&mut cmd);
     cmd.args(["-o", "BatchMode=yes", &user_host, command]);
-    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status()
         .map_err(|e| eyre!("ssh failed: {}", e))
 }
 
 /// Start an interactive SSH session with TTY allocation.
-pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std::process::ExitStatus> {
+pub fn run_ssh_interactive(
+    port: u16,
+    key_path: &Path,
+    user: &str,
+) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
     let user_host = format!("{}@localhost", user);
@@ -768,7 +929,9 @@ pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std
     cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
     ssh_opts.apply_to_command(&mut cmd);
     cmd.args(["-t", &user_host]);
-    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status()
         .map_err(|e| eyre!("ssh failed: {}", e))
 }
@@ -819,5 +982,91 @@ mod tests {
         let port = find_available_ssh_port();
         assert!((2222..3000).contains(&port));
         assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn test_ephemeral_vm_metadata_roundtrip() {
+        let meta = EphemeralVmMetadata {
+            name: "test-vm".to_string(),
+            image: "quay.io/fedora/fedora-bootc:42".to_string(),
+            pid: 12345,
+            gvproxy_pid: 12346,
+            ssh_port: 2222,
+            ssh_key: "/tmp/test-key".to_string(),
+            serial_log: "/tmp/test-serial.log".to_string(),
+            log_path: Some("/tmp/test-vfkit.log".to_string()),
+            created: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        let loaded: EphemeralVmMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.name, "test-vm");
+        assert_eq!(loaded.image, "quay.io/fedora/fedora-bootc:42");
+        assert_eq!(loaded.pid, 12345);
+        assert_eq!(loaded.ssh_port, 2222);
+        assert_eq!(loaded.log_path.as_deref(), Some("/tmp/test-vfkit.log"));
+    }
+
+    #[test]
+    fn test_ephemeral_vm_metadata_save_load_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("roundtrip-vm.json");
+        let meta = EphemeralVmMetadata {
+            name: "roundtrip-vm".to_string(),
+            image: "localhost/test:latest".to_string(),
+            pid: 999,
+            gvproxy_pid: 1000,
+            ssh_port: 2250,
+            ssh_key: "/tmp/key".to_string(),
+            serial_log: "/tmp/serial.log".to_string(),
+            log_path: None,
+            created: "2026-05-04T00:00:00Z".to_string(),
+        };
+        fs::write(&json_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+        let data = fs::read_to_string(&json_path).unwrap();
+        let loaded: EphemeralVmMetadata = serde_json::from_str(&data).unwrap();
+        assert_eq!(loaded.name, "roundtrip-vm");
+        assert_eq!(loaded.ssh_port, 2250);
+        assert!(loaded.log_path.is_none());
+        fs::remove_file(&json_path).unwrap();
+        assert!(!json_path.exists());
+    }
+
+    #[test]
+    fn test_ephemeral_vm_metadata_list_all_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            let meta = EphemeralVmMetadata {
+                name: format!("vm-{i}"),
+                image: "test:latest".to_string(),
+                pid: 100 + i,
+                gvproxy_pid: 200 + i,
+                ssh_port: 2222 + (i as u16),
+                ssh_key: "/tmp/key".to_string(),
+                serial_log: "/tmp/serial.log".to_string(),
+                log_path: None,
+                created: "2026-01-01T00:00:00Z".to_string(),
+            };
+            let path = dir.path().join(format!("vm-{i}.json"));
+            fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();
+        }
+        // Also write a non-json file that should be skipped
+        fs::write(dir.path().join("README.txt"), "not json").unwrap();
+
+        let mut vms = Vec::new();
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(data) = fs::read_to_string(&path) {
+                if let Ok(meta) = serde_json::from_str::<EphemeralVmMetadata>(&data) {
+                    vms.push(meta);
+                }
+            }
+        }
+        assert_eq!(vms.len(), 3);
+        let mut names: Vec<_> = vms.iter().map(|v| v.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["vm-0", "vm-1", "vm-2"]);
     }
 }

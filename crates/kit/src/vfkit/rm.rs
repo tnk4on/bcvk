@@ -8,6 +8,7 @@ use tracing::info;
 
 use super::VmMetadata;
 
+/// Options for `vm rm`.
 #[derive(Parser, Debug)]
 pub struct VmRmOpts {
     /// VM name
@@ -17,29 +18,40 @@ pub struct VmRmOpts {
     pub force: bool,
 }
 
+/// Remove a persistent VM, optionally force-killing it.
 pub fn run(opts: VmRmOpts) -> Result<()> {
     let meta = VmMetadata::load(&opts.name)?;
 
     if meta.is_alive() {
         if !opts.force {
             color_eyre::eyre::bail!(
-                "VM '{}' is running. Stop it first or use --force", opts.name
+                "VM '{}' is running. Stop it first or use --force",
+                opts.name
             );
         }
         info!("force stopping VM '{}'...", opts.name);
         crate::vfkit::stop::run(&opts.name)?;
     }
 
-    if !meta.efi_store.is_empty() {
-        let _ = fs::remove_file(&meta.efi_store);
-    }
-    if !meta.serial_log.is_empty() {
-        let _ = fs::remove_file(&meta.serial_log);
+    for path in [&meta.efi_store, &meta.serial_log] {
+        if !path.is_empty() {
+            if let Err(e) = fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove {}: {}", path, e);
+                }
+            }
+        }
     }
 
     let vms_dir = VmMetadata::vms_dir();
-    let _ = fs::remove_file(vms_dir.join(format!("{}-gvproxy.sock", meta.name)));
-    let _ = fs::remove_file(vms_dir.join(format!("{}-gvproxy-svc.sock", meta.name)));
+    for suffix in ["-gvproxy.sock", "-gvproxy-svc.sock"] {
+        let p = vms_dir.join(format!("{}{}", meta.name, suffix));
+        if let Err(e) = fs::remove_file(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove {}: {}", p.display(), e);
+            }
+        }
+    }
 
     VmMetadata::remove(&opts.name);
     println!("Removed '{}'", opts.name);

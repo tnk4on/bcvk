@@ -1,8 +1,9 @@
 //! vm list — List all persistent VMs.
 
-use color_eyre::Result;
 use super::VmMetadata;
+use color_eyre::Result;
 
+/// List all persistent VMs, optionally as JSON.
 pub fn run(json: bool) -> Result<()> {
     let vms = VmMetadata::list_all()?;
 
@@ -19,8 +20,10 @@ pub fn run(json: bool) -> Result<()> {
     println!("{:<20} {:<10} {:<30} SSH", "NAME", "STATE", "DISK");
     for vm in &vms {
         let state = if vm.is_alive() { "running" } else { "stopped" };
-        println!("{:<20} {:<10} {:<30} ssh -p {} -i {} {}@localhost",
-            vm.name, state, vm.disk_image, vm.ssh_port, vm.ssh_key, vm.ssh_user);
+        println!(
+            "{:<20} {:<10} {:<30} ssh -p {} -i {} {}@localhost",
+            vm.name, state, vm.disk_image, vm.ssh_port, vm.ssh_key, vm.ssh_user
+        );
     }
     Ok(())
 }

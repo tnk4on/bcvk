@@ -1,11 +1,16 @@
 //! vm inspect — Show detailed VM information.
 
-use color_eyre::Result;
 use super::VmMetadata;
+use color_eyre::Result;
 
+/// Display detailed metadata for the named VM.
 pub fn run(name: &str) -> Result<()> {
     let meta = VmMetadata::load(name)?;
-    let state = if meta.is_alive() { "running" } else { "stopped" };
+    let state = if meta.is_alive() {
+        "running"
+    } else {
+        "stopped"
+    };
 
     println!("Name:       {}", meta.name);
     println!("State:      {}", state);
@@ -17,7 +22,15 @@ pub fn run(name: &str) -> Result<()> {
     println!();
     println!("Processes:");
     if meta.vfkit_pid > 0 {
-        println!("  vfkit:    PID {} ({})", meta.vfkit_pid, if meta.is_alive() { "running" } else { "stopped" });
+        println!(
+            "  vfkit:    PID {} ({})",
+            meta.vfkit_pid,
+            if meta.is_alive() {
+                "running"
+            } else {
+                "stopped"
+            }
+        );
     }
     if meta.gvproxy_pid > 0 {
         println!("  gvproxy:  PID {}", meta.gvproxy_pid);
@@ -29,7 +42,10 @@ pub fn run(name: &str) -> Result<()> {
     println!("  Key:      {}", meta.ssh_key);
     if state == "running" {
         println!();
-        println!("  ssh -p {} -i {} {}@localhost", meta.ssh_port, meta.ssh_key, meta.ssh_user);
+        println!(
+            "  ssh -p {} -i {} {}@localhost",
+            meta.ssh_port, meta.ssh_key, meta.ssh_user
+        );
     }
     println!();
     println!("Files:");
