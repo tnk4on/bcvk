@@ -747,6 +747,19 @@ fn create_squashfs_image(
     Ok(())
 }
 
+/// Clear extended attributes from a file.
+///
+/// Apple Virtualization.framework rejects disk images with xattrs like
+/// `security.selinux` or `user.containers.override_stat` that are added
+/// by podman/buildah when creating images inside containers.
+pub fn clear_xattr(path: &Path) {
+    let _ = Command::new("xattr")
+        .args(["-c", &path.to_string_lossy()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Find the vfkit binary, checking PATH and Podman PKG location.
 pub fn find_vfkit() -> Result<String> {
     if let Ok(path) = which::which("vfkit") {

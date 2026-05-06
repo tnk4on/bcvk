@@ -10,7 +10,8 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    expose_ssh_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy, wait_for_ssh,
+    clear_xattr, expose_ssh_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy,
+    wait_for_ssh,
 };
 
 /// Options for `vm run`.
@@ -48,6 +49,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     if !Path::new(&opts.disk).exists() {
         bail!("disk image not found: {}", opts.disk);
     }
+    clear_xattr(Path::new(&opts.disk));
 
     let ssh_key_path = match &opts.ssh_key {
         Some(p) => p.clone(),

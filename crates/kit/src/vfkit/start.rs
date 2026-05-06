@@ -8,7 +8,7 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    expose_ssh_port, find_vfkit, generate_mac, start_gvproxy, wait_for_ssh,
+    clear_xattr, expose_ssh_port, find_vfkit, generate_mac, start_gvproxy, wait_for_ssh,
 };
 
 /// Options for `vm start`.
@@ -31,6 +31,7 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
     if !std::path::Path::new(&meta.disk_image).exists() {
         bail!("disk image not found: {}", meta.disk_image);
     }
+    clear_xattr(std::path::Path::new(&meta.disk_image));
 
     let vfkit_bin = find_vfkit()?;
     let vms_dir = VmMetadata::vms_dir();
