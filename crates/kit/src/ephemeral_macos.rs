@@ -156,23 +156,8 @@ fn cmd_rm_all(force: bool) -> Result<()> {
                 }
             }
         }
-        if let Some(ref container) = vm.nbd_container {
-            run_ephemeral_macos::stop_nbdkit_container(container);
-        }
         EphemeralVmMetadata::remove(&vm.name);
         println!("Removed {}", vm.name);
-    }
-
-    // Sweep any orphaned nbdkit containers inside podman machine
-    if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
-        let _ = Command::new("podman")
-            .args([
-                "machine", "ssh", &machine, "--",
-                "podman", "rm", "-f", "--filter", "name=bcvk-nbd-",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
     }
     Ok(())
 }
