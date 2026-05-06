@@ -61,6 +61,9 @@ pub enum VmCommands {
     Inspect {
         /// VM name
         name: String,
+        /// Output in JSON format
+        #[clap(long)]
+        json: bool,
     },
 }
 
@@ -75,7 +78,7 @@ impl VmCommands {
             VmCommands::Start(opts) => start::run(opts),
             VmCommands::Remove(opts) => rm::run(opts),
             VmCommands::RemoveAll { force } => rm_all::run(force),
-            VmCommands::Inspect { name } => inspect::run(&name),
+            VmCommands::Inspect { name, json } => inspect::run(&name, json),
         }
     }
 }

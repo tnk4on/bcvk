@@ -4,8 +4,14 @@ use super::VmMetadata;
 use color_eyre::Result;
 
 /// Display detailed metadata for the named VM.
-pub fn run(name: &str) -> Result<()> {
+pub fn run(name: &str, json: bool) -> Result<()> {
     let meta = VmMetadata::load(name)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&meta)?);
+        return Ok(());
+    }
+
     let state = if meta.is_alive() {
         "running"
     } else {
