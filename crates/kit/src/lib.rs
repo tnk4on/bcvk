@@ -12,6 +12,7 @@ pub mod ssh_options;
 #[cfg(target_os = "linux")]
 pub mod kernel;
 
+// macOS-only modules (vfkit backend)
 #[cfg(target_os = "macos")]
 pub mod run_ephemeral_macos;
 

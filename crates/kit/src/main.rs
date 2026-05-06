@@ -61,7 +61,6 @@ mod utils;
 #[cfg(target_os = "linux")]
 mod varlink_ipc;
 
-
 // macOS-only modules (vfkit backend)
 #[cfg(target_os = "macos")]
 mod ephemeral_macos;

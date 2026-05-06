@@ -44,10 +44,6 @@ sha2 = "0.10"
 which = "7.0"
 cpio = "0.4"
 
-# macOS-only dependencies (vfkit backend)
-[target.'cfg(target_os = "macos")'.dependencies]
-zstd = "0.13"
-
 # Linux-only dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
 bcvk-qemu = { path = "../bcvk-qemu" }
@@ -61,6 +57,10 @@ libc = "0.2"
 zlink = "0.4"
 futures-util = "0.3"
 libsystemd = "0.7"
+
+# macOS-only dependencies (vfkit backend)
+[target.'cfg(target_os = "macos")'.dependencies]
+zstd = "0.13"
 
 [dev-dependencies]
 similar-asserts = "1.5"
