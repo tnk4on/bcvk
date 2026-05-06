@@ -26,7 +26,8 @@ pub fn run(force: bool) -> Result<()> {
         std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
+        let input = input.trim().to_lowercase();
+        if input != "y" && input != "yes" {
             println!("Aborted.");
             return Ok(());
         }
