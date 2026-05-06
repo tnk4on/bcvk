@@ -496,13 +496,27 @@ fn create_ssh_setup_cpio(pubkey: &str) -> Result<Vec<u8>> {
 
 fn extract_uncompressed_kernel(vmlinuz_path: &Path, output_path: &Path) -> Result<()> {
     let data = fs::read(vmlinuz_path)?;
-    let magic = [0x28u8, 0xb5, 0x2f, 0xfd];
-    let pos = data.windows(4).position(|w| w == magic)
-        .ok_or_else(|| eyre!("zstd magic not found in vmlinuz"))?;
-    info!("zstd payload at offset 0x{:x}", pos);
+
+    // Parse zboot header: offset 0x08 = payload_offset (le32), 0x0c = payload_size (le32)
+    let (pos, payload_end) = if data.len() >= 16 && &data[4..8] == b"zimg" {
+        let payload_offset = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        let payload_size = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+        if payload_offset + payload_size > data.len() {
+            bail!("zboot payload extends beyond file");
+        }
+        info!("zboot header: payload at 0x{:x}, size 0x{:x}", payload_offset, payload_size);
+        (payload_offset, payload_offset + payload_size)
+    } else {
+        let magic = [0x28u8, 0xb5, 0x2f, 0xfd];
+        let p = data.windows(4).position(|w| w == magic)
+            .ok_or_else(|| eyre!("zstd magic not found in vmlinuz"))?;
+        info!("zstd payload at offset 0x{:x} (no zboot header)", p);
+        (p, data.len())
+    };
 
     let mut kernel = Vec::new();
-    let _ = zstd::stream::copy_decode(&data[pos..], &mut kernel);
+    zstd::stream::copy_decode(&data[pos..payload_end], &mut kernel)
+        .context("decompressing zstd payload from vmlinuz")?;
 
     if kernel.len() < 0x3c || &kernel[0x38..0x3c] != b"ARMd" {
         bail!("decompressed kernel is not a valid ARM64 Image");
@@ -616,11 +630,28 @@ pub fn generate_mac() -> [u8; 6] {
     GVPROXY_STATIC_MAC
 }
 
+/// Find the gvproxy binary, checking PATH and Podman installation paths.
+fn find_gvproxy() -> Result<String> {
+    if let Ok(path) = which::which("gvproxy") {
+        return Ok(path.to_string_lossy().to_string());
+    }
+    for candidate in [
+        "/opt/homebrew/opt/podman/libexec/podman/gvproxy",
+        "/opt/podman/bin/gvproxy",
+    ] {
+        if Path::new(candidate).exists() {
+            return Ok(candidate.to_string());
+        }
+    }
+    bail!("gvproxy not found. Ensure Podman is installed (brew install podman)")
+}
+
 /// Start a gvproxy instance with the given socket paths.
 pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::process::Child> {
+    let gvproxy_bin = find_gvproxy()?;
     let _ = fs::remove_file(gvproxy_sock);
     let _ = fs::remove_file(services_sock);
-    let child = Command::new("gvproxy")
+    let child = Command::new(&gvproxy_bin)
         .args([
             "-listen-vfkit", &format!("unixgram://{}", gvproxy_sock),
             "-ssh-port", "-1",
