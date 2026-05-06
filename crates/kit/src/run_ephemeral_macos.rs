@@ -145,7 +145,9 @@ pub struct RunEphemeralOpts {
 }
 
 fn default_vcpus() -> u32 {
-    2
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(2)
 }
 
 /// Parse memory specification string (e.g. "4G", "2048M") to megabytes.
@@ -974,7 +976,14 @@ mod tests {
 
     #[test]
     fn test_default_vcpus() {
-        assert_eq!(default_vcpus(), 2);
+        let vcpus = default_vcpus();
+        assert!(vcpus >= 1);
+        assert_eq!(
+            vcpus,
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(2)
+        );
     }
 
     #[test]
