@@ -67,9 +67,7 @@ impl EphemeralCommands {
                 opts.run_opts.ssh_keygen = true;
                 if !opts.ssh_args.is_empty() {
                     let combined = shlex::try_join(opts.ssh_args.iter().map(|s| s.as_str()))
-                        .map_err(|e| {
-                            color_eyre::eyre::eyre!("failed to escape SSH args: {}", e)
-                        })?;
+                        .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH args: {}", e))?;
                     opts.run_opts.execute.push(combined);
                 }
                 run_ephemeral_macos::run(opts.run_opts)
