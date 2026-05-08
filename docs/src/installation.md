@@ -64,27 +64,10 @@ Inside a clone of the repo:
 cargo install --locked --path crates/kit
 ```
 
-## macOS
-
-On macOS, bcvk uses [vfkit](https://github.com/crc-org/vfkit) (Apple
-Virtualization.framework) as the VM backend. No entitlements are needed
-for bcvk itself since it launches vfkit as a subprocess.
-
-Requirements:
-- [Podman](https://podman.io/) (includes vfkit and gvproxy)
-- A running podman machine (`podman machine start`)
-
-After building from source, sign the binary with an ad-hoc signature:
-
-```bash
-cargo build --release
-codesign -fs - target/release/bcvk
-```
-
 ## Platform Support
 
-- Linux: Full support (QEMU/KVM, libvirt)
-- macOS: Ephemeral and persistent VMs via vfkit
+- Linux: Supported
+- macOS: Not supported, use [podman-bootc](https://github.com/containers/podman-bootc/)
 - Windows: Not supported
 
 See the [Quick Start Guide](./quick-start.md) to begin using bcvk.
