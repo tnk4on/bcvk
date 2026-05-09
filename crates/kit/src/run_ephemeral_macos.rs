@@ -9,8 +9,8 @@
 //!
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
-use std::fs::{self, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::fs;
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -205,7 +205,7 @@ impl Drop for VmCleanup {
 
 // --- Main entry point ---
 
-/// Run an ephemeral VM from a container image using vfkit + SquashFS.
+/// Run an ephemeral VM from a container image using vfkit + EROFS over NBD.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together (GUI requires foreground process)");
@@ -238,128 +238,33 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
 
-    let boot_dir = cache_base.join(format!("boot-{}", digest_short));
-    fs::create_dir_all(&boot_dir)?;
+    fs::create_dir_all(&cache_base)?;
+    let vm_build_dir = format!("/var/tmp/bcvk/{}", vm_name);
+    let disk_image = format!("{}/disk.raw", vm_build_dir);
     let erofs_cache = format!("/var/tmp/bcvk/rootfs-{}.erofs", digest_short);
-    let vmlinuz_path = boot_dir.join("vmlinuz");
-    let image_path = boot_dir.join("Image");
-    let initramfs_orig = boot_dir.join("initramfs-orig.img");
-    let initramfs_path = cache_base.join(format!("{}-initramfs.img", vm_name));
 
-    // Step 1+2: kernel extract + EROFS creation (parallel)
-    // EROFS is cached on podman machine's local xfs (/var/tmp) for fast I/O.
-    // nbdkit runs inside podman machine to serve directly from /var/tmp.
-    let step2_handle = {
-        let mc = machine.clone();
-        let ec = erofs_cache.clone();
-        let exists = Command::new("podman")
-            .args(["machine", "ssh", &mc, "test", "-f", &ec])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !exists {
-            let rf = rootful;
-            let img = opts.image.clone();
-            Some(std::thread::spawn(move || -> Result<()> {
-                info!("creating EROFS image (lz4)...");
-                create_erofs_image(&mc, rf, &img, &ec)
-            }))
-        } else {
-            info!("using cached EROFS: {}", erofs_cache);
-            None
+    // Generate SSH keypair on macOS host
+    let mut ssh_pubkey = String::new();
+    if opts.ssh_keygen || !opts.execute.is_empty() {
+        info!("generating SSH keypair...");
+        let _ = fs::remove_file(&ssh_key_path);
+        let _ = fs::remove_file(ssh_key_path.with_extension("pub"));
+        let status = Command::new("ssh-keygen")
+            .args([
+                "-t", "ed25519", "-f", &ssh_key_path.to_string_lossy(), "-N", "", "-q",
+            ])
+            .status()?;
+        if !status.success() {
+            bail!("ssh-keygen failed");
         }
-    };
-
-    if !vmlinuz_path.exists() || !initramfs_orig.exists() {
-        info!("extracting kernel and initramfs...");
-        extract_kernel(&machine, &opts.image, &boot_dir)?;
-        fs::rename(boot_dir.join("initramfs.img"), &initramfs_orig)?;
+        ssh_pubkey = fs::read_to_string(ssh_key_path.with_extension("pub"))?
+            .trim()
+            .to_string();
     }
 
-    // Step 3+4: kernel decompress + CPIO append (parallel after Step 1)
-    let step3_handle = if !image_path.exists() {
-        let vp = vmlinuz_path.clone();
-        let ip = image_path.clone();
-        Some(std::thread::spawn(move || -> Result<()> {
-            info!("decompressing kernel (vmlinuz → Image)...");
-            extract_uncompressed_kernel(&vp, &ip)
-        }))
-    } else {
-        None
-    };
-
-    fs::copy(&initramfs_orig, &initramfs_path)?;
-    {
-        let cpio_data = crate::cpio::create_initramfs_units_cpio()
-            .map_err(|e| eyre!("failed to create CPIO: {e}"))?;
-        let mut f = OpenOptions::new().append(true).open(&initramfs_path)?;
-        let sz = f.seek(SeekFrom::End(0))?;
-        let pad = sz.next_multiple_of(4) - sz;
-        if pad > 0 {
-            f.write_all(&vec![0u8; pad as usize])?;
-        }
-        f.write_all(&cpio_data)?;
-
-        if opts.ssh_keygen || !opts.execute.is_empty() {
-            info!("generating SSH keypair...");
-            let _ = fs::remove_file(&ssh_key_path);
-            let _ = fs::remove_file(ssh_key_path.with_extension("pub"));
-            let status = Command::new("ssh-keygen")
-                .args([
-                    "-t",
-                    "ed25519",
-                    "-f",
-                    &ssh_key_path.to_string_lossy(),
-                    "-N",
-                    "",
-                    "-q",
-                ])
-                .status()?;
-            if !status.success() {
-                bail!("ssh-keygen failed (exit code: {:?})", status.code());
-            }
-            let pubkey = fs::read_to_string(ssh_key_path.with_extension("pub"))?;
-            let ssh_cpio = create_ssh_setup_cpio(pubkey.trim())?;
-            let pos = f.seek(SeekFrom::End(0))?;
-            let pad = pos.next_multiple_of(4) - pos;
-            if pad > 0 {
-                f.write_all(&vec![0u8; pad as usize])?;
-            }
-            f.write_all(&ssh_cpio)?;
-        }
-        info!("initramfs prepared");
-    }
-
-    if let Some(h) = step3_handle {
-        h.join()
-            .map_err(|_| eyre!("kernel decompression thread panicked"))??;
-    }
-    if let Some(h) = step2_handle {
-        h.join()
-            .map_err(|_| eyre!("erofs creation thread panicked"))??;
-    }
-
-    // Start nbdkit container serving the cached EROFS via NBD
-    let nbd_port = find_available_nbd_port();
-    let nbd_container_name =
-        start_nbdkit_container(&erofs_cache, nbd_port, &vm_name)?;
-    // VZ framework validates NBD connection at config time; give nbdkit
-    // a moment to fully stabilize after the initial NBDMAGIC handshake.
-    std::thread::sleep(Duration::from_secs(1));
-    info!("nbdkit ready on port {}", nbd_port);
-
-    // 5. gvproxy + vfkit
-    let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
-    let services_sock = cache_base.join(format!("{}-gvproxy-svc.sock", vm_name));
-    let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
-    let services_sock_str = services_sock.to_string_lossy().to_string();
-    info!("starting gvproxy...");
-    let mut gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
-
+    // Build EROFS + EFI disk image entirely inside podman machine
     let mut cmdline_parts: Vec<&str> = vec![
-        "root=/dev/vda",
+        "root=/dev/vda2",
         "ro",
         "rootfstype=erofs",
         "console=tty0",
@@ -373,17 +278,43 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
 
+    info!("building EFI disk image...");
+    build_efi_disk(
+        &machine,
+        rootful,
+        &opts.image,
+        &erofs_cache,
+        &vm_build_dir,
+        &cmdline,
+        &ssh_pubkey,
+    )?;
+    info!("EFI disk image ready");
+
+    // Start nbdkit container serving the disk image via NBD
+    let nbd_port = find_available_nbd_port();
+    let nbd_container_name =
+        start_nbdkit_container(&disk_image, nbd_port, &vm_name)?;
+    std::thread::sleep(Duration::from_secs(1));
+    info!("nbdkit ready on port {}", nbd_port);
+
+    // gvproxy + vfkit (EFI boot)
+    let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
+    let services_sock = cache_base.join(format!("{}-gvproxy-svc.sock", vm_name));
+    let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
+    let services_sock_str = services_sock.to_string_lossy().to_string();
+    info!("starting gvproxy...");
+    let mut gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
+
     let mac = generate_mac();
     let mac_str = format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
+    let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
     let bootloader_arg = format!(
-        "linux,kernel={},initrd={},cmdline=\"{}\"",
-        image_path.display(),
-        initramfs_path.display(),
-        cmdline
+        "efi,variable-store={},create",
+        efi_var_store.display()
     );
 
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
@@ -560,6 +491,7 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
 
 // --- SSH setup CPIO ---
 
+#[allow(dead_code)]
 fn create_ssh_setup_cpio(pubkey: &str) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     let mut buf = Vec::new();
@@ -634,6 +566,7 @@ fn create_ssh_setup_cpio(pubkey: &str) -> Result<Vec<u8>> {
 
 // --- vfkit kernel decompression ---
 
+#[allow(dead_code)]
 fn extract_uncompressed_kernel(vmlinuz_path: &Path, output_path: &Path) -> Result<()> {
     let data = fs::read(vmlinuz_path)?;
 
@@ -708,6 +641,7 @@ fn ensure_image_and_get_digest(image: &str) -> Result<String> {
     Ok(digest.trim_start_matches("sha256:").to_string())
 }
 
+#[allow(dead_code)]
 fn extract_kernel(machine: &str, image: &str, boot_dir: &Path) -> Result<()> {
     let boot_dir_str = boot_dir.to_string_lossy();
     let script = format!(
@@ -776,6 +710,204 @@ fn create_erofs_image(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("mkfs.erofs failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// Build a GPT disk image with ESP + EROFS rootfs for EFI boot.
+///
+/// All operations run inside the podman machine on local xfs (/var/tmp).
+/// The SSH pubkey is injected into initramfs via CPIO append.
+fn build_efi_disk(
+    machine: &str,
+    rootful: bool,
+    image: &str,
+    erofs_cache: &str,
+    build_dir: &str,
+    cmdline: &str,
+    ssh_pubkey: &str,
+) -> Result<()> {
+    // Build EROFS if not cached
+    let erofs_exists = Command::new("podman")
+        .args(["machine", "ssh", machine, "test", "-f", erofs_cache])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !erofs_exists {
+        info!("creating EROFS image (lz4)...");
+        create_erofs_image(machine, rootful, image, erofs_cache)?;
+    } else {
+        info!("using cached EROFS: {}", erofs_cache);
+    }
+
+    // Build ESP + GPT disk via a single script in podman machine
+    let ssh_setup = if ssh_pubkey.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"
+# Create SSH setup CPIO and append to initramfs
+SSHDIR=$(mktemp -d)
+mkdir -p "$SSHDIR/usr/lib/bcvk" "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d"
+cat > "$SSHDIR/usr/lib/bcvk/setup-ssh.sh" << 'SSHSCRIPT'
+#!/bin/bash
+mkdir -p /sysroot/var/roothome/.ssh
+chmod 700 /sysroot/var/roothome/.ssh
+echo '{pubkey}' > /sysroot/var/roothome/.ssh/authorized_keys
+chmod 600 /sysroot/var/roothome/.ssh/authorized_keys
+chown -R 0:0 /sysroot/var/roothome/.ssh
+SSHSCRIPT
+chmod 755 "$SSHDIR/usr/lib/bcvk/setup-ssh.sh"
+
+cat > "$SSHDIR/usr/lib/systemd/system/bcvk-ssh-setup.service" << 'SVCEOF'
+[Unit]
+Description=Setup SSH authorized_keys for root
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=bcvk-var-ephemeral.service
+Requires=bcvk-var-ephemeral.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh
+SVCEOF
+
+cat > "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf" << 'DROPEOF'
+[Unit]
+Wants=bcvk-ssh-setup.service
+DROPEOF
+
+# Append CPIO to initramfs
+(cd "$SSHDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
+rm -rf "$SSHDIR"
+"#,
+            pubkey = ssh_pubkey
+        )
+    };
+
+    let script = format!(
+        r#"
+set -e
+BUILDDIR="{build_dir}"
+rm -rf "$BUILDDIR"
+mkdir -p "$BUILDDIR"
+
+# Mount container image
+{mount_cmd}
+
+KVER=$(ls "$MERGED/usr/lib/modules/" | head -1)
+
+# Copy kernel + initramfs
+cp "$MERGED/usr/lib/modules/$KVER/vmlinuz" "$BUILDDIR/vmlinuz"
+cp "$MERGED/usr/lib/modules/$KVER/initramfs.img" "$BUILDDIR/initramfs.img"
+
+# Append bcvk systemd units CPIO to initramfs
+UNITSDIR=$(mktemp -d)
+mkdir -p "$UNITSDIR/etc/systemd/system" "$UNITSDIR/var"
+# /var tmpfs for ephemeral
+cat > "$UNITSDIR/etc/systemd/system/bcvk-var-ephemeral.service" << 'VAREOF'
+[Unit]
+Description=Mount ephemeral tmpfs on /sysroot/var
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mount -t tmpfs tmpfs /sysroot/var
+VAREOF
+mkdir -p "$UNITSDIR/etc/systemd/system/initrd-fs.target.d"
+cat > "$UNITSDIR/etc/systemd/system/initrd-fs.target.d/bcvk-var-ephemeral.conf" << 'DROP2EOF'
+[Unit]
+Wants=bcvk-var-ephemeral.service
+DROP2EOF
+(cd "$UNITSDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
+rm -rf "$UNITSDIR"
+
+{ssh_setup}
+
+# Build ESP
+mkdir -p "$BUILDDIR/esp/EFI/BOOT" "$BUILDDIR/esp/boot"
+cp "$MERGED/usr/lib/bootupd/updates/EFI/fedora/grubaa64.efi" "$BUILDDIR/esp/EFI/BOOT/BOOTAA64.EFI"
+cp "$BUILDDIR/vmlinuz" "$BUILDDIR/esp/boot/vmlinuz"
+cp "$BUILDDIR/initramfs.img" "$BUILDDIR/esp/boot/initramfs.img"
+
+cat > "$BUILDDIR/esp/EFI/BOOT/grub.cfg" << GRUBEOF
+set timeout=0
+set default=0
+menuentry "bcvk" {{
+  linux /boot/vmlinuz {cmdline}
+  initrd /boot/initramfs.img
+}}
+GRUBEOF
+
+# Create FAT32 ESP image
+ESP_SIZE=$(( $(du -sb "$BUILDDIR/esp" | cut -f1) + 10*1024*1024 ))
+ESP_SIZE_MB=$(( (ESP_SIZE + 1048575) / 1048576 ))
+dd if=/dev/zero of="$BUILDDIR/esp.img" bs=1M count=$ESP_SIZE_MB status=none
+mkfs.vfat -F 32 "$BUILDDIR/esp.img" > /dev/null 2>&1
+ESPMNT="$BUILDDIR/esp-mnt"
+mkdir -p "$ESPMNT"
+mount -o loop "$BUILDDIR/esp.img" "$ESPMNT"
+cp -r "$BUILDDIR/esp/"* "$ESPMNT/"
+sync
+umount "$ESPMNT"
+
+# Assemble GPT disk
+ESP_BYTES=$(stat -c%s "$BUILDDIR/esp.img")
+ROOTFS_BYTES=$(stat -c%s "{erofs_cache}")
+DISK_SIZE=$(( 1048576 + ESP_BYTES + ROOTFS_BYTES + 1048576 ))
+dd if=/dev/zero of="$BUILDDIR/disk.raw" bs=1 count=0 seek=$DISK_SIZE status=none
+
+ESP_START=2048
+ESP_SECTORS=$((ESP_BYTES / 512))
+ROOTFS_START=$((ESP_START + ESP_SECTORS))
+ROOTFS_SECTORS=$((ROOTFS_BYTES / 512))
+
+sfdisk --quiet "$BUILDDIR/disk.raw" << SFDISKEOF
+label: gpt
+start=$ESP_START, size=$ESP_SECTORS, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="ESP"
+start=$ROOTFS_START, size=$ROOTFS_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+SFDISKEOF
+
+dd if="$BUILDDIR/esp.img" of="$BUILDDIR/disk.raw" bs=512 seek=$ESP_START conv=notrunc status=none
+dd if="{erofs_cache}" of="$BUILDDIR/disk.raw" bs=512 seek=$ROOTFS_START conv=notrunc status=none
+
+# Cleanup temp files
+rm -rf "$BUILDDIR/esp" "$BUILDDIR/esp-mnt" "$BUILDDIR/esp.img" "$BUILDDIR/vmlinuz" "$BUILDDIR/initramfs.img"
+"#,
+        build_dir = build_dir,
+        mount_cmd = if rootful {
+            format!("MERGED=$(podman image mount {})", image)
+        } else {
+            format!("MERGED=$(podman unshare podman image mount {})", image)
+        },
+        ssh_setup = ssh_setup,
+        cmdline = cmdline,
+        erofs_cache = erofs_cache,
+    );
+
+    // Write script to a temp file accessible from podman machine via virtiofs,
+    // then execute it. This avoids quoting issues with podman machine ssh.
+    let script_path = format!("/private/tmp/bcvk/build-efi-{}.sh", std::process::id());
+    fs::write(&script_path, &script).context("writing build script")?;
+
+    let output = Command::new("podman")
+        .args([
+            "machine", "ssh", machine, "--",
+            "bash", &script_path,
+        ])
+        .output()
+        .context("building EFI disk image")?;
+    let _ = fs::remove_file(&script_path);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("EFI disk build failed: {}", stderr.trim());
     }
     Ok(())
 }
