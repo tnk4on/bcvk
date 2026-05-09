@@ -163,12 +163,17 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         println!("Removed {}", vm.name);
     }
 
-    // Sweep any orphaned nbdkit containers
-    let _ = Command::new("podman")
-        .args(["rm", "-f", "--filter", "name=bcvk-nbd-"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // Sweep any orphaned nbdkit containers inside podman machine
+    if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
+        let _ = Command::new("podman")
+            .args([
+                "machine", "ssh", &machine, "--",
+                "podman", "rm", "-f", "--filter", "name=bcvk-nbd-",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
     Ok(())
 }
 
