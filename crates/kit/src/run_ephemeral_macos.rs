@@ -240,25 +240,36 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     let boot_dir = cache_base.join(format!("boot-{}", digest_short));
     fs::create_dir_all(&boot_dir)?;
-    let squashfs_cache = format!("/private/tmp/bcvk/rootfs-{}.squashfs", digest_short);
+    let erofs_cache = format!("/var/tmp/bcvk/rootfs-{}.erofs", digest_short);
     let vmlinuz_path = boot_dir.join("vmlinuz");
     let image_path = boot_dir.join("Image");
     let initramfs_orig = boot_dir.join("initramfs-orig.img");
     let initramfs_path = cache_base.join(format!("{}-initramfs.img", vm_name));
 
-    // Step 1+2: kernel extract + SquashFS creation (parallel)
-    let step2_handle = if !Path::new(&squashfs_cache).exists() {
+    // Step 1+2: kernel extract + EROFS creation (parallel)
+    // EROFS is cached on podman machine's local xfs (/var/tmp) for fast I/O.
+    // nbdkit runs inside podman machine to serve directly from /var/tmp.
+    let step2_handle = {
         let mc = machine.clone();
-        let rf = rootful;
-        let img = opts.image.clone();
-        let sc = squashfs_cache.clone();
-        Some(std::thread::spawn(move || -> Result<()> {
-            info!("creating SquashFS image (lz4)...");
-            create_squashfs_image(&mc, rf, &img, &sc)
-        }))
-    } else {
-        info!("using cached SquashFS: {}", squashfs_cache);
-        None
+        let ec = erofs_cache.clone();
+        let exists = Command::new("podman")
+            .args(["machine", "ssh", &mc, "test", "-f", &ec])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !exists {
+            let rf = rootful;
+            let img = opts.image.clone();
+            Some(std::thread::spawn(move || -> Result<()> {
+                info!("creating EROFS image (lz4)...");
+                create_erofs_image(&mc, rf, &img, &ec)
+            }))
+        } else {
+            info!("using cached EROFS: {}", erofs_cache);
+            None
+        }
     };
 
     if !vmlinuz_path.exists() || !initramfs_orig.exists() {
@@ -327,14 +338,16 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     if let Some(h) = step2_handle {
         h.join()
-            .map_err(|_| eyre!("squashfs creation thread panicked"))??;
+            .map_err(|_| eyre!("erofs creation thread panicked"))??;
     }
 
-    // Start nbdkit container serving the cached SquashFS via NBD
+    // Start nbdkit container serving the cached EROFS via NBD
     let nbd_port = find_available_nbd_port();
-    let squashfs_filename = format!("rootfs-{}.squashfs", digest_short);
     let nbd_container_name =
-        start_nbdkit_container(&squashfs_filename, nbd_port, &vm_name)?;
+        start_nbdkit_container(&erofs_cache, nbd_port, &vm_name)?;
+    // VZ framework validates NBD connection at config time; give nbdkit
+    // a moment to fully stabilize after the initial NBDMAGIC handshake.
+    std::thread::sleep(Duration::from_secs(1));
     info!("nbdkit ready on port {}", nbd_port);
 
     // 5. gvproxy + vfkit
@@ -348,7 +361,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let mut cmdline_parts: Vec<&str> = vec![
         "root=/dev/vda",
         "ro",
-        "rootfstype=squashfs",
+        "rootfstype=erofs",
         "console=tty0",
         "console=hvc0",
         "loglevel=4",
@@ -660,7 +673,8 @@ fn extract_uncompressed_kernel(vmlinuz_path: &Path, output_path: &Path) -> Resul
 
 // --- Shared helpers (pub for vfkit/ module) ---
 
-fn detect_machine_name() -> Result<String> {
+/// Detect the name of the running podman machine.
+pub fn detect_machine_name() -> Result<String> {
     let output = Command::new("podman")
         .args(["machine", "info", "--format", "{{.Host.CurrentMachine}}"])
         .output()?;
@@ -730,7 +744,7 @@ fn is_machine_rootful(machine: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn create_squashfs_image(
+fn create_erofs_image(
     machine: &str,
     rootful: bool,
     image: &str,
@@ -738,26 +752,30 @@ fn create_squashfs_image(
 ) -> Result<()> {
     let script = if rootful {
         format!(
-            "MERGED=$(podman image mount {}) && \
-             mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet",
-            image, output_path
+            "mkdir -p $(dirname {output}) && \
+             MERGED=$(podman image mount {image}) && \
+             mkfs.erofs -zlz4 --quiet {output} $MERGED",
+            image = image,
+            output = output_path
         )
     } else {
-        info!("rootless mode: using podman unshare for SquashFS creation");
+        info!("rootless mode: using podman unshare for EROFS creation");
         format!(
-            "podman unshare sh -c 'MERGED=$(podman image mount {}) && \
-             mksquashfs $MERGED {} -noappend -comp lz4 -b 1M -quiet'",
-            image, output_path
+            "mkdir -p $(dirname {output}) && \
+             podman unshare sh -c 'MERGED=$(podman image mount {image}) && \
+             mkfs.erofs -zlz4 --quiet {output} $MERGED'",
+            image = image,
+            output = output_path
         )
     };
 
     let output = Command::new("podman")
         .args(["machine", "ssh", machine, &script])
         .output()
-        .context("running mksquashfs")?;
+        .context("running mkfs.erofs")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("mksquashfs failed: {}", stderr.trim());
+        bail!("mkfs.erofs failed: {}", stderr.trim());
     }
     Ok(())
 }
@@ -910,42 +928,39 @@ pub fn find_available_nbd_port() -> u16 {
     PORT_RANGE_START
 }
 
-/// Start an nbdkit container serving a SquashFS image over NBD.
+/// Start an nbdkit container serving an EROFS image over NBD.
 ///
-/// Uses `podman run -d` with port forwarding to make nbdkit reachable
-/// from the macOS host. The SquashFS file is accessed inside the podman
-/// machine via a volume mount of /private/tmp/bcvk.
+/// Runs the container inside the podman machine via `podman machine ssh`
+/// so that /var/tmp/bcvk (local xfs) can be volume-mounted directly.
+/// The container's port is forwarded to the macOS host by the podman
+/// machine's gvproxy.
 fn start_nbdkit_container(
-    squashfs_filename: &str,
+    erofs_path: &str,
     nbd_port: u16,
     vm_name: &str,
 ) -> Result<String> {
     let container_name = format!("bcvk-nbd-{}", vm_name);
+    let machine = detect_machine_name()?;
 
     let _ = Command::new("podman")
-        .args(["rm", "-f", &container_name])
+        .args(["machine", "ssh", &machine, "--", "podman", "rm", "-f", &container_name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 
+    let volume_erofs = format!("{}:/data/rootfs.erofs:ro,z", erofs_path);
+    let port_arg = format!("{}:10809", nbd_port);
     let output = Command::new("podman")
         .args([
-            "run",
-            "-d",
-            "--name",
-            &container_name,
-            "-p",
-            &format!("{}:10809", nbd_port),
-            "-v",
-            "/private/tmp/bcvk:/data:ro",
-            "quay.io/fedora/fedora:42",
-            "bash",
-            "-c",
-            &format!(
-                "dnf install -y nbdkit nbdkit-basic-plugins > /dev/null 2>&1 && \
-                 nbdkit -f -p 10809 -r file /data/{}",
-                squashfs_filename
-            ),
+            "machine", "ssh", &machine, "--",
+            "podman", "run", "-d",
+            "--name", &container_name,
+            "-p", &port_arg,
+            "-v", &volume_erofs,
+            "-v", "/usr/bin/nbdkit:/usr/bin/nbdkit:ro",
+            "-v", "/usr/lib64/nbdkit:/usr/lib64/nbdkit:ro",
+            "quay.io/fedora/fedora:latest",
+            "nbdkit", "-f", "-p", "10809", "-r", "file", "/data/rootfs.erofs",
         ])
         .output()
         .context("failed to start nbdkit container")?;
@@ -990,13 +1005,12 @@ fn start_nbdkit_container(
 
 /// Stop and remove an nbdkit container (best-effort).
 pub fn stop_nbdkit_container(container_name: &str) {
-    if let Err(e) = Command::new("podman")
-        .args(["rm", "-f", container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        tracing::debug!("failed to remove nbdkit container '{}': {}", container_name, e);
+    if let Ok(machine) = detect_machine_name() {
+        let _ = Command::new("podman")
+            .args(["machine", "ssh", &machine, "--", "podman", "rm", "-f", container_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
