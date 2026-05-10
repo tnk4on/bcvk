@@ -82,6 +82,8 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         None => return -1,
     };
 
+    let _ = std::fs::write("/tmp/erofs-debug-1.txt", format!("dir={:?}\n", state.dir));
+
     // Walk directory
     let walk = match dir_walk::walk_directory(&state.dir) {
         Ok(w) => w,
@@ -99,6 +101,13 @@ pub extern "C" fn plugin_get_ready() -> c_int {
             return -1;
         }
     };
+
+    // Write debug info to a file since nbdkit_error may not be visible
+    let _ = std::fs::write("/tmp/erofs-plugin-debug.txt", format!(
+        "dirs={} files={} symlinks={} metadata={}B total_size={}B file_regions={}\n",
+        walk.dirs.len(), walk.files.len(), walk.symlinks.len(),
+        erofs_layout.metadata.len(), erofs_layout.total_size, erofs_layout.file_regions.len()
+    ));
 
     // Build regions
     let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk.files);
@@ -179,11 +188,12 @@ pub extern "C" fn plugin_pread(
 
 // --- Plugin registration ---
 
+// Must match nbdkit-plugin.h struct nbdkit_plugin exactly (API v2)
 #[repr(C)]
 pub struct NbdkitPlugin {
     _struct_size: u64,
     _api_version: c_int,
-    _min_thread_model: c_int,
+    _thread_model: c_int,
     name: *const c_char,
     longname: *const c_char,
     version: *const c_char,
@@ -200,6 +210,17 @@ pub struct NbdkitPlugin {
     can_flush: Option<extern "C" fn(*mut c_void) -> c_int>,
     is_rotational: Option<extern "C" fn(*mut c_void) -> c_int>,
     can_trim: Option<extern "C" fn(*mut c_void) -> c_int>,
+    // API v2: _pread_v1 etc (v1 stubs, unused)
+    _pread_v1: Option<extern "C" fn(*mut c_void, *mut c_void, u32, u64) -> c_int>,
+    _pwrite_v1: Option<extern "C" fn(*mut c_void, *const c_void, u32, u64) -> c_int>,
+    _flush_v1: Option<extern "C" fn(*mut c_void) -> c_int>,
+    _trim_v1: Option<extern "C" fn(*mut c_void, u32, u64) -> c_int>,
+    _zero_v1: Option<extern "C" fn(*mut c_void, u32, u64, c_int) -> c_int>,
+    errno_is_preserved: c_int,
+    dump_plugin: Option<extern "C" fn()>,
+    can_zero: Option<extern "C" fn(*mut c_void) -> c_int>,
+    can_fua: Option<extern "C" fn(*mut c_void) -> c_int>,
+    // API v2: actual pread/pwrite with flags
     pread: Option<extern "C" fn(*mut c_void, *mut c_void, u32, u64, u32) -> c_int>,
     pwrite: Option<extern "C" fn(*mut c_void, *const c_void, u32, u64, u32) -> c_int>,
     flush: Option<extern "C" fn(*mut c_void, u32) -> c_int>,
@@ -207,15 +228,16 @@ pub struct NbdkitPlugin {
     zero: Option<extern "C" fn(*mut c_void, u32, u64, u32) -> c_int>,
     magic_config_key: *const c_char,
     can_multi_conn: Option<extern "C" fn(*mut c_void) -> c_int>,
-    // ... more fields can be added but must be NULL
     can_extents: Option<extern "C" fn(*mut c_void) -> c_int>,
     extents: Option<extern "C" fn(*mut c_void, u32, u64, u32, *mut c_void) -> c_int>,
     can_cache: Option<extern "C" fn(*mut c_void) -> c_int>,
     cache: Option<extern "C" fn(*mut c_void, u32, u64, u32) -> c_int>,
     thread_model: Option<extern "C" fn() -> c_int>,
-    can_fua: Option<extern "C" fn(*mut c_void) -> c_int>,
+    can_fast_zero: Option<extern "C" fn(*mut c_void) -> c_int>,
+    preconnect: Option<extern "C" fn(c_int) -> c_int>,
     get_ready: Option<extern "C" fn() -> c_int>,
-    // after_fork, cleanup, preconnect not needed
+    after_fork: Option<extern "C" fn() -> c_int>,
+    // list_exports, default_export, export_description, cleanup, block_size omitted
 }
 
 unsafe impl Sync for NbdkitPlugin {}
@@ -230,7 +252,7 @@ static PLUGIN_MAGIC_KEY: &[u8] = b"dir\0";
 static PLUGIN: NbdkitPlugin = NbdkitPlugin {
     _struct_size: std::mem::size_of::<NbdkitPlugin>() as u64,
     _api_version: 2,
-    _min_thread_model: 0,
+    _thread_model: 0, // NBDKIT_THREAD_MODEL_SERIALIZE_CONNECTIONS
     name: PLUGIN_NAME.as_ptr() as *const c_char,
     longname: PLUGIN_LONGNAME.as_ptr() as *const c_char,
     version: PLUGIN_VERSION.as_ptr() as *const c_char,
@@ -247,6 +269,15 @@ static PLUGIN: NbdkitPlugin = NbdkitPlugin {
     can_flush: None,
     is_rotational: None,
     can_trim: None,
+    _pread_v1: None,
+    _pwrite_v1: None,
+    _flush_v1: None,
+    _trim_v1: None,
+    _zero_v1: None,
+    errno_is_preserved: 1,
+    dump_plugin: None,
+    can_zero: None,
+    can_fua: None,
     pread: Some(plugin_pread),
     pwrite: None,
     flush: None,
@@ -259,8 +290,10 @@ static PLUGIN: NbdkitPlugin = NbdkitPlugin {
     can_cache: None,
     cache: None,
     thread_model: None,
-    can_fua: None,
+    can_fast_zero: None,
+    preconnect: None,
     get_ready: Some(plugin_get_ready),
+    after_fork: None,
 };
 
 #[no_mangle]
