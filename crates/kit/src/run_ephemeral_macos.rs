@@ -345,9 +345,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let nbd_port = find_available_nbd_port();
     let nbd_container_name =
         start_nbdkit_container(&erofs_cache, nbd_port, &vm_name)?;
-    // VZ framework validates NBD connection at config time; give nbdkit
-    // a moment to fully stabilize after the initial NBDMAGIC handshake.
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(500));
     info!("nbdkit ready on port {}", nbd_port);
 
     // 5. gvproxy + vfkit
@@ -970,8 +968,8 @@ fn start_nbdkit_container(
         bail!("failed to start nbdkit container: {}", stderr.trim());
     }
 
-    info!("waiting for nbdkit on port {} (first run installs packages)...", nbd_port);
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    info!("waiting for nbdkit on port {}...", nbd_port);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], nbd_port)),
