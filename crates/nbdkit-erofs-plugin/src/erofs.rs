@@ -127,8 +127,8 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
             }
         }
 
-        // Write EROFS directory block
-        write_dir_block(&mut dir_data, &entries);
+        // Write EROFS directory blocks (splits at 4096-byte boundaries)
+        write_dir_blocks(&mut dir_data, &entries);
     }
     let dir_data_size = align_up(dir_data.len() as u64, BLOCK_SIZE);
     dir_data.resize(dir_data_size as usize, 0);
@@ -332,52 +332,93 @@ fn write_compact_inode(
     buf[offset + 28..offset + 32].copy_from_slice(&0u32.to_le_bytes());
 }
 
-fn write_dir_block(buf: &mut Vec<u8>, entries: &[DirEntryOnDisk]) {
-    // EROFS directory format: blocks of 4096 bytes
-    // Each block starts with a count of entries in the first 12 bytes
-    // Then sequential entries: [nid(8) + nameoff(2) + file_type(1) + reserved(1)]
-    // Followed by names
+fn write_dir_blocks(buf: &mut Vec<u8>, entries: &[DirEntryOnDisk]) {
+    // EROFS directories are split into 4096-byte blocks.
+    // Each block contains: [headers...][names...]
+    // header = 12 bytes: nid(8) + nameoff(2) + file_type(1) + reserved(1)
+    // nameoff is relative to block start.
 
-    let header_size = 12 * entries.len();
-    let mut names_data = Vec::new();
+    let mut remaining = entries;
 
-    for entry in entries {
-        names_data.extend_from_slice(&entry.name);
+    while !remaining.is_empty() {
+        // Determine how many entries fit in this block
+        let mut count = 0;
+        let mut total_size: usize = 0;
+        for entry in remaining {
+            let entry_size = 12 + entry.name.len();
+            if total_size + entry_size > BLOCK_SIZE as usize && count > 0 {
+                break;
+            }
+            total_size += entry_size;
+            count += 1;
+        }
+
+        let block_entries = &remaining[..count];
+        remaining = &remaining[count..];
+
+        // Write headers
+        let header_total = 12 * block_entries.len();
+        let mut nameoff = header_total as u16;
+        for entry in block_entries {
+            buf.extend_from_slice(&(entry.nid as u64).to_le_bytes());
+            buf.extend_from_slice(&nameoff.to_le_bytes());
+            buf.push(entry.file_type);
+            buf.push(0);
+            nameoff += entry.name.len() as u16;
+        }
+
+        // Write names
+        for entry in block_entries {
+            buf.extend_from_slice(&entry.name);
+        }
+
+        // Pad to block boundary (except last block which is sized by inode.size)
+        if !remaining.is_empty() {
+            let written = total_size;
+            let pad = BLOCK_SIZE as usize - (written % BLOCK_SIZE as usize);
+            if pad < BLOCK_SIZE as usize {
+                buf.resize(buf.len() + pad, 0);
+            }
+        }
     }
-
-    let block_start = buf.len();
-
-    // Write entry headers
-    let mut name_offset = header_size as u16;
-    for entry in entries {
-        // nid (low 32 bits of inode offset in 32-byte units)
-        let nid = entry.nid as u64;
-        buf.extend_from_slice(&nid.to_le_bytes());
-        // nameoff
-        buf.extend_from_slice(&name_offset.to_le_bytes());
-        // file_type
-        buf.push(entry.file_type);
-        // reserved
-        buf.push(0);
-        name_offset += entry.name.len() as u16;
-    }
-
-    // Write names
-    buf.extend_from_slice(&names_data);
 }
 
 fn compute_dir_size(dir: &DirInfo, walk: &WalkResult) -> u64 {
-    let n_entries = 2 + dir.children.len(); // "." + ".." + children
-    let header_size = 12 * n_entries;
-    let mut names_size = 1 + 2; // "." + ".."
+    // Build entry list to accurately compute size including block splits
+    let mut entries = Vec::new();
+    entries.push(DirEntryOnDisk { nid: 0, file_type: EROFS_FT_DIR, name: b".".to_vec() });
+    entries.push(DirEntryOnDisk { nid: 0, file_type: EROFS_FT_DIR, name: b"..".to_vec() });
     for child in &dir.children {
-        names_size += match child {
+        let name_len = match child {
             ChildRef::Dir(di) => walk.dirs[*di].name.len(),
             ChildRef::File(fi) => walk.files[*fi].host_path.file_name().unwrap_or_default().len(),
             ChildRef::Symlink(si) => walk.symlinks[*si].name.len(),
         };
+        entries.push(DirEntryOnDisk { nid: 0, file_type: 0, name: vec![0; name_len] });
     }
-    (header_size + names_size) as u64
+
+    // Simulate block splitting to get total size
+    let mut total = 0u64;
+    let mut remaining = &entries[..];
+    while !remaining.is_empty() {
+        let mut count = 0;
+        let mut block_size = 0usize;
+        for entry in remaining {
+            let entry_size = 12 + entry.name.len();
+            if block_size + entry_size > BLOCK_SIZE as usize && count > 0 {
+                break;
+            }
+            block_size += entry_size;
+            count += 1;
+        }
+        remaining = &remaining[count..];
+        if remaining.is_empty() {
+            total += block_size as u64; // last block: actual size
+        } else {
+            total += BLOCK_SIZE; // full block
+        }
+    }
+    total
 }
 
 fn align_up(val: u64, align: u64) -> u64 {
