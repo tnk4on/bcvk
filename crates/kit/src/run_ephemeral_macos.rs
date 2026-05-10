@@ -340,6 +340,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         "--device".to_string(),
         "virtio-rng".to_string(),
     ];
+
+    let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
+    vfkit_args.extend([
+        "--device".to_string(),
+        format!("virtio-serial,logFilePath={}", serial_log.display()),
+    ]);
+
     if opts.gui {
         vfkit_args.push("--gui".to_string());
     }
@@ -753,6 +760,11 @@ SSHDIR=$(mktemp -d)
 mkdir -p "$SSHDIR/usr/lib/bcvk" "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d"
 cat > "$SSHDIR/usr/lib/bcvk/setup-ssh.sh" << 'SSHSCRIPT'
 #!/bin/bash
+# Populate essential /var directories (ostree images ship /var nearly empty)
+mkdir -p /sysroot/var/roothome /sysroot/var/empty /sysroot/var/log /sysroot/var/tmp
+chmod 700 /sysroot/var/roothome
+chmod 711 /sysroot/var/empty
+# Install SSH authorized_keys
 mkdir -p /sysroot/var/roothome/.ssh
 chmod 700 /sysroot/var/roothome/.ssh
 echo '{pubkey}' > /sysroot/var/roothome/.ssh/authorized_keys
@@ -781,7 +793,10 @@ cat > "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf" <<
 Wants=bcvk-ssh-setup.service
 DROPEOF
 
-# Append CPIO to initramfs
+# Pad and append SSH CPIO to initramfs
+ISIZE=$(stat -c%s "$BUILDDIR/initramfs.img")
+PAD=$(( (4 - ISIZE % 4) % 4 ))
+[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$BUILDDIR/initramfs.img" 2>/dev/null
 (cd "$SSHDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
 rm -rf "$SSHDIR"
 "#,
@@ -806,12 +821,51 @@ cp "$MERGED/usr/lib/modules/$KVER/vmlinuz" "$BUILDDIR/vmlinuz"
 cp "$MERGED/usr/lib/modules/$KVER/initramfs.img" "$BUILDDIR/initramfs.img"
 
 # Append bcvk systemd units CPIO to initramfs
+# These must match the units from crates/kit/src/units/ exactly
 UNITSDIR=$(mktemp -d)
-mkdir -p "$UNITSDIR/etc/systemd/system" "$UNITSDIR/var"
-# /var tmpfs for ephemeral
-cat > "$UNITSDIR/etc/systemd/system/bcvk-var-ephemeral.service" << 'VAREOF'
+UDIR="$UNITSDIR/usr/lib/systemd/system"
+DDIR="$UDIR/initrd-fs.target.d"
+mkdir -p "$UDIR" "$DDIR"
+
+cat > "$UDIR/bcvk-var-ephemeral.service" << 'UNITEOF'
 [Unit]
-Description=Mount ephemeral tmpfs on /sysroot/var
+Description=Setup ephemeral /var from image content
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=sysroot.mount initrd-parse-etc.service
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60
+ExecStart=/usr/bin/mkdir -p /run/var-ephemeral
+ExecStart=/usr/bin/cp -a /sysroot/var/. /run/var-ephemeral/
+ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var
+UNITEOF
+
+cat > "$UDIR/bcvk-etc-overlay.service" << 'UNITEOF'
+[Unit]
+Description=Setup ephemeral /etc overlay
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=sysroot.mount initrd-parse-etc.service
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/bin/mkdir -p /run/etc-lower /run/etc-upper /run/etc-work
+ExecStart=/usr/bin/mount --bind /sysroot/etc /run/etc-lower
+ExecStart=/usr/bin/mount -t overlay overlay -o lowerdir=/run/etc-lower,upperdir=/run/etc-upper,workdir=/run/etc-work,index=off,metacopy=off /sysroot/etc
+UNITEOF
+
+cat > "$UDIR/bcvk-copy-units.service" << 'UNITEOF'
+[Unit]
+Description=Copy bcvk units for post-switch-root on systemd <256
 DefaultDependencies=no
 ConditionPathExists=/etc/initrd-release
 Before=initrd-fs.target
@@ -819,13 +873,28 @@ Before=initrd-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/mount -t tmpfs tmpfs /sysroot/var
-VAREOF
-mkdir -p "$UNITSDIR/etc/systemd/system/initrd-fs.target.d"
-cat > "$UNITSDIR/etc/systemd/system/initrd-fs.target.d/bcvk-var-ephemeral.conf" << 'DROP2EOF'
+ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'
+UNITEOF
+
+cat > "$UDIR/bcvk-journal-stream.service" << 'UNITEOF'
 [Unit]
-Wants=bcvk-var-ephemeral.service
-DROP2EOF
+Description=Stream journal to virtio-serial
+DefaultDependencies=no
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'
+UNITEOF
+
+printf '[Unit]\nWants=bcvk-var-ephemeral.service\n' > "$DDIR/bcvk-var-ephemeral.conf"
+printf '[Unit]\nWants=bcvk-etc-overlay.service\n' > "$DDIR/bcvk-etc-overlay.conf"
+printf '[Unit]\nWants=bcvk-copy-units.service\n' > "$DDIR/bcvk-copy-units.conf"
+
+# Pad initramfs to 4-byte boundary before appending CPIO
+ISIZE=$(stat -c%s "$BUILDDIR/initramfs.img")
+PAD=$(( (4 - ISIZE % 4) % 4 ))
+[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$BUILDDIR/initramfs.img" 2>/dev/null
+
 (cd "$UNITSDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
 rm -rf "$UNITSDIR"
 
