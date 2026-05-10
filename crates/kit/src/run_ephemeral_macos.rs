@@ -1087,7 +1087,13 @@ rm -rf "$UNITSDIR"
 
 # Build ESP
 mkdir -p "$BUILDDIR/esp/EFI/BOOT" "$BUILDDIR/esp/boot"
-cp "$MERGED/usr/lib/bootupd/updates/EFI/fedora/grubaa64.efi" "$BUILDDIR/esp/EFI/BOOT/BOOTAA64.EFI"
+# Find GRUB EFI binary (path differs between Fedora versions)
+GRUB_EFI=$(find "$MERGED/usr/lib" -name "grubaa64.efi" -path "*/EFI/fedora/*" 2>/dev/null | head -1)
+if [ -z "$GRUB_EFI" ]; then
+  echo "ERROR: grubaa64.efi not found in image" >&2
+  exit 1
+fi
+cp "$GRUB_EFI" "$BUILDDIR/esp/EFI/BOOT/BOOTAA64.EFI"
 cp "$BUILDDIR/vmlinuz" "$BUILDDIR/esp/boot/vmlinuz"
 cp "$BUILDDIR/initramfs.img" "$BUILDDIR/esp/boot/initramfs.img"
 
