@@ -1008,17 +1008,11 @@ cp "$MERGED/usr/lib/modules/$KVER/initramfs.img" "$BUILDDIR/initramfs.img"
 # Append bcvk systemd units CPIO to initramfs
 # These must match the units from crates/kit/src/units/ exactly
 UNITSDIR=$(mktemp -d)
-<<<<<<< Updated upstream
 UDIR="$UNITSDIR/usr/lib/systemd/system"
 DDIR="$UDIR/initrd-fs.target.d"
 mkdir -p "$UDIR" "$DDIR"
 
 cat > "$UDIR/bcvk-var-ephemeral.service" << 'UNITEOF'
-=======
-mkdir -p "$UNITSDIR/usr/lib/systemd/system/initrd-fs.target.d"
-# /var tmpfs for ephemeral
-cat > "$UNITSDIR/usr/lib/systemd/system/bcvk-var-ephemeral.service" << 'VAREOF'
->>>>>>> Stashed changes
 [Unit]
 Description=Setup ephemeral /var from image content
 DefaultDependencies=no
@@ -1064,16 +1058,10 @@ Before=initrd-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-<<<<<<< Updated upstream
 ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'
 UNITEOF
 
 cat > "$UDIR/bcvk-journal-stream.service" << 'UNITEOF'
-=======
-ExecStart=/usr/bin/mount -t tmpfs tmpfs /sysroot/var
-VAREOF
-cat > "$UNITSDIR/usr/lib/systemd/system/initrd-fs.target.d/bcvk-var-ephemeral.conf" << 'DROP2EOF'
->>>>>>> Stashed changes
 [Unit]
 Description=Stream journal to virtio-serial
 DefaultDependencies=no
