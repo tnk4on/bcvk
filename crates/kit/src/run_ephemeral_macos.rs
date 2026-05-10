@@ -239,8 +239,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
 
     fs::create_dir_all(&cache_base)?;
-    let vm_build_dir = format!("/var/tmp/bcvk/{}", vm_name);
-    let disk_image = format!("{}/disk.raw", vm_build_dir);
+    let disk_cache = format!("/var/tmp/bcvk/disk-{}.raw", digest_short);
     let erofs_cache = format!("/var/tmp/bcvk/rootfs-{}.erofs", digest_short);
 
     // Generate SSH keypair on macOS host
@@ -262,7 +261,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             .to_string();
     }
 
-    // Build EROFS + EFI disk image entirely inside podman machine
     let mut cmdline_parts: Vec<&str> = vec![
         "root=/dev/vda2",
         "ro",
@@ -278,22 +276,38 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
 
-    info!("building EFI disk image...");
-    build_efi_disk(
-        &machine,
-        rootful,
-        &opts.image,
-        &erofs_cache,
-        &vm_build_dir,
-        &cmdline,
-        &ssh_pubkey,
-    )?;
+    // Build cached disk image (EROFS + ESP + GPT) if not present
+    let disk_exists = Command::new("podman")
+        .args(["machine", "ssh", &machine, "test", "-f", &disk_cache])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !disk_exists {
+        info!("building EFI disk image...");
+        build_efi_disk(
+            &machine,
+            rootful,
+            &opts.image,
+            &erofs_cache,
+            &disk_cache,
+            &cmdline,
+            &ssh_pubkey,
+        )?;
+    } else {
+        info!("using cached disk: {}", disk_cache);
+        // Update only the initramfs inside the cached disk's ESP
+        if !ssh_pubkey.is_empty() {
+            update_esp_initramfs(&machine, &disk_cache, &cmdline, &ssh_pubkey)?;
+        }
+    }
     info!("EFI disk image ready");
 
     // Start nbdkit container serving the disk image via NBD
     let nbd_port = find_available_nbd_port();
     let nbd_container_name =
-        start_nbdkit_container(&disk_image, nbd_port, &vm_name)?;
+        start_nbdkit_container(&disk_cache, nbd_port, &vm_name)?;
     std::thread::sleep(Duration::from_secs(1));
     info!("nbdkit ready on port {}", nbd_port);
 
@@ -721,6 +735,177 @@ fn create_erofs_image(
     Ok(())
 }
 
+/// Update the initramfs inside a cached disk image's ESP with new SSH keys.
+///
+/// Mounts the ESP partition via loopback, replaces the initramfs with the
+/// original plus fresh CPIO archives for bcvk units and SSH setup.
+fn update_esp_initramfs(
+    machine: &str,
+    disk_path: &str,
+    cmdline: &str,
+    ssh_pubkey: &str,
+) -> Result<()> {
+    let script = format!(
+        r#"
+set -e
+DISK="{disk_path}"
+
+# Get ESP partition offset
+ESP_START=$(sfdisk -J "$DISK" | python3 -c "import sys,json; print(json.load(sys.stdin)['partitiontable']['partitions'][0]['start'])")
+ESP_OFFSET=$((ESP_START * 512))
+
+# Mount ESP from disk image
+ESPMNT=$(mktemp -d)
+mount -o loop,offset=$ESP_OFFSET "$DISK" "$ESPMNT"
+
+# Get original initramfs from the image (stored alongside in cache)
+ORIGDIR=$(dirname "$DISK")
+if [ ! -f "$ORIGDIR/initramfs-orig.img" ]; then
+    cp "$ESPMNT/boot/initramfs.img" "$ORIGDIR/initramfs-orig.img"
+fi
+cp "$ORIGDIR/initramfs-orig.img" "$ESPMNT/boot/initramfs.img"
+
+# Pad to 4-byte boundary
+ISIZE=$(stat -c%s "$ESPMNT/boot/initramfs.img")
+PAD=$(( (4 - ISIZE % 4) % 4 ))
+[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$ESPMNT/boot/initramfs.img" 2>/dev/null
+
+# Append bcvk units CPIO
+UNITSDIR=$(mktemp -d)
+UDIR="$UNITSDIR/usr/lib/systemd/system"
+DDIR="$UDIR/initrd-fs.target.d"
+mkdir -p "$UDIR" "$DDIR"
+
+cat > "$UDIR/bcvk-var-ephemeral.service" << 'UNITEOF'
+[Unit]
+Description=Setup ephemeral /var from image content
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=sysroot.mount initrd-parse-etc.service
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60
+ExecStart=/usr/bin/mkdir -p /run/var-ephemeral
+ExecStart=/usr/bin/cp -a /sysroot/var/. /run/var-ephemeral/
+ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var
+UNITEOF
+
+cat > "$UDIR/bcvk-etc-overlay.service" << 'UNITEOF'
+[Unit]
+Description=Setup ephemeral /etc overlay
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=sysroot.mount initrd-parse-etc.service
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/bin/mkdir -p /run/etc-lower /run/etc-upper /run/etc-work
+ExecStart=/usr/bin/mount --bind /sysroot/etc /run/etc-lower
+ExecStart=/usr/bin/mount -t overlay overlay -o lowerdir=/run/etc-lower,upperdir=/run/etc-upper,workdir=/run/etc-work,index=off,metacopy=off /sysroot/etc
+UNITEOF
+
+cat > "$UDIR/bcvk-copy-units.service" << 'UNITEOF'
+[Unit]
+Description=Copy bcvk units for post-switch-root on systemd <256
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'
+UNITEOF
+
+cat > "$UDIR/bcvk-journal-stream.service" << 'UNITEOF'
+[Unit]
+Description=Stream journal to virtio-serial
+DefaultDependencies=no
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'
+UNITEOF
+
+printf '[Unit]\nWants=bcvk-var-ephemeral.service\n' > "$DDIR/bcvk-var-ephemeral.conf"
+printf '[Unit]\nWants=bcvk-etc-overlay.service\n' > "$DDIR/bcvk-etc-overlay.conf"
+printf '[Unit]\nWants=bcvk-copy-units.service\n' > "$DDIR/bcvk-copy-units.conf"
+
+(cd "$UNITSDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$ESPMNT/boot/initramfs.img"
+rm -rf "$UNITSDIR"
+
+# Append SSH CPIO
+SSHDIR=$(mktemp -d)
+mkdir -p "$SSHDIR/usr/lib/bcvk" "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d"
+cat > "$SSHDIR/usr/lib/bcvk/setup-ssh.sh" << 'SSHSCRIPT'
+#!/bin/bash
+mkdir -p /sysroot/var/roothome /sysroot/var/empty /sysroot/var/log /sysroot/var/tmp
+chmod 700 /sysroot/var/roothome
+chmod 711 /sysroot/var/empty
+mkdir -p /sysroot/var/roothome/.ssh
+chmod 700 /sysroot/var/roothome/.ssh
+echo '{pubkey}' > /sysroot/var/roothome/.ssh/authorized_keys
+chmod 600 /sysroot/var/roothome/.ssh/authorized_keys
+chown -R 0:0 /sysroot/var/roothome/.ssh
+SSHSCRIPT
+chmod 755 "$SSHDIR/usr/lib/bcvk/setup-ssh.sh"
+
+cat > "$SSHDIR/usr/lib/systemd/system/bcvk-ssh-setup.service" << 'SVCEOF'
+[Unit]
+Description=Setup SSH authorized_keys for root
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Before=initrd-fs.target
+After=bcvk-var-ephemeral.service
+Requires=bcvk-var-ephemeral.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh
+SVCEOF
+
+cat > "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf" << 'DROPEOF'
+[Unit]
+Wants=bcvk-ssh-setup.service
+DROPEOF
+
+ISIZE=$(stat -c%s "$ESPMNT/boot/initramfs.img")
+PAD=$(( (4 - ISIZE % 4) % 4 ))
+[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$ESPMNT/boot/initramfs.img" 2>/dev/null
+(cd "$SSHDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$ESPMNT/boot/initramfs.img"
+rm -rf "$SSHDIR"
+
+sync
+umount "$ESPMNT"
+rmdir "$ESPMNT"
+"#,
+        disk_path = disk_path,
+        pubkey = ssh_pubkey,
+    );
+
+    let script_path = format!("/private/tmp/bcvk/update-esp-{}.sh", std::process::id());
+    fs::write(&script_path, &script)?;
+    let output = Command::new("podman")
+        .args(["machine", "ssh", machine, "--", "bash", &script_path])
+        .output()
+        .context("updating ESP initramfs")?;
+    let _ = fs::remove_file(&script_path);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("ESP initramfs update failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 /// Build a GPT disk image with ESP + EROFS rootfs for EFI boot.
 ///
 /// All operations run inside the podman machine on local xfs (/var/tmp).
@@ -730,7 +915,7 @@ fn build_efi_disk(
     rootful: bool,
     image: &str,
     erofs_cache: &str,
-    build_dir: &str,
+    disk_path: &str,
     cmdline: &str,
     ssh_pubkey: &str,
 ) -> Result<()> {
@@ -807,9 +992,9 @@ rm -rf "$SSHDIR"
     let script = format!(
         r#"
 set -e
-BUILDDIR="{build_dir}"
-rm -rf "$BUILDDIR"
-mkdir -p "$BUILDDIR"
+DISKPATH="{disk_path}"
+BUILDDIR=$(mktemp -d /var/tmp/bcvk/build.XXXXXX)
+mkdir -p "$(dirname "$DISKPATH")"
 
 # Mount container image
 {mount_cmd}
@@ -947,10 +1132,12 @@ SFDISKEOF
 dd if="$BUILDDIR/esp.img" of="$BUILDDIR/disk.raw" bs=512 seek=$ESP_START conv=notrunc status=none
 dd if="{erofs_cache}" of="$BUILDDIR/disk.raw" bs=512 seek=$ROOTFS_START conv=notrunc status=none
 
-# Cleanup temp files
-rm -rf "$BUILDDIR/esp" "$BUILDDIR/esp-mnt" "$BUILDDIR/esp.img" "$BUILDDIR/vmlinuz" "$BUILDDIR/initramfs.img"
+# Save original initramfs for future ESP updates, move disk to cache path
+cp "$BUILDDIR/initramfs.img" "$(dirname "$DISKPATH")/initramfs-orig.img"
+mv "$BUILDDIR/disk.raw" "$DISKPATH"
+rm -rf "$BUILDDIR"
 "#,
-        build_dir = build_dir,
+        disk_path = disk_path,
         mount_cmd = if rootful {
             format!("MERGED=$(podman image mount {})", image)
         } else {
