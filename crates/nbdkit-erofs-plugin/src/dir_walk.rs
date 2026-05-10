@@ -23,12 +23,12 @@ pub struct DirInfo {
     pub gid: u32,
     pub mtime: u64,
     pub inode_id: u64,
-    pub children_dirs: Vec<usize>,
-    pub children_files: Vec<usize>,
+    pub children: Vec<ChildRef>,
 }
 
 #[derive(Debug)]
 pub struct SymlinkEntry {
+    pub name: Vec<u8>,
     pub target: Vec<u8>,
     pub mode: u32,
     pub uid: u32,
@@ -37,8 +37,9 @@ pub struct SymlinkEntry {
     pub inode_id: u64,
 }
 
-#[derive(Debug)]
-pub enum FsEntry {
+/// Child entry in a directory: either a file index, dir index, or symlink index
+#[derive(Debug, Clone, Copy)]
+pub enum ChildRef {
     File(usize),
     Dir(usize),
     Symlink(usize),
@@ -84,8 +85,7 @@ fn walk_recursive(
         gid: meta.gid(),
         mtime: meta.mtime() as u64,
         inode_id: dir_inode,
-        children_dirs: Vec::new(),
-        children_files: Vec::new(),
+        children: Vec::new(),
     });
 
     let mut entries: Vec<_> = fs::read_dir(dir)?
@@ -100,14 +100,16 @@ fn walk_recursive(
 
         if ft.is_dir() {
             let child_di = walk_recursive(root, &path, result, next_inode)?;
-            result.dirs[di].children_dirs.push(child_di);
+            result.dirs[di].children.push(ChildRef::Dir(child_di));
         } else if ft.is_symlink() {
             let target = fs::read_link(&path)?;
             let target_bytes = target.as_os_str().as_encoded_bytes().to_vec();
+            let name = entry.file_name().as_encoded_bytes().to_vec();
             let si = result.symlinks.len();
             let inode = *next_inode;
             *next_inode += 1;
             result.symlinks.push(SymlinkEntry {
+                name,
                 target: target_bytes,
                 mode: meta.mode(),
                 uid: meta.uid(),
@@ -115,7 +117,7 @@ fn walk_recursive(
                 mtime: meta.mtime() as u64,
                 inode_id: inode,
             });
-            result.dirs[di].children_files.push(si | (1 << 31));
+            result.dirs[di].children.push(ChildRef::Symlink(si));
         } else if ft.is_file() {
             let fi = result.files.len();
             let inode = *next_inode;
@@ -130,7 +132,7 @@ fn walk_recursive(
                 nlink: meta.nlink() as u32,
                 inode_id: inode,
             });
-            result.dirs[di].children_files.push(fi);
+            result.dirs[di].children.push(ChildRef::File(fi));
         }
     }
 
