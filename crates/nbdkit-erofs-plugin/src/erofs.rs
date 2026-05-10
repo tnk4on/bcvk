@@ -1,4 +1,4 @@
-use crate::dir_walk::{DirInfo, FileEntry, SymlinkEntry, WalkResult};
+use crate::dir_walk::{ChildRef, DirInfo, FileEntry, SymlinkEntry, WalkResult};
 use crate::regions::{Region, RegionType};
 use std::sync::Arc;
 
@@ -96,42 +96,34 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
             name: b"..".to_vec(),
         });
 
-        // child directories
-        for &child_di in &dir.children_dirs {
-            let child = &walk.dirs[child_di];
-            entries.push(DirEntryOnDisk {
-                nid: child.inode_id,
-                file_type: EROFS_FT_DIR,
-                name: child.name.as_encoded_bytes().to_vec(),
-            });
-        }
-
-        // child files and symlinks
-        for &child_idx in &dir.children_files {
-            if child_idx & (1 << 31) != 0 {
-                // symlink
-                let si = child_idx & !(1 << 31);
-                let symlink = &walk.symlinks[si];
-                // We need the name, but symlink doesn't store it
-                // This is a design issue - we need to store names in walk
-                entries.push(DirEntryOnDisk {
-                    nid: symlink.inode_id,
-                    file_type: EROFS_FT_SYMLINK,
-                    name: b"symlink".to_vec(), // placeholder
-                });
-            } else {
-                let file = &walk.files[child_idx];
-                let name = file
-                    .host_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .as_encoded_bytes()
-                    .to_vec();
-                entries.push(DirEntryOnDisk {
-                    nid: file.inode_id,
-                    file_type: EROFS_FT_REG_FILE,
-                    name,
-                });
+        // children (sorted by name in walk)
+        for child in &dir.children {
+            match child {
+                ChildRef::Dir(di) => {
+                    let child_dir = &walk.dirs[*di];
+                    entries.push(DirEntryOnDisk {
+                        nid: child_dir.inode_id,
+                        file_type: EROFS_FT_DIR,
+                        name: child_dir.name.as_encoded_bytes().to_vec(),
+                    });
+                }
+                ChildRef::File(fi) => {
+                    let file = &walk.files[*fi];
+                    entries.push(DirEntryOnDisk {
+                        nid: file.inode_id,
+                        file_type: EROFS_FT_REG_FILE,
+                        name: file.host_path.file_name().unwrap_or_default()
+                            .as_encoded_bytes().to_vec(),
+                    });
+                }
+                ChildRef::Symlink(si) => {
+                    let symlink = &walk.symlinks[*si];
+                    entries.push(DirEntryOnDisk {
+                        nid: symlink.inode_id,
+                        file_type: EROFS_FT_SYMLINK,
+                        name: symlink.name.clone(),
+                    });
+                }
             }
         }
 
@@ -155,6 +147,19 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
                 size: file.size,
             });
             current_data_offset = aligned_offset + align_up(file.size, BLOCK_SIZE);
+        }
+    }
+
+    // Symlink targets also need data blocks
+    for (si, symlink) in walk.symlinks.iter().enumerate() {
+        if !symlink.target.is_empty() {
+            let aligned_offset = align_up(current_data_offset, BLOCK_SIZE);
+            file_regions.push(FileRegion {
+                file_index: walk.files.len() + si, // files.len() + symlink index
+                offset_in_erofs: aligned_offset,
+                size: symlink.target.len() as u64,
+            });
+            current_data_offset = aligned_offset + align_up(symlink.target.len() as u64, BLOCK_SIZE);
         }
     }
 
@@ -185,7 +190,7 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
             dir.gid as u16,
             dir_size as u32,
             dir.mtime as u32,
-            2 + dir.children_dirs.len() as u16, // nlink: 2 + subdirs
+            2 + dir.children.iter().filter(|c| matches!(c, ChildRef::Dir(_))).count() as u16,
             EROFS_INODE_FLAT_PLAIN,
             (dir_blocks_offset / BLOCK_SIZE + dir_block) as u32,
         );
@@ -213,8 +218,19 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
         );
     }
 
-    // Symlinks (inline data)
+    // Symlinks: FlatPlain with target in data region
+    // File regions for symlinks start after file regions
+    let file_region_count = walk.files.iter().filter(|f| f.size > 0).count();
+    let mut sym_fr_idx = file_region_count;
     for symlink in &walk.symlinks {
+        let data_block = if !symlink.target.is_empty() {
+            let fr = &file_regions[sym_fr_idx];
+            sym_fr_idx += 1;
+            (fr.offset_in_erofs / BLOCK_SIZE) as u32
+        } else {
+            0
+        };
+
         write_compact_inode(
             &mut metadata,
             inode_table_offset as usize + (symlink.inode_id as usize * 32),
@@ -224,10 +240,9 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
             symlink.target.len() as u32,
             symlink.mtime as u32,
             1,
-            EROFS_INODE_FLAT_INLINE,
-            0,
+            EROFS_INODE_FLAT_PLAIN,
+            data_block,
         );
-        // TODO: write inline symlink target data after inode
     }
 
     // Write directory data
@@ -352,23 +367,15 @@ fn write_dir_block(buf: &mut Vec<u8>, entries: &[DirEntryOnDisk]) {
 }
 
 fn compute_dir_size(dir: &DirInfo, walk: &WalkResult) -> u64 {
-    let n_entries = 2 + dir.children_dirs.len() + dir.children_files.len();
+    let n_entries = 2 + dir.children.len(); // "." + ".." + children
     let header_size = 12 * n_entries;
     let mut names_size = 1 + 2; // "." + ".."
-    for &child_di in &dir.children_dirs {
-        names_size += walk.dirs[child_di].name.len();
-    }
-    for &child_idx in &dir.children_files {
-        if child_idx & (1 << 31) != 0 {
-            names_size += 7; // "symlink" placeholder
-        } else {
-            let file = &walk.files[child_idx];
-            names_size += file
-                .host_path
-                .file_name()
-                .unwrap_or_default()
-                .len();
-        }
+    for child in &dir.children {
+        names_size += match child {
+            ChildRef::Dir(di) => walk.dirs[*di].name.len(),
+            ChildRef::File(fi) => walk.files[*fi].host_path.file_name().unwrap_or_default().len(),
+            ChildRef::Symlink(si) => walk.symlinks[*si].name.len(),
+        };
     }
     (header_size + names_size) as u64
 }
@@ -377,7 +384,8 @@ fn align_up(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }
 
-pub fn build_erofs_regions(layout: &ErofsLayout, files: &[FileEntry]) -> Vec<Region> {
+pub fn build_erofs_regions(layout: &ErofsLayout, walk: &WalkResult) -> Vec<Region> {
+    let files = &walk.files;
     let mut regions = Vec::new();
 
     // Metadata region (superblock + inode table + dir blocks)
@@ -387,29 +395,41 @@ pub fn build_erofs_regions(layout: &ErofsLayout, files: &[FileEntry]) -> Vec<Reg
         region_type: RegionType::Data(Arc::new(layout.metadata.clone())),
     });
 
-    // File data regions
+    // File and symlink data regions
     for fr in &layout.file_regions {
-        let meta_end = layout.metadata.len() as u64;
-        // Padding between metadata and first file (or between files)
-        if fr.offset_in_erofs > regions.last().map(|r| r.start + r.len).unwrap_or(0) {
-            let gap_start = regions.last().map(|r| r.start + r.len).unwrap_or(0);
-            let gap_len = fr.offset_in_erofs - gap_start;
-            if gap_len > 0 {
+        // Padding gap
+        let current_end = regions.last().map(|r| r.start + r.len).unwrap_or(0);
+        if fr.offset_in_erofs > current_end {
+            regions.push(Region {
+                start: current_end,
+                len: fr.offset_in_erofs - current_end,
+                region_type: RegionType::Zero,
+            });
+        }
+
+        if fr.file_index < files.len() {
+            // Regular file: read from host
+            regions.push(Region {
+                start: fr.offset_in_erofs,
+                len: fr.size,
+                region_type: RegionType::File {
+                    path: files[fr.file_index].host_path.clone(),
+                },
+            });
+        } else {
+            // Symlink target: inline data
+            let sym_idx = fr.file_index - files.len();
+            if sym_idx < walk.symlinks.len() {
+                // Pad symlink target to fill the block
+                let mut data = walk.symlinks[sym_idx].target.clone();
+                data.resize(fr.size as usize, 0);
                 regions.push(Region {
-                    start: gap_start,
-                    len: gap_len,
-                    region_type: RegionType::Zero,
+                    start: fr.offset_in_erofs,
+                    len: fr.size,
+                    region_type: RegionType::Data(Arc::new(data)),
                 });
             }
         }
-
-        regions.push(Region {
-            start: fr.offset_in_erofs,
-            len: fr.size,
-            region_type: RegionType::File {
-                path: files[fr.file_index].host_path.clone(),
-            },
-        });
 
         // Padding to block boundary
         let end = fr.offset_in_erofs + fr.size;

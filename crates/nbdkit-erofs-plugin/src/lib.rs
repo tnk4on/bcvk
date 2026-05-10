@@ -110,7 +110,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
     ));
 
     // Build regions
-    let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk.files);
+    let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk);
 
     if let Some(esp_path) = &state.esp_path {
         // GPT + ESP + EROFS disk
