@@ -1,11 +1,11 @@
-//! Ephemeral VM launch flow for macOS using vfkit + SquashFS.
+//! Ephemeral VM launch flow for macOS using vfkit + EROFS.
 //!
 //! Boot flow:
 //! 1. Extract kernel + initramfs from container image
-//! 2. Create SquashFS rootfs (lz4, cached by digest)
+//! 2. Create EROFS rootfs (cached by digest)
 //! 3. Decompress vmlinuz PE+zstd → uncompressed ARM64 Image
 //! 4. Append bcvk units CPIO to initramfs (/etc overlay + /var tmpfs + SSH)
-//! 5. Launch vfkit with virtio-blk (SquashFS) + virtio-net (gvproxy)
+//! 5. Launch vfkit with NBD (EROFS) + virtio-net (gvproxy)
 //!
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
@@ -216,7 +216,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 
     let vfkit_bin = find_vfkit()?;
-    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + SquashFS)");
+    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + EROFS)");
 
     let cache_base = std::path::PathBuf::from("/private/tmp/bcvk");
     fs::create_dir_all(&cache_base)?;
