@@ -1,61 +1,35 @@
 //! CPIO newc archive generation for initramfs append.
 
-const CPIO_MAGIC: &[u8; 6] = b"070701";
-const CPIO_TRAILER: &str = "TRAILER!!!";
+use std::io::Write;
 
-fn align4(n: usize) -> usize {
-    (n + 3) & !3
-}
-
-fn write_cpio_entry(out: &mut Vec<u8>, path: &str, mode: u32, data: &[u8]) {
-    // Start at 100 to avoid collision with real filesystem inodes (0-based).
-    // Each CPIO entry gets a unique inode; the actual value is not significant.
-    static INODE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
-    let ino = INODE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let namesize = path.len() + 1; // includes NUL
-    let filesize = data.len();
-    let header = format!(
-        "{}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
-        std::str::from_utf8(CPIO_MAGIC).unwrap(),
-        ino,      // ino
-        mode,     // mode
-        0u32,     // uid
-        0u32,     // gid
-        1u32,     // nlink
-        0u32,     // mtime
-        filesize, // filesize
-        0u32,     // devmajor
-        0u32,     // devminor
-        0u32,     // rdevmajor
-        0u32,     // rdevminor
-        namesize, // namesize
-        0u32,     // check
-    );
-    out.extend_from_slice(header.as_bytes());
-    out.extend_from_slice(path.as_bytes());
-    out.push(0); // NUL terminator
-    let hdr_plus_name = 110 + namesize;
-    let pad_name = align4(hdr_plus_name) - hdr_plus_name;
-    out.extend(std::iter::repeat(0u8).take(pad_name));
-    out.extend_from_slice(data);
-    let pad_data = align4(filesize) - filesize;
-    out.extend(std::iter::repeat(0u8).take(pad_data));
-}
+use cpio::newc::Builder as NewcBuilder;
+use cpio::newc::ModeFileType;
 
 fn write_dir(out: &mut Vec<u8>, path: &str) {
-    write_cpio_entry(out, path, 0o040755, &[]);
+    NewcBuilder::new(path)
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Directory)
+        .write(out, 0)
+        .finish()
+        .unwrap();
 }
 
 fn write_file(out: &mut Vec<u8>, path: &str, data: &[u8]) {
-    write_cpio_entry(out, path, 0o100644, data);
+    let mut w = NewcBuilder::new(path)
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular)
+        .write(out, data.len() as u32);
+    w.write_all(data).unwrap();
+    w.finish().unwrap();
 }
 
 fn write_file_exec(out: &mut Vec<u8>, path: &str, data: &[u8]) {
-    write_cpio_entry(out, path, 0o100755, data);
-}
-
-fn write_trailer(out: &mut Vec<u8>) {
-    write_cpio_entry(out, CPIO_TRAILER, 0, &[]);
+    let mut w = NewcBuilder::new(path)
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular)
+        .write(out, data.len() as u32);
+    w.write_all(data).unwrap();
+    w.finish().unwrap();
 }
 
 pub fn build_units_cpio() -> Vec<u8> {
@@ -87,7 +61,9 @@ pub fn build_units_cpio() -> Vec<u8> {
           ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var\n",
     );
 
-    write_file(&mut out, "usr/lib/systemd/system/bcvk-etc-overlay.service",
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/bcvk-etc-overlay.service",
         b"[Unit]\n\
           Description=Setup ephemeral /etc overlay\n\
           DefaultDependencies=no\n\
@@ -102,9 +78,12 @@ pub fn build_units_cpio() -> Vec<u8> {
           TimeoutStartSec=30\n\
           ExecStart=/usr/bin/mkdir -p /run/etc-lower /run/etc-upper /run/etc-work\n\
           ExecStart=/usr/bin/mount --bind /sysroot/etc /run/etc-lower\n\
-          ExecStart=/usr/bin/mount -t overlay overlay -o lowerdir=/run/etc-lower,upperdir=/run/etc-upper,workdir=/run/etc-work,index=off,metacopy=off /sysroot/etc\n");
+          ExecStart=/usr/bin/mount -t overlay overlay -o lowerdir=/run/etc-lower,upperdir=/run/etc-upper,workdir=/run/etc-work,index=off,metacopy=off /sysroot/etc\n",
+    );
 
-    write_file(&mut out, "usr/lib/systemd/system/bcvk-copy-units.service",
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/bcvk-copy-units.service",
         b"[Unit]\n\
           Description=Copy bcvk units for post-switch-root on systemd <256\n\
           DefaultDependencies=no\n\
@@ -114,16 +93,20 @@ pub fn build_units_cpio() -> Vec<u8> {
           [Service]\n\
           Type=oneshot\n\
           RemainAfterExit=yes\n\
-          ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'\n");
+          ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'\n",
+    );
 
-    write_file(&mut out, "usr/lib/systemd/system/bcvk-journal-stream.service",
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/bcvk-journal-stream.service",
         b"[Unit]\n\
           Description=Stream journal to virtio-serial\n\
           DefaultDependencies=no\n\
           \n\
           [Service]\n\
           Type=simple\n\
-          ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'\n");
+          ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'\n",
+    );
 
     write_file(
         &mut out,
@@ -141,8 +124,7 @@ pub fn build_units_cpio() -> Vec<u8> {
         b"[Unit]\nWants=bcvk-copy-units.service\n",
     );
 
-    write_trailer(&mut out);
-    out
+    cpio::newc::trailer(out).unwrap()
 }
 
 pub fn build_ssh_cpio(pubkey: &str) -> Vec<u8> {
@@ -196,6 +178,5 @@ pub fn build_ssh_cpio(pubkey: &str) -> Vec<u8> {
         b"[Unit]\nWants=bcvk-ssh-setup.service\n",
     );
 
-    write_trailer(&mut out);
-    out
+    cpio::newc::trailer(out).unwrap()
 }
