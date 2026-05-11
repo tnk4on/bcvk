@@ -1,8 +1,11 @@
 //! nbdkit EROFS plugin management for macOS ephemeral VMs.
 
+use color_eyre::{
+    eyre::{bail, Context},
+    Result,
+};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use color_eyre::{eyre::{bail, Context}, Result};
 use tracing::info;
 
 use crate::run_ephemeral_macos::detect_machine_name;
@@ -14,12 +17,17 @@ const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so"
 pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Result<String> {
     let output = if rootful {
         Command::new("podman")
-            .args(["machine", "ssh", machine, "--", "podman", "image", "mount", image])
+            .args([
+                "machine", "ssh", machine, "--", "podman", "image", "mount", image,
+            ])
             .output()
             .context("podman image mount")?
     } else {
         Command::new("podman")
-            .args(["machine", "ssh", machine, "--", "podman", "unshare", "podman", "image", "mount", image])
+            .args([
+                "machine", "ssh", machine, "--", "podman", "unshare", "podman", "image", "mount",
+                image,
+            ])
             .output()
             .context("podman image mount")?
     };
@@ -42,35 +50,49 @@ pub(crate) fn start_nbdkit_erofs_plugin(
     let container_name = format!("bcvk-nbd-{}", vm_name);
 
     let _ = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", "podman", "rm", "-f", &container_name])
+        .args([
+            "machine",
+            "ssh",
+            machine,
+            "--",
+            "podman",
+            "rm",
+            "-f",
+            &container_name,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 
-    let escaped_cmdline = cmdline.replace('\'', "'\\''");
-    let mut ssh_param_str = String::new();
+    fn shell_escape(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    let cmdline_esc = shell_escape(&format!("cmdline={}", cmdline));
+    let dir_esc = shell_escape(&format!("dir={}", merged_path));
+
+    let mut ssh_param = String::new();
     if !ssh_pubkey.is_empty() {
-        let escaped_pubkey = ssh_pubkey.replace('\'', "'\\''");
-        ssh_param_str = format!(" 'ssh_pubkey={}'", escaped_pubkey);
+        ssh_param = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
     }
 
     let podman_cmd = format!(
-        "podman run -d --name {} --security-opt label=disable \
-         -p {}:10809 \
-         -v {}:{}:ro \
-         -v {}:/plugin.so:ro \
+        "podman run -d --name {name} --security-opt label=disable \
+         -p {port}:10809 \
+         -v {merged}:{merged}:ro \
+         -v {plugin}:/plugin.so:ro \
          -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
          -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
          quay.io/fedora/fedora:latest \
          nbdkit -f -p 10809 -r /plugin.so \
-         dir={} \
-         'cmdline={}'{}",
-        container_name, nbd_port,
-        merged_path, merged_path,
-        NBDKIT_EROFS_PLUGIN_PATH,
-        merged_path,
-        escaped_cmdline,
-        ssh_param_str,
+         {dir} {cmdline}{ssh}",
+        name = container_name,
+        port = nbd_port,
+        merged = merged_path,
+        plugin = NBDKIT_EROFS_PLUGIN_PATH,
+        dir = dir_esc,
+        cmdline = cmdline_esc,
+        ssh = ssh_param,
     );
 
     let output = Command::new("podman")
@@ -99,11 +121,23 @@ pub(crate) fn start_nbdkit_erofs_plugin(
         }
         if std::time::Instant::now() > deadline {
             let _ = Command::new("podman")
-                .args(["machine", "ssh", machine, "--", "podman", "rm", "-f", &container_name])
+                .args([
+                    "machine",
+                    "ssh",
+                    machine,
+                    "--",
+                    "podman",
+                    "rm",
+                    "-f",
+                    &container_name,
+                ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            bail!("nbdkit erofs plugin did not become ready on port {}", nbd_port);
+            bail!(
+                "nbdkit erofs plugin did not become ready on port {}",
+                nbd_port
+            );
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -135,7 +169,16 @@ pub fn find_available_nbd_port() -> u16 {
 pub fn stop_nbdkit_container(container_name: &str) {
     if let Ok(machine) = detect_machine_name() {
         let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "podman", "rm", "-f", container_name])
+            .args([
+                "machine",
+                "ssh",
+                &machine,
+                "--",
+                "podman",
+                "rm",
+                "-f",
+                container_name,
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();

@@ -5,7 +5,7 @@ mod gpt;
 mod initramfs;
 mod regions;
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -215,41 +215,13 @@ pub extern "C" fn plugin_get_ready() -> c_int {
     );
 
     // Build GPT disk with ESP + EROFS
-    match gpt::build_gpt_disk(esp_regions, esp_size, erofs_regions, erofs_layout.total_size) {
+    match gpt::build_gpt_disk(
+        esp_regions,
+        esp_size,
+        erofs_regions,
+        erofs_layout.total_size,
+    ) {
         Ok(disk) => {
-            // Check for gaps in regions
-            let mut gap_count = 0u32;
-            let mut first_gap = String::new();
-            for i in 1..disk.regions.len() {
-                let prev_end = disk.regions[i-1].start + disk.regions[i-1].len;
-                let next_start = disk.regions[i].start;
-                if next_start != prev_end {
-                    gap_count += 1;
-                    if gap_count <= 3 {
-                        first_gap.push_str(&format!("  gap at region[{}]: prev_end={} next_start={} gap={}\n",
-                            i, prev_end, next_start, next_start as i64 - prev_end as i64));
-                    }
-                }
-            }
-            let mut dbg = format!(
-                "dirs={} files={} symlinks={} erofs_meta={}B erofs_size={}B esp_size={}B total={}B\nkernel={:?}\ninitrd={:?} initrd_size={} initrd_total={}\ngrub={:?} grub_size={}\nregions={}\n",
-                walk.dirs.len(), walk.files.len(), walk.symlinks.len(),
-                erofs_layout.metadata.len(), erofs_layout.total_size,
-                esp_size, disk.total_size,
-                kernel_path,
-                initrd_path, initrd_size, initrd_total,
-                grub_path, grub_size,
-                disk.regions.len(),
-            );
-            dbg.push_str(&format!("gaps={}\n{}", gap_count, first_gap));
-            for (i, r) in disk.regions.iter().take(30).enumerate() {
-                dbg.push_str(&format!("  region[{}]: start={} len={} type={}\n", i, r.start, r.len, match &r.region_type {
-                    regions::RegionType::Data(_) => "Data".to_string(),
-                    regions::RegionType::File { path } => format!("File({:?})", path),
-                    regions::RegionType::Zero => "Zero".to_string(),
-                }));
-            }
-            let _ = std::fs::write("/tmp/erofs-plugin-debug.txt", dbg);
             state.regions = disk.regions;
             state.total_size = disk.total_size;
         }

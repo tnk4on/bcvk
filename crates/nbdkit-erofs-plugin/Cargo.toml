@@ -9,5 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libc = "0.2"
-zerocopy = { version = "0.8", features = ["derive"] }
 crc32fast = "1.4"
