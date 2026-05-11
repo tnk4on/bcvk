@@ -21,8 +21,6 @@ use color_eyre::{
 };
 use tracing::{debug, info};
 
-/// Path to the nbdkit EROFS plugin shared library inside podman machine.
-const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so";
 
 /// Base directory for ephemeral VM state on macOS host.
 pub fn ephemeral_base_dir() -> std::path::PathBuf {
@@ -191,7 +189,7 @@ impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
         if let Some(ref name) = self.nbd_container {
-            stop_nbdkit_container(name);
+            crate::nbdkit_macos::stop_nbdkit_container(name);
         }
         if let Err(e) = Command::new("kill")
             .arg(self.vfkit_pid.to_string())
@@ -294,18 +292,18 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let cmdline = cmdline_parts.join(" ");
 
     // Get container image merged overlay path
-    let merged_path = get_merged_path(&machine, rootful, &opts.image)?;
+    let merged_path = crate::esp_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
     // Build ESP image (kernel + initramfs + GRUB + SSH key)
     info!("building ESP image...");
-    build_esp_image(&machine, &merged_path, &cmdline, &ssh_pubkey, &esp_path)?;
+    crate::esp_macos::build_esp_image(&machine, &merged_path, &cmdline, &ssh_pubkey, &esp_path)?;
     info!("ESP ready");
 
     // Start nbdkit with erofs plugin (dynamic EROFS + GPT from overlay dir)
-    let nbd_port = find_available_nbd_port();
+    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
     let nbd_container_name =
-        start_nbdkit_erofs_plugin(&machine, &merged_path, &esp_path, nbd_port, &vm_name)?;
+        crate::nbdkit_macos::start_nbdkit_erofs_plugin(&machine, &merged_path, &esp_path, nbd_port, &vm_name)?;
     std::thread::sleep(Duration::from_millis(500));
     info!("nbdkit ready on port {}", nbd_port);
 
@@ -448,7 +446,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
-    stop_nbdkit_container(&nbd_container_name);
+    crate::nbdkit_macos::stop_nbdkit_container(&nbd_container_name);
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }
@@ -564,293 +562,8 @@ fn is_machine_rootful(machine: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Get the merged overlay path from podman image mount.
-fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Result<String> {
-    let output = if rootful {
-        Command::new("podman")
-            .args(["machine", "ssh", machine, "--", "podman", "image", "mount", image])
-            .output()
-            .context("podman image mount")?
-    } else {
-        Command::new("podman")
-            .args(["machine", "ssh", machine, "--", "podman", "unshare", "podman", "image", "mount", image])
-            .output()
-            .context("podman image mount")?
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("podman image mount failed: {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
 
-/// Build an ESP image with GRUB, kernel, initramfs, and SSH key.
-fn build_esp_image(
-    machine: &str,
-    merged_path: &str,
-    cmdline: &str,
-    ssh_pubkey: &str,
-    esp_output: &str,
-) -> Result<()> {
-    let ssh_setup = if ssh_pubkey.is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#"
-SSHDIR=$(mktemp -d)
-mkdir -p "$SSHDIR/usr/lib/bcvk" "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d"
-cat > "$SSHDIR/usr/lib/bcvk/setup-ssh.sh" << 'SSHSCRIPT'
-#!/bin/bash
-mkdir -p /sysroot/var/roothome /sysroot/var/empty /sysroot/var/log /sysroot/var/tmp
-chmod 700 /sysroot/var/roothome
-chmod 711 /sysroot/var/empty
-mkdir -p /sysroot/var/roothome/.ssh
-chmod 700 /sysroot/var/roothome/.ssh
-echo '{pubkey}' > /sysroot/var/roothome/.ssh/authorized_keys
-chmod 600 /sysroot/var/roothome/.ssh/authorized_keys
-chown -R 0:0 /sysroot/var/roothome/.ssh
-SSHSCRIPT
-chmod 755 "$SSHDIR/usr/lib/bcvk/setup-ssh.sh"
-cat > "$SSHDIR/usr/lib/systemd/system/bcvk-ssh-setup.service" << 'SVCEOF'
-[Unit]
-Description=Setup SSH authorized_keys for root
-DefaultDependencies=no
-ConditionPathExists=/etc/initrd-release
-Before=initrd-fs.target
-After=bcvk-var-ephemeral.service
-Requires=bcvk-var-ephemeral.service
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh
-SVCEOF
-cat > "$SSHDIR/usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf" << 'DROPEOF'
-[Unit]
-Wants=bcvk-ssh-setup.service
-DROPEOF
-ISIZE=$(stat -c%s "$BUILDDIR/initramfs.img")
-PAD=$(( (4 - ISIZE % 4) % 4 ))
-[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$BUILDDIR/initramfs.img" 2>/dev/null
-(cd "$SSHDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
-rm -rf "$SSHDIR"
-"#,
-            pubkey = ssh_pubkey,
-        )
-    };
-
-    let script = format!(
-        r#"
-set -e
-MERGED="{merged}"
-ESPOUT="{esp_output}"
-mkdir -p /var/tmp/bcvk
-BUILDDIR=$(mktemp -d /var/tmp/bcvk/esp-build.XXXXXX)
-mkdir -p "$(dirname "$ESPOUT")"
-
-KVER=$(ls "$MERGED/usr/lib/modules/" | head -1)
-cp "$MERGED/usr/lib/modules/$KVER/vmlinuz" "$BUILDDIR/vmlinuz"
-cp "$MERGED/usr/lib/modules/$KVER/initramfs.img" "$BUILDDIR/initramfs.img"
-
-# Append bcvk systemd units CPIO
-UNITSDIR=$(mktemp -d)
-UDIR="$UNITSDIR/usr/lib/systemd/system"
-DDIR="$UDIR/initrd-fs.target.d"
-mkdir -p "$UDIR" "$DDIR"
-
-cat > "$UDIR/bcvk-var-ephemeral.service" << 'UNITEOF'
-[Unit]
-Description=Setup ephemeral /var from image content
-DefaultDependencies=no
-ConditionPathExists=/etc/initrd-release
-Before=initrd-fs.target
-After=sysroot.mount initrd-parse-etc.service
-Requires=sysroot.mount
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-TimeoutStartSec=60
-ExecStart=/usr/bin/mkdir -p /run/var-ephemeral
-ExecStart=/usr/bin/cp -a /sysroot/var/. /run/var-ephemeral/
-ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var
-UNITEOF
-
-cat > "$UDIR/bcvk-etc-overlay.service" << 'UNITEOF'
-[Unit]
-Description=Setup ephemeral /etc overlay
-DefaultDependencies=no
-ConditionPathExists=/etc/initrd-release
-Before=initrd-fs.target
-After=sysroot.mount initrd-parse-etc.service
-Requires=sysroot.mount
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-TimeoutStartSec=30
-ExecStart=/usr/bin/mkdir -p /run/etc-lower /run/etc-upper /run/etc-work
-ExecStart=/usr/bin/mount --bind /sysroot/etc /run/etc-lower
-ExecStart=/usr/bin/mount -t overlay overlay -o lowerdir=/run/etc-lower,upperdir=/run/etc-upper,workdir=/run/etc-work,index=off,metacopy=off /sysroot/etc
-UNITEOF
-
-cat > "$UDIR/bcvk-copy-units.service" << 'UNITEOF'
-[Unit]
-Description=Copy bcvk units for post-switch-root on systemd <256
-DefaultDependencies=no
-ConditionPathExists=/etc/initrd-release
-Before=initrd-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'mkdir -p /run/systemd/system/sysinit.target.wants && cp /usr/lib/systemd/system/bcvk-journal-stream.service /run/systemd/system/ && ln -s ../bcvk-journal-stream.service /run/systemd/system/sysinit.target.wants/'
-UNITEOF
-
-cat > "$UDIR/bcvk-journal-stream.service" << 'UNITEOF'
-[Unit]
-Description=Stream journal to virtio-serial
-DefaultDependencies=no
-
-[Service]
-Type=simple
-ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'
-UNITEOF
-
-printf '[Unit]\nWants=bcvk-var-ephemeral.service\n' > "$DDIR/bcvk-var-ephemeral.conf"
-printf '[Unit]\nWants=bcvk-etc-overlay.service\n' > "$DDIR/bcvk-etc-overlay.conf"
-printf '[Unit]\nWants=bcvk-copy-units.service\n' > "$DDIR/bcvk-copy-units.conf"
-
-ISIZE=$(stat -c%s "$BUILDDIR/initramfs.img")
-PAD=$(( (4 - ISIZE % 4) % 4 ))
-[ $PAD -gt 0 ] && dd if=/dev/zero bs=1 count=$PAD >> "$BUILDDIR/initramfs.img" 2>/dev/null
-(cd "$UNITSDIR" && find . -mindepth 1 | cpio -o -H newc --quiet) >> "$BUILDDIR/initramfs.img"
-rm -rf "$UNITSDIR"
-
-{ssh_setup}
-
-# Build ESP FAT32 image
-mkdir -p "$BUILDDIR/esp/EFI/BOOT" "$BUILDDIR/esp/boot"
-GRUB_EFI=$(find "$MERGED/usr/lib" -name "grubaa64.efi" -path "*/EFI/fedora/*" 2>/dev/null | head -1)
-if [ -z "$GRUB_EFI" ]; then
-  echo "ERROR: grubaa64.efi not found" >&2
-  exit 1
-fi
-cp "$GRUB_EFI" "$BUILDDIR/esp/EFI/BOOT/BOOTAA64.EFI"
-cp "$BUILDDIR/vmlinuz" "$BUILDDIR/esp/boot/vmlinuz"
-cp "$BUILDDIR/initramfs.img" "$BUILDDIR/esp/boot/initramfs.img"
-
-cat > "$BUILDDIR/esp/EFI/BOOT/grub.cfg" << GRUBEOF
-set timeout=0
-set default=0
-menuentry "bcvk" {{
-  linux /boot/vmlinuz {cmdline}
-  initrd /boot/initramfs.img
-}}
-GRUBEOF
-
-ESP_SIZE=$(( $(du -sb "$BUILDDIR/esp" | cut -f1) + 10*1024*1024 ))
-ESP_SIZE_MB=$(( (ESP_SIZE + 1048575) / 1048576 ))
-dd if=/dev/zero of="$ESPOUT" bs=1M count=$ESP_SIZE_MB status=none
-mkfs.vfat -F 32 "$ESPOUT" > /dev/null 2>&1
-ESPMNT="$BUILDDIR/esp-mnt"
-mkdir -p "$ESPMNT"
-mount -o loop "$ESPOUT" "$ESPMNT"
-cp -r "$BUILDDIR/esp/"* "$ESPMNT/"
-sync
-umount "$ESPMNT"
-rm -rf "$BUILDDIR"
-"#,
-        merged = merged_path,
-        esp_output = esp_output,
-        ssh_setup = ssh_setup,
-        cmdline = cmdline,
-    );
-
-    let script_path = format!("{}/build-esp-{}.sh", ephemeral_base_dir().display(), std::process::id());
-    fs::write(&script_path, &script).context("writing ESP build script")?;
-    let output = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", "bash", &script_path])
-        .output()
-        .context("building ESP image")?;
-    let _ = fs::remove_file(&script_path);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("ESP build failed: {}", stderr.trim());
-    }
-    Ok(())
-}
-
-/// Start nbdkit with the erofs plugin for dynamic EROFS + GPT generation.
-fn start_nbdkit_erofs_plugin(
-    machine: &str,
-    merged_path: &str,
-    esp_path: &str,
-    nbd_port: u16,
-    vm_name: &str,
-) -> Result<String> {
-    let container_name = format!("bcvk-nbd-{}", vm_name);
-
-    let _ = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", "podman", "rm", "-f", &container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    let port_arg = format!("{}:10809", nbd_port);
-    let output = Command::new("podman")
-        .args([
-            "machine", "ssh", machine, "--",
-            "podman", "run", "-d",
-            "--name", &container_name,
-            "--security-opt", "label=disable",
-            "-p", &port_arg,
-            "-v", &format!("{}:{}:ro", merged_path, merged_path),
-            "-v", &format!("{}:/data/esp.img:ro", esp_path),
-            "-v", &format!("{}:/plugin.so:ro", NBDKIT_EROFS_PLUGIN_PATH),
-            "-v", "/usr/bin/nbdkit:/usr/bin/nbdkit:ro",
-            "-v", "/usr/lib64/nbdkit:/usr/lib64/nbdkit:ro",
-            "quay.io/fedora/fedora:latest",
-            "nbdkit", "-f", "-p", "10809", "-r",
-            "/plugin.so",
-            &format!("dir={}", merged_path),
-            "esp=/data/esp.img",
-        ])
-        .output()
-        .context("failed to start nbdkit erofs plugin")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to start nbdkit erofs plugin: {}", stderr.trim());
-    }
-
-    info!("waiting for nbdkit on port {}...", nbd_port);
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], nbd_port)),
-            Duration::from_millis(500),
-        ) {
-            use std::io::Read;
-            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-            let mut buf = [0u8; 8];
-            if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
-                break;
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = Command::new("podman")
-                .args(["machine", "ssh", machine, "--", "podman", "rm", "-f", &container_name])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            bail!("nbdkit erofs plugin did not become ready on port {}", nbd_port);
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    Ok(container_name)
-}
 
 /// Clear extended attributes from a file.
 ///
@@ -980,41 +693,8 @@ pub fn find_available_ssh_port() -> u16 {
     PORT_RANGE_START
 }
 
-/// Find an available TCP port for NBD in range 10800-10900.
-pub fn find_available_nbd_port() -> u16 {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    const PORT_RANGE_START: u16 = 10800;
-    const PORT_RANGE_END: u16 = 10900;
-    for _ in 0..100 {
-        let port = rng.random_range(PORT_RANGE_START..PORT_RANGE_END);
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    for port in PORT_RANGE_START..PORT_RANGE_END {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    PORT_RANGE_START
-}
 
 /// Start an nbdkit container serving an EROFS image over NBD.
-///
-/// Runs the container inside the podman machine via `podman machine ssh`
-/// so that /var/tmp/bcvk (local xfs) can be volume-mounted directly.
-
-/// Stop and remove an nbdkit container (best-effort).
-pub fn stop_nbdkit_container(container_name: &str) {
-    if let Ok(machine) = detect_machine_name() {
-        let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "podman", "rm", "-f", container_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
 
 /// Wait for SSH connectivity with exponential backoff (240s timeout).
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
