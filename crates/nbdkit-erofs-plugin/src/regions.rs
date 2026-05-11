@@ -1,3 +1,6 @@
+//! Region-based virtual block device composition.
+//! Inspired by the regions pattern in nbdkit's floppy plugin (BSD-3-Clause).
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
