@@ -1,4 +1,4 @@
-use crate::dir_walk::{ChildRef, DirInfo, FileEntry, SymlinkEntry, WalkResult};
+use crate::dir_walk::{ChildRef, DirInfo, WalkResult};
 use crate::regions::{Region, RegionType};
 use std::sync::Arc;
 
@@ -9,11 +9,9 @@ const SUPERBLOCK_OFFSET: u64 = 1024;
 
 // EROFS inode formats
 const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
-const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
 
 // EROFS data layouts
 const EROFS_INODE_FLAT_PLAIN: u16 = 0;
-const EROFS_INODE_FLAT_INLINE: u16 = 2;
 
 // EROFS file types (matching Linux DT_* values)
 const EROFS_FT_REG_FILE: u8 = 1;
@@ -32,22 +30,6 @@ pub struct ErofsLayout {
     pub metadata: Vec<u8>,
     pub file_regions: Vec<FileRegion>,
     pub total_size: u64,
-}
-
-struct InodeInfo {
-    inode_id: u64,
-    nid: u64,        // node id (byte offset / 32)
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    mtime: u64,
-    size: u64,
-    nlink: u32,
-    data_layout: u16,
-    // for FlatPlain: start block of data
-    u_field: u32,
-    // inline data (for symlinks and small files)
-    inline_data: Option<Vec<u8>>,
 }
 
 struct DirEntryOnDisk {
@@ -85,11 +67,7 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
         });
 
         // ".." entry (root points to self)
-        let parent_nid = if dir.inode_id == 0 {
-            0
-        } else {
-            dir.inode_id // simplified; should be parent's inode_id
-        };
+        let parent_nid = dir.parent_inode_id;
         entries.push(DirEntryOnDisk {
             nid: parent_nid,
             file_type: EROFS_FT_DIR,
@@ -112,8 +90,12 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
                     entries.push(DirEntryOnDisk {
                         nid: file.inode_id,
                         file_type: EROFS_FT_REG_FILE,
-                        name: file.host_path.file_name().unwrap_or_default()
-                            .as_encoded_bytes().to_vec(),
+                        name: file
+                            .host_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .as_encoded_bytes()
+                            .to_vec(),
                     });
                 }
                 ChildRef::Symlink(si) => {
@@ -159,7 +141,8 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
                 offset_in_erofs: aligned_offset,
                 size: symlink.target.len() as u64,
             });
-            current_data_offset = aligned_offset + align_up(symlink.target.len() as u64, BLOCK_SIZE);
+            current_data_offset =
+                aligned_offset + align_up(symlink.target.len() as u64, BLOCK_SIZE);
         }
     }
 
@@ -190,7 +173,11 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
             dir.gid as u16,
             dir_size as u32,
             dir.mtime as u32,
-            2 + dir.children.iter().filter(|c| matches!(c, ChildRef::Dir(_))).count() as u16,
+            2 + dir
+                .children
+                .iter()
+                .filter(|c| matches!(c, ChildRef::Dir(_)))
+                .count() as u16,
             EROFS_INODE_FLAT_PLAIN,
             (dir_blocks_offset / BLOCK_SIZE + dir_block) as u32,
         );
@@ -200,7 +187,8 @@ pub fn build_erofs(walk: &WalkResult) -> std::io::Result<ErofsLayout> {
     for (i, file) in walk.files.iter().enumerate() {
         let data_block = if file.size > 0 {
             let fr = file_regions.iter().find(|r| r.file_index == i);
-            fr.map(|r| (r.offset_in_erofs / BLOCK_SIZE) as u32).unwrap_or(0)
+            fr.map(|r| (r.offset_in_erofs / BLOCK_SIZE) as u32)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -298,7 +286,7 @@ fn write_compact_inode(
     uid: u16,
     gid: u16,
     size: u32,
-    mtime: u32,
+    _mtime: u32,
     nlink: u16,
     data_layout: u16,
     u_field: u32,
@@ -386,15 +374,31 @@ fn write_dir_blocks(buf: &mut Vec<u8>, entries: &[DirEntryOnDisk]) {
 fn compute_dir_size(dir: &DirInfo, walk: &WalkResult) -> u64 {
     // Build entry list to accurately compute size including block splits
     let mut entries = Vec::new();
-    entries.push(DirEntryOnDisk { nid: 0, file_type: EROFS_FT_DIR, name: b".".to_vec() });
-    entries.push(DirEntryOnDisk { nid: 0, file_type: EROFS_FT_DIR, name: b"..".to_vec() });
+    entries.push(DirEntryOnDisk {
+        nid: 0,
+        file_type: EROFS_FT_DIR,
+        name: b".".to_vec(),
+    });
+    entries.push(DirEntryOnDisk {
+        nid: 0,
+        file_type: EROFS_FT_DIR,
+        name: b"..".to_vec(),
+    });
     for child in &dir.children {
         let name_len = match child {
             ChildRef::Dir(di) => walk.dirs[*di].name.len(),
-            ChildRef::File(fi) => walk.files[*fi].host_path.file_name().unwrap_or_default().len(),
+            ChildRef::File(fi) => walk.files[*fi]
+                .host_path
+                .file_name()
+                .unwrap_or_default()
+                .len(),
             ChildRef::Symlink(si) => walk.symlinks[*si].name.len(),
         };
-        entries.push(DirEntryOnDisk { nid: 0, file_type: 0, name: vec![0; name_len] });
+        entries.push(DirEntryOnDisk {
+            nid: 0,
+            file_type: 0,
+            name: vec![0; name_len],
+        });
     }
 
     // Simulate block splitting to get total size

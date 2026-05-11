@@ -137,21 +137,17 @@ fn cmd_rm_all(force: bool) -> Result<()> {
 
     for vm in &vms {
         if vm.is_alive() {
-            if let Err(e) = Command::new("kill")
-                .args([&vm.pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-            {
+            if let Err(e) = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(vm.pid as i32).unwrap(),
+                rustix::process::Signal::TERM,
+            ) {
                 tracing::warn!("failed to kill VM process {}: {}", vm.pid, e);
             }
             if vm.gvproxy_pid > 0 {
-                if let Err(e) = Command::new("kill")
-                    .args([&vm.gvproxy_pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
+                if let Err(e) = rustix::process::kill_process(
+                    rustix::process::Pid::from_raw(vm.gvproxy_pid as i32).unwrap(),
+                    rustix::process::Signal::TERM,
+                ) {
                     tracing::warn!("failed to kill gvproxy {}: {}", vm.gvproxy_pid, e);
                 }
             }
@@ -168,15 +164,24 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         // Remove orphaned nbdkit containers
         let _ = Command::new("podman")
             .args([
-                "machine", "ssh", &machine, "--",
-                "podman", "rm", "-f", "--filter", "name=bcvk-nbd-",
+                "machine",
+                "ssh",
+                &machine,
+                "--",
+                "podman",
+                "rm",
+                "-f",
+                "--filter",
+                "name=bcvk-nbd-",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         // Unmount any remaining container image overlays
         let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", "--all"])
+            .args([
+                "machine", "ssh", &machine, "--", "podman", "image", "umount", "--all",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
