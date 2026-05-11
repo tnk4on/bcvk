@@ -65,8 +65,6 @@ mod varlink_ipc;
 #[cfg(target_os = "macos")]
 mod ephemeral_macos;
 #[cfg(target_os = "macos")]
-mod esp_macos;
-#[cfg(target_os = "macos")]
 mod nbdkit_macos;
 #[cfg(target_os = "macos")]
 mod run_ephemeral_macos;
