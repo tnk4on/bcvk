@@ -190,7 +190,6 @@ pub fn build_esp_regions(
 
     // Data region start (in sectors)
     let data_start_sector = RESERVED_SECTORS + NUM_FATS * fat_sectors;
-    let data_start_byte = data_start_sector * SECTOR_SIZE;
 
     // Build directory entry blocks
     let mut dir_blocks: Vec<Vec<u8>> = Vec::new();
@@ -344,8 +343,7 @@ pub fn build_esp_regions(
     }
 
     // Data area: file clusters
-    for (fi, f) in files.iter().enumerate() {
-        let file_clusters = clusters_for(f.size);
+    for (_fi, f) in files.iter().enumerate() {
         let mut file_offset = 0u64;
 
         for part in &f.regions {
@@ -393,13 +391,6 @@ pub fn build_esp_regions(
                 region_type: RegionType::Zero,
             });
             offset += pad;
-        }
-
-        // If file_offset < file_clusters * CLUSTER_SIZE and no data covered yet
-        let expected = file_clusters * CLUSTER_SIZE;
-        if offset < data_start_byte + (file_start_clusters[fi] as u64 - 2) * CLUSTER_SIZE + expected
-        {
-            // This shouldn't happen with correct region accounting
         }
     }
 

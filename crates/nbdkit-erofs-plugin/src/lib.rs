@@ -163,28 +163,24 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let kernel_size = match std::fs::metadata(&kernel_path) {
-        Ok(m) => m.len(),
-        Err(e) => {
-            log_error(&format!("cannot stat kernel: {}", e));
-            return -1;
+    fn file_size(path: &std::path::Path) -> Option<u64> {
+        match std::fs::metadata(path) {
+            Ok(m) => Some(m.len()),
+            Err(e) => {
+                log_error(&format!("cannot stat {:?}: {}", path, e));
+                None
+            }
         }
-    };
+    }
 
-    let initrd_size = match std::fs::metadata(&initrd_path) {
-        Ok(m) => m.len(),
-        Err(e) => {
-            log_error(&format!("cannot stat initramfs: {}", e));
-            return -1;
-        }
+    let Some(kernel_size) = file_size(&kernel_path) else {
+        return -1;
     };
-
-    let grub_size = match std::fs::metadata(&grub_path) {
-        Ok(m) => m.len(),
-        Err(e) => {
-            log_error(&format!("cannot stat grub: {}", e));
-            return -1;
-        }
+    let Some(initrd_size) = file_size(&initrd_path) else {
+        return -1;
+    };
+    let Some(grub_size) = file_size(&grub_path) else {
+        return -1;
     };
 
     let cmdline = state.cmdline.as_deref().unwrap_or("");
