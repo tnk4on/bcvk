@@ -1,11 +1,10 @@
-//! Ephemeral VM launch flow for macOS using vfkit + EROFS.
+//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS plugin.
 //!
-//! Boot flow:
-//! 1. Extract kernel + initramfs from container image
-//! 2. Create EROFS rootfs (cached by digest)
-//! 3. Decompress vmlinuz PE+zstd → uncompressed ARM64 Image
-//! 4. Append bcvk units CPIO to initramfs (/etc overlay + /var tmpfs + SSH)
-//! 5. Launch vfkit with NBD (EROFS) + virtio-net (gvproxy)
+//! Boot flow (fully diskless):
+//! 1. Mount container image overlay (`podman image mount`)
+//! 2. Start nbdkit with erofs plugin (dynamically generates GPT + ESP + EROFS)
+//! 3. Launch vfkit with EFI boot via NBD + virtio-net (gvproxy)
+//! 4. Wait for SSH and execute commands
 //!
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
@@ -20,7 +19,6 @@ use color_eyre::{
     Result,
 };
 use tracing::{debug, info};
-
 
 /// Base directory for ephemeral VM state on macOS host.
 pub fn ephemeral_base_dir() -> std::path::PathBuf {
@@ -111,15 +109,10 @@ impl EphemeralVmMetadata {
         Ok(vms)
     }
 
-    /// Check if the VM process is still alive via kill -0.
+    /// Check if the VM process is still alive via kill(pid, 0).
     pub fn is_alive(&self) -> bool {
-        Command::new("kill")
-            .args(["-0", &self.pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        rustix::process::test_kill_process(rustix::process::Pid::from_raw(self.pid as i32).unwrap())
+            .is_ok()
     }
 }
 
@@ -191,26 +184,31 @@ impl Drop for VmCleanup {
         if let Some(ref name) = self.nbd_container {
             crate::nbdkit_macos::stop_nbdkit_container(name);
         }
-        if let Err(e) = Command::new("kill")
-            .arg(self.vfkit_pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
+        if let Err(e) = rustix::process::kill_process(
+            rustix::process::Pid::from_raw(self.vfkit_pid as i32).unwrap(),
+            rustix::process::Signal::TERM,
+        ) {
             tracing::warn!("failed to kill vfkit (PID {}): {}", self.vfkit_pid, e);
         }
-        if let Err(e) = Command::new("kill")
-            .arg(self.gvproxy_pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
+        if let Err(e) = rustix::process::kill_process(
+            rustix::process::Pid::from_raw(self.gvproxy_pid as i32).unwrap(),
+            rustix::process::Signal::TERM,
+        ) {
             tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
         }
         // Release container image overlay mount
         if let Ok(machine) = detect_machine_name() {
             let _ = Command::new("podman")
-                .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
+                .args([
+                    "machine",
+                    "ssh",
+                    &machine,
+                    "--",
+                    "podman",
+                    "image",
+                    "umount",
+                    &self.image,
+                ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
@@ -264,7 +262,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let _ = fs::remove_file(ssh_key_path.with_extension("pub"));
         let status = Command::new("ssh-keygen")
             .args([
-                "-t", "ed25519", "-f", &ssh_key_path.to_string_lossy(), "-N", "", "-q",
+                "-t",
+                "ed25519",
+                "-f",
+                &ssh_key_path.to_string_lossy(),
+                "-N",
+                "",
+                "-q",
             ])
             .status()?;
         if !status.success() {
@@ -296,8 +300,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     // Start nbdkit with erofs plugin (dynamic EROFS + ESP + GPT from overlay dir)
     let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
-    let nbd_container_name =
-        crate::nbdkit_macos::start_nbdkit_erofs_plugin(&machine, &merged_path, &cmdline, &ssh_pubkey, nbd_port, &vm_name)?;
+    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+        &machine,
+        &merged_path,
+        &cmdline,
+        &ssh_pubkey,
+        nbd_port,
+        &vm_name,
+    )?;
     std::thread::sleep(Duration::from_millis(500));
     info!("nbdkit ready on port {}", nbd_port);
 
@@ -316,10 +326,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     );
 
     let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
-    let bootloader_arg = format!(
-        "efi,variable-store={},create",
-        efi_var_store.display()
-    );
+    let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
 
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
@@ -375,7 +382,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         gvproxy_pid: gvproxy_child.id(),
         ssh_port,
         ssh_key: ssh_key_path.to_string_lossy().to_string(),
-        serial_log: String::new(),
+        serial_log: serial_log.to_string_lossy().to_string(),
         log_path: None,
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: Some(nbd_container_name.clone()),
@@ -446,7 +453,16 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     // Release container image overlay mount
     let _ = Command::new("podman")
-        .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &opts.image])
+        .args([
+            "machine",
+            "ssh",
+            &machine,
+            "--",
+            "podman",
+            "image",
+            "umount",
+            &opts.image,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -507,10 +523,6 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     Ok(())
 }
 
-// --- SSH setup CPIO ---
-
-// --- vfkit kernel decompression ---
-
 // --- Shared helpers (pub for vfkit/ module) ---
 
 /// Detect the name of the running podman machine.
@@ -555,9 +567,6 @@ fn is_machine_rootful(machine: &str) -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false)
 }
-
-
-
 
 /// Clear extended attributes from a file.
 ///
@@ -686,9 +695,6 @@ pub fn find_available_ssh_port() -> u16 {
     }
     PORT_RANGE_START
 }
-
-
-/// Start an nbdkit container serving an EROFS image over NBD.
 
 /// Wait for SSH connectivity with exponential backoff (240s timeout).
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
@@ -833,12 +839,15 @@ mod tests {
             serial_log: "/tmp/test-serial.log".to_string(),
             log_path: Some("/tmp/test-vfkit.log".to_string()),
             created: "2026-01-01T00:00:00Z".to_string(),
+            nbd_container: Some("bcvk-nbd-test-vm".to_string()),
+            nbd_port: Some(10841),
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
         let loaded: EphemeralVmMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.name, "test-vm");
         assert_eq!(loaded.image, "quay.io/fedora/fedora-bootc:42");
         assert_eq!(loaded.pid, 12345);
+        assert_eq!(loaded.nbd_container.as_deref(), Some("bcvk-nbd-test-vm"));
         assert_eq!(loaded.ssh_port, 2222);
         assert_eq!(loaded.log_path.as_deref(), Some("/tmp/test-vfkit.log"));
     }
@@ -857,6 +866,8 @@ mod tests {
             serial_log: "/tmp/serial.log".to_string(),
             log_path: None,
             created: "2026-05-04T00:00:00Z".to_string(),
+            nbd_container: None,
+            nbd_port: None,
         };
         fs::write(&json_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
         let data = fs::read_to_string(&json_path).unwrap();
@@ -882,6 +893,8 @@ mod tests {
                 serial_log: "/tmp/serial.log".to_string(),
                 log_path: None,
                 created: "2026-01-01T00:00:00Z".to_string(),
+                nbd_container: Some(format!("bcvk-nbd-vm-{i}")),
+                nbd_port: Some(10800 + i as u16),
             };
             let path = dir.path().join(format!("vm-{i}.json"));
             fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();

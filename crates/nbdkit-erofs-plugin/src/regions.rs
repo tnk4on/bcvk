@@ -17,7 +17,7 @@ pub struct Region {
 
 impl Region {
     pub fn end(&self) -> u64 {
-        self.start + self.len - 1
+        self.start + self.len
     }
 }
 
@@ -26,7 +26,7 @@ pub fn find_region(regions: &[Region], offset: u64) -> Option<&Region> {
         .binary_search_by(|r| {
             if offset < r.start {
                 std::cmp::Ordering::Greater
-            } else if offset > r.end() {
+            } else if offset >= r.end() {
                 std::cmp::Ordering::Less
             } else {
                 std::cmp::Ordering::Equal
@@ -34,10 +34,6 @@ pub fn find_region(regions: &[Region], offset: u64) -> Option<&Region> {
         })
         .ok()
         .map(|i| &regions[i])
-}
-
-pub fn total_size(regions: &[Region]) -> u64 {
-    regions.last().map(|r| r.start + r.len).unwrap_or(0)
 }
 
 pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result<()> {
@@ -60,8 +56,7 @@ pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result
         match &region.region_type {
             RegionType::Data(data) => {
                 let start = region_offset as usize;
-                buf[buf_offset..buf_offset + len]
-                    .copy_from_slice(&data[start..start + len]);
+                buf[buf_offset..buf_offset + len].copy_from_slice(&data[start..start + len]);
             }
             RegionType::File { path } => {
                 use std::os::unix::fs::FileExt;

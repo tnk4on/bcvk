@@ -18,6 +18,13 @@ const DIR_ENTRY_SIZE: u64 = 32;
 const FAT32_EOC: u32 = 0x0FFF_FFFF;
 const FAT32_MEDIA: u32 = 0x0FFF_FFF8;
 
+// Fixed cluster assignments for the ESP directory structure.
+// Root directory is always cluster 2 per FAT32 spec.
+const CLUSTER_ROOT: u32 = 2;
+const CLUSTER_EFI: u32 = 3;
+const CLUSTER_EFI_BOOT: u32 = 4;
+const CLUSTER_BOOT: u32 = 5;
+
 struct FatFile {
     name_8_3: [u8; 11],
     size: u64,
@@ -25,7 +32,7 @@ struct FatFile {
 }
 
 pub enum FileDataRegion {
-    FromFile { path: PathBuf, offset: u64, len: u64 },
+    FromFile { path: PathBuf, len: u64 },
     FromData(Vec<u8>),
     Zero(u64),
 }
@@ -42,7 +49,11 @@ enum FatDirChild {
 }
 
 fn clusters_for(size: u64) -> u64 {
-    if size == 0 { 1 } else { (size + CLUSTER_SIZE - 1) / CLUSTER_SIZE }
+    if size == 0 {
+        1
+    } else {
+        (size + CLUSTER_SIZE - 1) / CLUSTER_SIZE
+    }
 }
 
 fn make_8_3(name: &str, ext: &str) -> [u8; 11] {
@@ -74,7 +85,6 @@ pub fn build_esp_regions(
         size: grub_size,
         regions: vec![FileDataRegion::FromFile {
             path: grub_path.to_path_buf(),
-            offset: 0,
             len: grub_size,
         }],
     });
@@ -92,7 +102,6 @@ pub fn build_esp_regions(
         size: kernel_size,
         regions: vec![FileDataRegion::FromFile {
             path: kernel_path.to_path_buf(),
-            offset: 0,
             len: kernel_size,
         }],
     });
@@ -104,31 +113,33 @@ pub fn build_esp_regions(
         regions: initrd_parts.into_iter().map(|(r, _)| r).collect(),
     });
 
-    // Directories (cluster allocation order)
-    // cluster 2: root dir
-    // cluster 3: /EFI
-    // cluster 4: /EFI/BOOT
-    // cluster 5: /boot
+    // Directory structure:
+    //   / (root, cluster 2) → EFI/, boot/
+    //   /EFI (cluster 3) → BOOT/
+    //   /EFI/BOOT (cluster 4) → BOOTAA64.EFI, GRUB.CFG
+    //   /boot (cluster 5) → VMLINUZ, INITRD.IMG
+    // Note: /EFI/BOOT and /boot both use 8.3 name "BOOT" but are in different
+    // parent directories so there is no conflict in the FAT32 namespace.
     let dirs = vec![
         FatDir {
             name_8_3: make_8_3("", ""),
-            cluster: 2,
+            cluster: CLUSTER_ROOT,
             entries: vec![FatDirChild::Dir(1), FatDirChild::Dir(3)],
         },
         FatDir {
             name_8_3: make_8_3("EFI", ""),
-            cluster: 3,
+            cluster: CLUSTER_EFI,
             entries: vec![FatDirChild::Dir(2)],
         },
         FatDir {
             name_8_3: make_8_3("BOOT", ""),
-            cluster: 4,
-            entries: vec![FatDirChild::File(0), FatDirChild::File(1)], // BOOTAA64.EFI, GRUB.CFG
+            cluster: CLUSTER_EFI_BOOT,
+            entries: vec![FatDirChild::File(0), FatDirChild::File(1)],
         },
         FatDir {
             name_8_3: make_8_3("BOOT", ""),
-            cluster: 5,
-            entries: vec![FatDirChild::File(2), FatDirChild::File(3)], // VMLINUZ, INITRD.IMG
+            cluster: CLUSTER_BOOT,
+            entries: vec![FatDirChild::File(2), FatDirChild::File(3)],
         },
     ];
 
@@ -146,7 +157,8 @@ pub fn build_esp_regions(
 
     // FAT table
     let fat_entries = total_clusters as usize;
-    let fat_bytes = ((fat_entries * 4 + SECTOR_SIZE as usize - 1) / SECTOR_SIZE as usize) * SECTOR_SIZE as usize;
+    let fat_bytes = ((fat_entries * 4 + SECTOR_SIZE as usize - 1) / SECTOR_SIZE as usize)
+        * SECTOR_SIZE as usize;
     let fat_sectors = fat_bytes as u64 / SECTOR_SIZE;
 
     let mut fat = vec![0u8; fat_bytes];
@@ -190,7 +202,14 @@ pub fn build_esp_regions(
         if di > 0 {
             write_dir_entry(&mut block, pos, b".          ", 0x10, d.cluster, 0);
             pos += DIR_ENTRY_SIZE as usize;
-            let parent_cluster = if di == 1 || di == 3 { 0u32 } else { dirs[1].cluster };
+            // Parent cluster: dirs at index 1 (EFI) and 3 (boot) are children of root (0).
+            // Dir at index 2 (EFI/BOOT) is a child of EFI (dirs[1]).
+            debug_assert!(dirs.len() == 4, "directory structure changed");
+            let parent_cluster = if di == 1 || di == 3 {
+                0u32
+            } else {
+                dirs[1].cluster
+            };
             write_dir_entry(&mut block, pos, b"..         ", 0x10, parent_cluster, 0);
             pos += DIR_ENTRY_SIZE as usize;
         }
@@ -203,7 +222,14 @@ pub fn build_esp_regions(
                 }
                 FatDirChild::File(idx) => {
                     let cf = &files[*idx];
-                    write_dir_entry(&mut block, pos, &cf.name_8_3, 0x20, file_start_clusters[*idx], cf.size);
+                    write_dir_entry(
+                        &mut block,
+                        pos,
+                        &cf.name_8_3,
+                        0x20,
+                        file_start_clusters[*idx],
+                        cf.size,
+                    );
                 }
             }
             pos += DIR_ENTRY_SIZE as usize;
@@ -216,10 +242,23 @@ pub fn build_esp_regions(
     let total_size = total_sectors * SECTOR_SIZE;
 
     // BPB (Boot Parameter Block)
-    let bpb = build_bpb(total_sectors as u32, fat_sectors as u32, data_clusters as u64);
+    let bpb = build_bpb(
+        total_sectors as u32,
+        fat_sectors as u32,
+        data_clusters as u64,
+    );
 
     // FSInfo
-    let fsinfo = build_fsinfo(data_clusters as u32 - (dir_clusters as u32 + files.iter().map(|f| clusters_for(f.size) as u32).sum::<u32>()), next_cluster);
+    let fsinfo = build_fsinfo(
+        (data_clusters as u32).saturating_sub(
+            dir_clusters as u32
+                + files
+                    .iter()
+                    .map(|f| clusters_for(f.size) as u32)
+                    .sum::<u32>(),
+        ),
+        next_cluster,
+    );
 
     // Assemble regions
     let mut regions: Vec<Region> = Vec::new();
@@ -306,21 +345,17 @@ pub fn build_esp_regions(
 
     // Data area: file clusters
     for (fi, f) in files.iter().enumerate() {
-        let _ = file_start_clusters[fi];
         let file_clusters = clusters_for(f.size);
         let mut file_offset = 0u64;
 
         for part in &f.regions {
             match part {
-                FileDataRegion::FromFile { path, offset: foff, len } => {
+                FileDataRegion::FromFile { path, len } => {
                     regions.push(Region {
                         start: offset,
                         len: *len,
                         region_type: RegionType::File { path: path.clone() },
                     });
-                    // If File region has a non-zero source offset, we need a different approach.
-                    // For simplicity, we assume offset=0 (whole file).
-                    let _ = foff;
                     offset += len;
                     file_offset += len;
                 }
@@ -362,13 +397,19 @@ pub fn build_esp_regions(
 
         // If file_offset < file_clusters * CLUSTER_SIZE and no data covered yet
         let expected = file_clusters * CLUSTER_SIZE;
-        if offset < data_start_byte + (file_start_clusters[fi] as u64 - 2) * CLUSTER_SIZE + expected {
+        if offset < data_start_byte + (file_start_clusters[fi] as u64 - 2) * CLUSTER_SIZE + expected
+        {
             // This shouldn't happen with correct region accounting
         }
     }
 
     // Ensure total_size is correct
-    assert!(offset <= total_size, "regions exceeded total_size: {} > {}", offset, total_size);
+    debug_assert!(
+        offset <= total_size,
+        "regions exceeded total_size: {} > {}",
+        offset,
+        total_size
+    );
     if offset < total_size {
         regions.push(Region {
             start: offset,
@@ -391,11 +432,13 @@ pub fn build_initrd_regions(
     let mut total = 0u64;
 
     // Original initramfs
-    parts.push((FileDataRegion::FromFile {
-        path: initrd_path.to_path_buf(),
-        offset: 0,
-        len: initrd_size,
-    }, initrd_size));
+    parts.push((
+        FileDataRegion::FromFile {
+            path: initrd_path.to_path_buf(),
+            len: initrd_size,
+        },
+        initrd_size,
+    ));
     total += initrd_size;
 
     // 4-byte alignment padding

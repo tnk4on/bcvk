@@ -8,6 +8,8 @@ fn align4(n: usize) -> usize {
 }
 
 fn write_cpio_entry(out: &mut Vec<u8>, path: &str, mode: u32, data: &[u8]) {
+    // Start at 100 to avoid collision with real filesystem inodes (0-based).
+    // Each CPIO entry gets a unique inode; the actual value is not significant.
     static INODE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
     let ino = INODE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let namesize = path.len() + 1; // includes NUL
@@ -65,7 +67,9 @@ pub fn build_units_cpio() -> Vec<u8> {
     write_dir(&mut out, "usr/lib/systemd/system");
     write_dir(&mut out, "usr/lib/systemd/system/initrd-fs.target.d");
 
-    write_file(&mut out, "usr/lib/systemd/system/bcvk-var-ephemeral.service",
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/bcvk-var-ephemeral.service",
         b"[Unit]\n\
           Description=Setup ephemeral /var from image content\n\
           DefaultDependencies=no\n\
@@ -80,7 +84,8 @@ pub fn build_units_cpio() -> Vec<u8> {
           TimeoutStartSec=60\n\
           ExecStart=/usr/bin/mkdir -p /run/var-ephemeral\n\
           ExecStart=/usr/bin/cp -a /sysroot/var/. /run/var-ephemeral/\n\
-          ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var\n");
+          ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var\n",
+    );
 
     write_file(&mut out, "usr/lib/systemd/system/bcvk-etc-overlay.service",
         b"[Unit]\n\
@@ -120,12 +125,21 @@ pub fn build_units_cpio() -> Vec<u8> {
           Type=simple\n\
           ExecStart=/bin/sh -c 'journalctl -f --no-hostname -o short-monotonic > /dev/hvc1 2>&1 || true'\n");
 
-    write_file(&mut out, "usr/lib/systemd/system/initrd-fs.target.d/bcvk-var-ephemeral.conf",
-        b"[Unit]\nWants=bcvk-var-ephemeral.service\n");
-    write_file(&mut out, "usr/lib/systemd/system/initrd-fs.target.d/bcvk-etc-overlay.conf",
-        b"[Unit]\nWants=bcvk-etc-overlay.service\n");
-    write_file(&mut out, "usr/lib/systemd/system/initrd-fs.target.d/bcvk-copy-units.conf",
-        b"[Unit]\nWants=bcvk-copy-units.service\n");
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-var-ephemeral.conf",
+        b"[Unit]\nWants=bcvk-var-ephemeral.service\n",
+    );
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-etc-overlay.conf",
+        b"[Unit]\nWants=bcvk-etc-overlay.service\n",
+    );
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-copy-units.conf",
+        b"[Unit]\nWants=bcvk-copy-units.service\n",
+    );
 
     write_trailer(&mut out);
     out
@@ -153,9 +167,15 @@ pub fn build_ssh_cpio(pubkey: &str) -> Vec<u8> {
          chown -R 0:0 /sysroot/var/roothome/.ssh\n",
         pubkey
     );
-    write_file_exec(&mut out, "usr/lib/bcvk/setup-ssh.sh", setup_script.as_bytes());
+    write_file_exec(
+        &mut out,
+        "usr/lib/bcvk/setup-ssh.sh",
+        setup_script.as_bytes(),
+    );
 
-    write_file(&mut out, "usr/lib/systemd/system/bcvk-ssh-setup.service",
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/bcvk-ssh-setup.service",
         b"[Unit]\n\
           Description=Setup SSH authorized_keys for root\n\
           DefaultDependencies=no\n\
@@ -167,10 +187,14 @@ pub fn build_ssh_cpio(pubkey: &str) -> Vec<u8> {
           [Service]\n\
           Type=oneshot\n\
           RemainAfterExit=yes\n\
-          ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh\n");
+          ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh\n",
+    );
 
-    write_file(&mut out, "usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf",
-        b"[Unit]\nWants=bcvk-ssh-setup.service\n");
+    write_file(
+        &mut out,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf",
+        b"[Unit]\nWants=bcvk-ssh-setup.service\n",
+    );
 
     write_trailer(&mut out);
     out

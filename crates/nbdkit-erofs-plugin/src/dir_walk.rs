@@ -23,6 +23,7 @@ pub struct DirInfo {
     pub gid: u32,
     pub mtime: u64,
     pub inode_id: u64,
+    pub parent_inode_id: u64,
     pub children: Vec<ChildRef>,
 }
 
@@ -60,7 +61,7 @@ pub fn walk_directory(root: &Path) -> std::io::Result<WalkResult> {
     };
     let mut next_inode: u64 = 0;
 
-    walk_recursive(root, root, &mut result, &mut next_inode)?;
+    walk_recursive(root, root, &mut result, &mut next_inode, 0)?;
     Ok(result)
 }
 
@@ -69,6 +70,7 @@ fn walk_recursive(
     dir: &Path,
     result: &mut WalkResult,
     next_inode: &mut u64,
+    parent_inode_id: u64,
 ) -> std::io::Result<usize> {
     let meta = fs::symlink_metadata(dir)?;
     let dir_inode = *next_inode;
@@ -76,21 +78,17 @@ fn walk_recursive(
 
     let di = result.dirs.len();
     result.dirs.push(DirInfo {
-        name: dir
-            .file_name()
-            .unwrap_or_default()
-            .to_os_string(),
+        name: dir.file_name().unwrap_or_default().to_os_string(),
         mode: meta.mode(),
         uid: meta.uid(),
         gid: meta.gid(),
         mtime: meta.mtime() as u64,
         inode_id: dir_inode,
+        parent_inode_id,
         children: Vec::new(),
     });
 
-    let mut entries: Vec<_> = fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
@@ -99,7 +97,7 @@ fn walk_recursive(
         let ft = meta.file_type();
 
         if ft.is_dir() {
-            let child_di = walk_recursive(root, &path, result, next_inode)?;
+            let child_di = walk_recursive(root, &path, result, next_inode, dir_inode)?;
             result.dirs[di].children.push(ChildRef::Dir(child_di));
         } else if ft.is_symlink() {
             let target = fs::read_link(&path)?;
