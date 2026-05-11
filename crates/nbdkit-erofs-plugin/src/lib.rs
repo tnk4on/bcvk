@@ -322,6 +322,9 @@ pub struct NbdkitPlugin {
     preconnect: Option<extern "C" fn(c_int) -> c_int>,
     get_ready: Option<extern "C" fn() -> c_int>,
     after_fork: Option<extern "C" fn() -> c_int>,
+    // Fields after after_fork (list_exports, default_export, export_description,
+    // cleanup, block_size) are omitted. nbdkit uses _struct_size to determine
+    // which fields are present, so omitting trailing fields is safe.
 }
 
 unsafe impl Sync for NbdkitPlugin {}
