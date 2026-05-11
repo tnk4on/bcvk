@@ -173,6 +173,7 @@ struct VmCleanup {
     vfkit_pid: u32,
     gvproxy_pid: u32,
     nbd_container: Option<String>,
+    image: String,
     vm_name: String,
 }
 
@@ -197,6 +198,14 @@ impl Drop for VmCleanup {
             .status()
         {
             tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
+        }
+        // Release container image overlay mount
+        if let Ok(machine) = detect_machine_name() {
+            let _ = Command::new("podman")
+                .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
         EphemeralVmMetadata::remove(&self.vm_name);
     }
@@ -376,6 +385,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
         nbd_container: Some(nbd_container_name.clone()),
+        image: opts.image.clone(),
         vm_name: vm_name.clone(),
     };
 
@@ -432,6 +442,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }
+    // Release container image overlay mount
+    let _ = Command::new("podman")
+        .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &opts.image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     EphemeralVmMetadata::remove(&vm_name);
     Ok(())
 }
