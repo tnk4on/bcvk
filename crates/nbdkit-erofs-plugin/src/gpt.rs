@@ -1,5 +1,4 @@
 use crate::regions::{Region, RegionType};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 const SECTOR_SIZE: u64 = 512;
@@ -25,7 +24,7 @@ pub struct DiskLayout {
 }
 
 pub fn build_gpt_disk(
-    esp_path: &PathBuf,
+    esp_regions: Vec<Region>,
     esp_size: u64,
     erofs_regions: Vec<Region>,
     erofs_size: u64,
@@ -142,14 +141,11 @@ pub fn build_gpt_disk(
         });
     }
 
-    // ESP partition (from file)
-    regions.push(Region {
-        start: esp_byte_offset,
-        len: esp_size,
-        region_type: RegionType::File {
-            path: esp_path.clone(),
-        },
-    });
+    // ESP partition (from provided regions, offset-adjusted)
+    for mut r in esp_regions {
+        r.start += esp_byte_offset;
+        regions.push(r);
+    }
 
     // Padding between ESP and EROFS
     let esp_end = esp_byte_offset + esp_size;

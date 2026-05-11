@@ -255,7 +255,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
 
     fs::create_dir_all(&cache_base)?;
-    let esp_path = format!("/var/tmp/bcvk/esp-{}.img", vm_name);
 
     // Generate SSH keypair on macOS host
     let mut ssh_pubkey = String::new();
@@ -292,18 +291,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let cmdline = cmdline_parts.join(" ");
 
     // Get container image merged overlay path
-    let merged_path = crate::esp_macos::get_merged_path(&machine, rootful, &opts.image)?;
+    let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    // Build ESP image (kernel + initramfs + GRUB + SSH key)
-    info!("building ESP image...");
-    crate::esp_macos::build_esp_image(&machine, &merged_path, &cmdline, &ssh_pubkey, &esp_path)?;
-    info!("ESP ready");
-
-    // Start nbdkit with erofs plugin (dynamic EROFS + GPT from overlay dir)
+    // Start nbdkit with erofs plugin (dynamic EROFS + ESP + GPT from overlay dir)
     let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
     let nbd_container_name =
-        crate::nbdkit_macos::start_nbdkit_erofs_plugin(&machine, &merged_path, &esp_path, nbd_port, &vm_name)?;
+        crate::nbdkit_macos::start_nbdkit_erofs_plugin(&machine, &merged_path, &cmdline, &ssh_pubkey, nbd_port, &vm_name)?;
     std::thread::sleep(Duration::from_millis(500));
     info!("nbdkit ready on port {}", nbd_port);
 
