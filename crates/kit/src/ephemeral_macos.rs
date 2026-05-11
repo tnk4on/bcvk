@@ -157,7 +157,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
             }
         }
         if let Some(ref container) = vm.nbd_container {
-            run_ephemeral_macos::stop_nbdkit_container(container);
+            crate::nbdkit_macos::stop_nbdkit_container(container);
         }
         EphemeralVmMetadata::remove(&vm.name);
         println!("Removed {}", vm.name);
