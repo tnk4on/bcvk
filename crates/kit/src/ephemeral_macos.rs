@@ -180,13 +180,6 @@ fn cmd_rm_all(force: bool) -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        // Remove ESP files
-        let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "rm", "-f"])
-            .arg("/var/tmp/bcvk/esp-*.img")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
     }
     Ok(())
 }

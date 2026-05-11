@@ -1,6 +1,8 @@
 mod dir_walk;
 mod erofs;
+mod fat32;
 mod gpt;
+mod initramfs;
 mod regions;
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -13,7 +15,8 @@ static PLUGIN_STATE: Mutex<Option<PluginState>> = Mutex::new(None);
 
 struct PluginState {
     dir: PathBuf,
-    esp_path: Option<PathBuf>,
+    cmdline: Option<String>,
+    ssh_pubkey: Option<String>,
     regions: Vec<Region>,
     total_size: u64,
 }
@@ -39,14 +42,16 @@ pub extern "C" fn plugin_config(key: *const c_char, value: *const c_char) -> c_i
     let mut state = PLUGIN_STATE.lock().unwrap();
     let state = state.get_or_insert_with(|| PluginState {
         dir: PathBuf::new(),
-        esp_path: None,
+        cmdline: None,
+        ssh_pubkey: None,
         regions: Vec::new(),
         total_size: 0,
     });
 
     match key {
         "dir" => state.dir = PathBuf::from(value),
-        "esp" => state.esp_path = Some(PathBuf::from(value)),
+        "cmdline" => state.cmdline = Some(value.to_string()),
+        "ssh_pubkey" => state.ssh_pubkey = Some(value.to_string()),
         _ => {
             log_error(&format!("unknown parameter: {}", key));
             return -1;
@@ -71,7 +76,47 @@ pub extern "C" fn plugin_config_complete() -> c_int {
         return -1;
     }
 
+    if state.cmdline.is_none() {
+        log_error("cmdline parameter is required");
+        return -1;
+    }
+
     0
+}
+
+fn find_kernel_dir(dir: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+    let modules = dir.join("usr/lib/modules");
+    if let Ok(entries) = std::fs::read_dir(&modules) {
+        for entry in entries.flatten() {
+            let kdir = entry.path();
+            let vmlinuz = kdir.join("vmlinuz");
+            let initramfs = kdir.join("initramfs.img");
+            if vmlinuz.exists() && initramfs.exists() {
+                return Some((vmlinuz, initramfs));
+            }
+        }
+    }
+    None
+}
+
+fn find_grub(dir: &std::path::Path) -> Option<PathBuf> {
+    fn walk(path: &std::path::Path, target: &str) -> Option<PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && p.file_name().map(|n| n == target).unwrap_or(false) {
+                    return Some(p);
+                }
+                if p.is_dir() {
+                    if let Some(found) = walk(&p, target) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+    walk(&dir.join("usr/lib"), "grubaa64.efi")
 }
 
 #[no_mangle]
@@ -82,9 +127,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         None => return -1,
     };
 
-    let _ = std::fs::write("/tmp/erofs-debug-1.txt", format!("dir={:?}\n", state.dir));
-
-    // Walk directory
+    // Walk directory for EROFS
     let walk = match dir_walk::walk_directory(&state.dir) {
         Ok(w) => w,
         Err(e) => {
@@ -93,7 +136,6 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    // Build EROFS layout
     let erofs_layout = match erofs::build_erofs(&walk) {
         Ok(l) => l,
         Err(e) => {
@@ -102,40 +144,119 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    // Write debug info to a file since nbdkit_error may not be visible
-    let _ = std::fs::write("/tmp/erofs-plugin-debug.txt", format!(
-        "dirs={} files={} symlinks={} metadata={}B total_size={}B file_regions={}\n",
-        walk.dirs.len(), walk.files.len(), walk.symlinks.len(),
-        erofs_layout.metadata.len(), erofs_layout.total_size, erofs_layout.file_regions.len()
-    ));
-
-    // Build regions
     let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk);
 
-    if let Some(esp_path) = &state.esp_path {
-        // GPT + ESP + EROFS disk
-        let esp_size = match std::fs::metadata(esp_path) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                log_error(&format!("failed to read ESP: {}", e));
-                return -1;
-            }
-        };
-
-        match gpt::build_gpt_disk(esp_path, esp_size, erofs_regions, erofs_layout.total_size) {
-            Ok(disk) => {
-                state.regions = disk.regions;
-                state.total_size = disk.total_size;
-            }
-            Err(e) => {
-                log_error(&format!("failed to build GPT disk: {}", e));
-                return -1;
-            }
+    // Discover boot files from dir
+    let (kernel_path, initrd_path) = match find_kernel_dir(&state.dir) {
+        Some(paths) => paths,
+        None => {
+            log_error("kernel/initramfs not found in dir/usr/lib/modules/");
+            return -1;
         }
-    } else {
-        // EROFS only (no GPT)
-        state.total_size = erofs_layout.total_size;
-        state.regions = erofs_regions;
+    };
+
+    let grub_path = match find_grub(&state.dir) {
+        Some(p) => p,
+        None => {
+            log_error("grubaa64.efi not found in dir/usr/lib/");
+            return -1;
+        }
+    };
+
+    let kernel_size = match std::fs::metadata(&kernel_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            log_error(&format!("cannot stat kernel: {}", e));
+            return -1;
+        }
+    };
+
+    let initrd_size = match std::fs::metadata(&initrd_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            log_error(&format!("cannot stat initramfs: {}", e));
+            return -1;
+        }
+    };
+
+    let grub_size = match std::fs::metadata(&grub_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            log_error(&format!("cannot stat grub: {}", e));
+            return -1;
+        }
+    };
+
+    let cmdline = state.cmdline.as_deref().unwrap_or("");
+
+    // Generate grub.cfg
+    let grub_cfg = format!(
+        "set timeout=0\nset default=0\nmenuentry \"bcvk\" {{\n  linux /boot/vmlinuz {}\n  initrd /boot/initrd.img\n}}\n",
+        cmdline
+    );
+
+    // Generate CPIO archives
+    let units_cpio = initramfs::build_units_cpio();
+    let ssh_cpio = state.ssh_pubkey.as_deref().map(initramfs::build_ssh_cpio);
+
+    // Build initrd regions (original file + padding + CPIO)
+    let (initrd_parts, initrd_total) =
+        fat32::build_initrd_regions(&initrd_path, initrd_size, &units_cpio, ssh_cpio.as_deref());
+
+    // Build ESP regions
+    let (esp_regions, esp_size) = fat32::build_esp_regions(
+        &grub_path,
+        grub_size,
+        grub_cfg.as_bytes(),
+        &kernel_path,
+        kernel_size,
+        initrd_parts,
+        initrd_total,
+    );
+
+    // Build GPT disk with ESP + EROFS
+    match gpt::build_gpt_disk(esp_regions, esp_size, erofs_regions, erofs_layout.total_size) {
+        Ok(disk) => {
+            // Check for gaps in regions
+            let mut gap_count = 0u32;
+            let mut first_gap = String::new();
+            for i in 1..disk.regions.len() {
+                let prev_end = disk.regions[i-1].start + disk.regions[i-1].len;
+                let next_start = disk.regions[i].start;
+                if next_start != prev_end {
+                    gap_count += 1;
+                    if gap_count <= 3 {
+                        first_gap.push_str(&format!("  gap at region[{}]: prev_end={} next_start={} gap={}\n",
+                            i, prev_end, next_start, next_start as i64 - prev_end as i64));
+                    }
+                }
+            }
+            let mut dbg = format!(
+                "dirs={} files={} symlinks={} erofs_meta={}B erofs_size={}B esp_size={}B total={}B\nkernel={:?}\ninitrd={:?} initrd_size={} initrd_total={}\ngrub={:?} grub_size={}\nregions={}\n",
+                walk.dirs.len(), walk.files.len(), walk.symlinks.len(),
+                erofs_layout.metadata.len(), erofs_layout.total_size,
+                esp_size, disk.total_size,
+                kernel_path,
+                initrd_path, initrd_size, initrd_total,
+                grub_path, grub_size,
+                disk.regions.len(),
+            );
+            dbg.push_str(&format!("gaps={}\n{}", gap_count, first_gap));
+            for (i, r) in disk.regions.iter().take(30).enumerate() {
+                dbg.push_str(&format!("  region[{}]: start={} len={} type={}\n", i, r.start, r.len, match &r.region_type {
+                    regions::RegionType::Data(_) => "Data".to_string(),
+                    regions::RegionType::File { path } => format!("File({:?})", path),
+                    regions::RegionType::Zero => "Zero".to_string(),
+                }));
+            }
+            let _ = std::fs::write("/tmp/erofs-plugin-debug.txt", dbg);
+            state.regions = disk.regions;
+            state.total_size = disk.total_size;
+        }
+        Err(e) => {
+            log_error(&format!("failed to build GPT disk: {}", e));
+            return -1;
+        }
     }
 
     0
@@ -143,7 +264,6 @@ pub extern "C" fn plugin_get_ready() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn plugin_open(_readonly: c_int) -> *mut c_void {
-    // Return non-null handle (we use global state)
     1 as *mut c_void
 }
 
@@ -158,7 +278,7 @@ pub extern "C" fn plugin_get_size(_handle: *mut c_void) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn plugin_can_multi_conn(_handle: *mut c_void) -> c_int {
-    1 // safe: read-only, deterministic
+    1
 }
 
 #[no_mangle]
@@ -188,7 +308,6 @@ pub extern "C" fn plugin_pread(
 
 // --- Plugin registration ---
 
-// Must match nbdkit-plugin.h struct nbdkit_plugin exactly (API v2)
 #[repr(C)]
 pub struct NbdkitPlugin {
     _struct_size: u64,
@@ -210,7 +329,6 @@ pub struct NbdkitPlugin {
     can_flush: Option<extern "C" fn(*mut c_void) -> c_int>,
     is_rotational: Option<extern "C" fn(*mut c_void) -> c_int>,
     can_trim: Option<extern "C" fn(*mut c_void) -> c_int>,
-    // API v2: _pread_v1 etc (v1 stubs, unused)
     _pread_v1: Option<extern "C" fn(*mut c_void, *mut c_void, u32, u64) -> c_int>,
     _pwrite_v1: Option<extern "C" fn(*mut c_void, *const c_void, u32, u64) -> c_int>,
     _flush_v1: Option<extern "C" fn(*mut c_void) -> c_int>,
@@ -220,7 +338,6 @@ pub struct NbdkitPlugin {
     dump_plugin: Option<extern "C" fn()>,
     can_zero: Option<extern "C" fn(*mut c_void) -> c_int>,
     can_fua: Option<extern "C" fn(*mut c_void) -> c_int>,
-    // API v2: actual pread/pwrite with flags
     pread: Option<extern "C" fn(*mut c_void, *mut c_void, u32, u64, u32) -> c_int>,
     pwrite: Option<extern "C" fn(*mut c_void, *const c_void, u32, u64, u32) -> c_int>,
     flush: Option<extern "C" fn(*mut c_void, u32) -> c_int>,
@@ -237,22 +354,21 @@ pub struct NbdkitPlugin {
     preconnect: Option<extern "C" fn(c_int) -> c_int>,
     get_ready: Option<extern "C" fn() -> c_int>,
     after_fork: Option<extern "C" fn() -> c_int>,
-    // list_exports, default_export, export_description, cleanup, block_size omitted
 }
 
 unsafe impl Sync for NbdkitPlugin {}
 
 static PLUGIN_NAME: &[u8] = b"erofs\0";
 static PLUGIN_LONGNAME: &[u8] = b"nbdkit EROFS plugin\0";
-static PLUGIN_VERSION: &[u8] = b"0.1.0\0";
-static PLUGIN_DESCRIPTION: &[u8] = b"Create virtual EROFS disk from directory\0";
-static PLUGIN_CONFIG_HELP: &[u8] = b"dir=<DIRECTORY>  (required) The directory to serve\nesp=<FILE>       Optional ESP image for EFI boot\0";
+static PLUGIN_VERSION: &[u8] = b"0.2.0\0";
+static PLUGIN_DESCRIPTION: &[u8] = b"Create virtual EROFS+ESP disk from directory\0";
+static PLUGIN_CONFIG_HELP: &[u8] = b"dir=<DIRECTORY>     (required) Container overlay merged directory\ncmdline=<STRING>    (required) Kernel command line for grub.cfg\nssh_pubkey=<STRING> SSH public key for root access\0";
 static PLUGIN_MAGIC_KEY: &[u8] = b"dir\0";
 
 static PLUGIN: NbdkitPlugin = NbdkitPlugin {
     _struct_size: std::mem::size_of::<NbdkitPlugin>() as u64,
     _api_version: 2,
-    _thread_model: 0, // NBDKIT_THREAD_MODEL_SERIALIZE_CONNECTIONS
+    _thread_model: 0,
     name: PLUGIN_NAME.as_ptr() as *const c_char,
     longname: PLUGIN_LONGNAME.as_ptr() as *const c_char,
     version: PLUGIN_VERSION.as_ptr() as *const c_char,

@@ -10,11 +10,32 @@ use crate::run_ephemeral_macos::detect_machine_name;
 /// Path to the nbdkit EROFS plugin shared library inside podman machine.
 const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so";
 
-/// Start nbdkit with the erofs plugin for dynamic EROFS + GPT generation.
+/// Get the merged overlay path from podman image mount.
+pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Result<String> {
+    let output = if rootful {
+        Command::new("podman")
+            .args(["machine", "ssh", machine, "--", "podman", "image", "mount", image])
+            .output()
+            .context("podman image mount")?
+    } else {
+        Command::new("podman")
+            .args(["machine", "ssh", machine, "--", "podman", "unshare", "podman", "image", "mount", image])
+            .output()
+            .context("podman image mount")?
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("podman image mount failed: {}", stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Start nbdkit with the erofs plugin for dynamic EROFS + ESP + GPT generation.
 pub(crate) fn start_nbdkit_erofs_plugin(
     machine: &str,
     merged_path: &str,
-    esp_path: &str,
+    cmdline: &str,
+    ssh_pubkey: &str,
     nbd_port: u16,
     vm_name: &str,
 ) -> Result<String> {
@@ -26,25 +47,34 @@ pub(crate) fn start_nbdkit_erofs_plugin(
         .stderr(Stdio::null())
         .status();
 
-    let port_arg = format!("{}:10809", nbd_port);
+    let escaped_cmdline = cmdline.replace('\'', "'\\''");
+    let mut ssh_param_str = String::new();
+    if !ssh_pubkey.is_empty() {
+        let escaped_pubkey = ssh_pubkey.replace('\'', "'\\''");
+        ssh_param_str = format!(" 'ssh_pubkey={}'", escaped_pubkey);
+    }
+
+    let podman_cmd = format!(
+        "podman run -d --name {} --security-opt label=disable \
+         -p {}:10809 \
+         -v {}:{}:ro \
+         -v {}:/plugin.so:ro \
+         -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
+         -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
+         quay.io/fedora/fedora:latest \
+         nbdkit -f -p 10809 -r /plugin.so \
+         dir={} \
+         'cmdline={}'{}",
+        container_name, nbd_port,
+        merged_path, merged_path,
+        NBDKIT_EROFS_PLUGIN_PATH,
+        merged_path,
+        escaped_cmdline,
+        ssh_param_str,
+    );
+
     let output = Command::new("podman")
-        .args([
-            "machine", "ssh", machine, "--",
-            "podman", "run", "-d",
-            "--name", &container_name,
-            "--security-opt", "label=disable",
-            "-p", &port_arg,
-            "-v", &format!("{}:{}:ro", merged_path, merged_path),
-            "-v", &format!("{}:/data/esp.img:ro", esp_path),
-            "-v", &format!("{}:/plugin.so:ro", NBDKIT_EROFS_PLUGIN_PATH),
-            "-v", "/usr/bin/nbdkit:/usr/bin/nbdkit:ro",
-            "-v", "/usr/lib64/nbdkit:/usr/lib64/nbdkit:ro",
-            "quay.io/fedora/fedora:latest",
-            "nbdkit", "-f", "-p", "10809", "-r",
-            "/plugin.so",
-            &format!("dir={}", merged_path),
-            "esp=/data/esp.img",
-        ])
+        .args(["machine", "ssh", machine, "--", &podman_cmd])
         .output()
         .context("failed to start nbdkit erofs plugin")?;
 
@@ -101,10 +131,6 @@ pub fn find_available_nbd_port() -> u16 {
     PORT_RANGE_START
 }
 
-///
-/// Runs the container inside the podman machine via `podman machine ssh`
-/// so that /var/tmp/bcvk (local xfs) can be volume-mounted directly.
-
 /// Stop and remove an nbdkit container (best-effort).
 pub fn stop_nbdkit_container(container_name: &str) {
     if let Ok(machine) = detect_machine_name() {
@@ -115,4 +141,3 @@ pub fn stop_nbdkit_container(container_name: &str) {
             .status();
     }
 }
-
