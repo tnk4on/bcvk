@@ -796,6 +796,7 @@ rm -rf "$SSHDIR"
 set -e
 MERGED="{merged}"
 ESPOUT="{esp_output}"
+mkdir -p /var/tmp/bcvk
 BUILDDIR=$(mktemp -d /var/tmp/bcvk/esp-build.XXXXXX)
 mkdir -p "$(dirname "$ESPOUT")"
 
