@@ -163,13 +163,27 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         println!("Removed {}", vm.name);
     }
 
-    // Sweep any orphaned nbdkit containers inside podman machine
+    // Sweep orphaned resources inside podman machine
     if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
+        // Remove orphaned nbdkit containers
         let _ = Command::new("podman")
             .args([
                 "machine", "ssh", &machine, "--",
                 "podman", "rm", "-f", "--filter", "name=bcvk-nbd-",
             ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Unmount any remaining container image overlays
+        let _ = Command::new("podman")
+            .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", "--all"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Remove ESP files
+        let _ = Command::new("podman")
+            .args(["machine", "ssh", &machine, "--", "rm", "-f"])
+            .arg("/var/tmp/bcvk/esp-*.img")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();

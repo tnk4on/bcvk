@@ -21,6 +21,9 @@ use color_eyre::{
 };
 use tracing::{debug, info};
 
+/// Path to the nbdkit EROFS plugin shared library inside podman machine.
+const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so";
+
 /// Base directory for ephemeral VM state on macOS host.
 pub fn ephemeral_base_dir() -> std::path::PathBuf {
     dirs::home_dir()
@@ -804,7 +807,7 @@ fn start_nbdkit_erofs_plugin(
             "-p", &port_arg,
             "-v", &format!("{}:{}:ro", merged_path, merged_path),
             "-v", &format!("{}:/data/esp.img:ro", esp_path),
-            "-v", "/var/tmp/bcvk/libnbdkit_erofs_plugin.so:/plugin.so:ro",
+            "-v", &format!("{}:/plugin.so:ro", NBDKIT_EROFS_PLUGIN_PATH),
             "-v", "/usr/bin/nbdkit:/usr/bin/nbdkit:ro",
             "-v", "/usr/lib64/nbdkit:/usr/lib64/nbdkit:ro",
             "quay.io/fedora/fedora:latest",
