@@ -185,7 +185,8 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     }
 
     // Try to set up SSH port forwarding via VM-specific gvproxy socket
-    let svc_sock = format!("/private/tmp/bcvk/{}-gvproxy-svc.sock", name);
+    let base = run_ephemeral_macos::ephemeral_base_dir();
+    let svc_sock = format!("{}/{}-gvproxy-svc.sock", base.display(), name);
     if std::path::Path::new(&svc_sock).exists() {
         if let Err(e) =
             run_ephemeral_macos::expose_ssh_port(&svc_sock, "192.168.127.2", vm.ssh_port)

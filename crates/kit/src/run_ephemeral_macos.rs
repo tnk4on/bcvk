@@ -21,6 +21,13 @@ use color_eyre::{
 };
 use tracing::{debug, info};
 
+/// Base directory for ephemeral VM state on macOS host.
+pub fn ephemeral_base_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".local/share/bcvk/ephemeral")
+}
+
 // --- Data structures ---
 
 /// Metadata for a running ephemeral VM, persisted as JSON for `ps` and `ssh`.
@@ -57,7 +64,7 @@ pub struct EphemeralVmMetadata {
 impl EphemeralVmMetadata {
     /// Return the directory path for ephemeral VM metadata files.
     pub fn vms_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from("/private/tmp/bcvk/vms")
+        ephemeral_base_dir().join("vms")
     }
 
     /// Save metadata to a JSON file in the VMs directory.
@@ -226,7 +233,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let vfkit_bin = find_vfkit()?;
     info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + EROFS)");
 
-    let cache_base = std::path::PathBuf::from("/private/tmp/bcvk");
+    let cache_base = ephemeral_base_dir();
     fs::create_dir_all(&cache_base)?;
 
     let machine = detect_machine_name()?;
@@ -453,7 +460,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 }
 
 fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
-    let cache_base = std::path::PathBuf::from("/private/tmp/bcvk");
+    let cache_base = ephemeral_base_dir();
     fs::create_dir_all(&cache_base)?;
     let digest = ensure_image_and_get_digest(&opts.image)?;
     let digest_short = &digest[..16.min(digest.len())];
@@ -757,7 +764,7 @@ rm -rf "$BUILDDIR"
         cmdline = cmdline,
     );
 
-    let script_path = format!("/private/tmp/bcvk/build-esp-{}.sh", std::process::id());
+    let script_path = format!("{}/build-esp-{}.sh", ephemeral_base_dir().display(), std::process::id());
     fs::write(&script_path, &script).context("writing ESP build script")?;
     let output = Command::new("podman")
         .args(["machine", "ssh", machine, "--", "bash", &script_path])
