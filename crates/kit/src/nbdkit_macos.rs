@@ -10,8 +10,6 @@ use tracing::info;
 
 #[cfg(target_os = "macos")]
 use crate::run_ephemeral_macos::detect_machine_name;
-#[cfg(target_os = "windows")]
-use crate::run_ephemeral_windows::detect_machine_name;
 
 /// Path to the nbdkit EROFS plugin shared library inside podman machine.
 const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so";

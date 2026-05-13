@@ -75,8 +75,6 @@ mod vfkit;
 #[cfg(target_os = "windows")]
 mod ephemeral_windows;
 #[cfg(target_os = "windows")]
-mod nbdkit_macos;
-#[cfg(target_os = "windows")]
 #[allow(dead_code)]
 mod hyperv;
 #[cfg(target_os = "windows")]

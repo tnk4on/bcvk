@@ -82,7 +82,7 @@ impl EphemeralCommands {
                     println!("removing {}...", vm.name);
                     let _ = crate::hyperv::remove_vm(&vm.vm_name);
                     if let Some(ref nbd) = vm.nbd_container {
-                        crate::nbdkit_macos::stop_nbdkit_container(nbd);
+                        let _ = std::process::Command::new("podman").args(["rm", "-f", nbd]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
                     }
                     EphemeralVmMetadata::remove(&vm.name);
                 }
