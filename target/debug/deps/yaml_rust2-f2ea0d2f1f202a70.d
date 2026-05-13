@@ -1,0 +1,11 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/yaml_rust2-f2ea0d2f1f202a70.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/char_traits.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/debug.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/emitter.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/parser.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/scanner.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/yaml.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/libyaml_rust2-f2ea0d2f1f202a70.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/char_traits.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/debug.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/emitter.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/parser.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/scanner.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/yaml.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/char_traits.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/debug.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/emitter.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/parser.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/scanner.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yaml-rust2-0.9.0/src/yaml.rs:

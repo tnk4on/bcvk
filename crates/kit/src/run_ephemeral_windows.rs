@@ -7,15 +7,17 @@
 //! 4. Hyper-V Gen2 VM PXE boots → GRUB → kernel → dracut NBD → EROFS rootfs
 
 #[cfg(target_os = "windows")]
-use color_eyre::{eyre::bail, Result};
+use color_eyre::{eyre::{bail, eyre}, Result};
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
+use std::process::{Command, Stdio};
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 #[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[cfg(target_os = "windows")]
 use crate::boot_files;
@@ -25,6 +27,9 @@ use crate::hyperv;
 use crate::pxe_server::PxeServer;
 #[cfg(target_os = "windows")]
 use crate::ssh_forward::SshForward;
+
+#[cfg(target_os = "windows")]
+const SSH_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[cfg(target_os = "windows")]
 const SWITCH_NAME: &str = "bcvk-pxe";
@@ -190,7 +195,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         bail!("Hyper-V is not enabled. Run: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All");
     }
 
-    let machine = crate::run_ephemeral_macos::detect_machine_name()?;
+    let machine = crate::run_ephemeral_windows::detect_machine_name()?;
     info!("podman machine: {}", machine);
 
     let rootful = {
@@ -268,14 +273,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         // Start PXE server in background
-        let pxe_handle = tokio::spawn({
-            let pxe_ref = &pxe;
-            async move {
-                if let Err(e) = pxe_ref.serve().await {
-                    warn!("PXE server error: {}", e);
-                }
-            }
-        });
+        let (dhcp_handle, tftp_handle) = pxe.start_background();
 
         // Start VM
         hyperv::start_vm(&vm_name)?;
@@ -311,24 +309,93 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         metadata.save()?;
 
         // Wait for SSH
-        crate::run_ephemeral_macos::wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
+        crate::run_ephemeral_windows::wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
         info!("SSH connected!");
 
         // Execute commands or interactive
         if !opts.execute.is_empty() {
             for cmd in &opts.execute {
-                crate::run_ephemeral_macos::run_ssh_command(ssh_port, &ssh_key_path, "root", cmd)?;
+                crate::run_ephemeral_windows::run_ssh_command(ssh_port, &ssh_key_path, "root", cmd).map(|_| ())?;
             }
         } else if ssh_pubkey.is_empty() {
             info!("VM running. Use: bcvk ephemeral ssh {}", name);
         } else {
-            crate::run_ephemeral_macos::run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
+            crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root").map(|_| ())?;
         }
 
         pxe.stop();
-        pxe_handle.abort();
+        dhcp_handle.abort();
+        tftp_handle.abort();
         Ok::<(), color_eyre::Report>(())
     })?;
 
     Ok(())
+}
+
+// --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---
+
+#[cfg(target_os = "windows")]
+pub fn detect_machine_name() -> Result<String> {
+    let output = Command::new("podman")
+        .args(["machine", "info", "--format", "{{.Host.CurrentMachine}}"])
+        .output()?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        bail!("no podman machine is running");
+    }
+    Ok(name)
+}
+
+#[cfg(target_os = "windows")]
+pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
+    use crate::ssh_options::CommonSshOptions;
+    let ssh_opts = CommonSshOptions::default();
+    let user_host = format!("{}@localhost", user);
+    info!("waiting for SSH on port {}...", port);
+    let start = std::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        if start.elapsed() > SSH_TIMEOUT {
+            bail!("SSH connection timeout ({}s)", SSH_TIMEOUT.as_secs());
+        }
+        let mut cmd = Command::new("ssh");
+        cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
+        ssh_opts.apply_to_command(&mut cmd);
+        cmd.args(["-o", "BatchMode=yes", &user_host, "true"]);
+        if let Ok(s) = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            if s.success() {
+                info!("SSH connected after {}s", start.elapsed().as_secs());
+                return Ok(());
+            }
+        }
+        let backoff = if attempt < 2 { 500 } else if attempt < 4 { 1000 } else { 2000 };
+        std::thread::sleep(Duration::from_millis(backoff));
+        attempt += 1;
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) -> Result<std::process::ExitStatus> {
+    use crate::ssh_options::CommonSshOptions;
+    let ssh_opts = CommonSshOptions::default();
+    let user_host = format!("{}@localhost", user);
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
+    ssh_opts.apply_to_command(&mut cmd);
+    cmd.args(["-o", "BatchMode=yes", &user_host, command]);
+    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+        .status().map_err(|e| eyre!("ssh failed: {}", e))
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std::process::ExitStatus> {
+    use crate::ssh_options::CommonSshOptions;
+    let ssh_opts = CommonSshOptions::default();
+    let user_host = format!("{}@localhost", user);
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
+    ssh_opts.apply_to_command(&mut cmd);
+    cmd.args(["-t", &user_host]);
+    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+        .status().map_err(|e| eyre!("ssh failed: {}", e))
 }

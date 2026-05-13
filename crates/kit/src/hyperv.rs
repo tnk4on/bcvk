@@ -1,19 +1,22 @@
 //! Hyper-V VM lifecycle management via PowerShell commands.
 
+
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
 #[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct SwitchInfo {
     pub name: String,
     pub host_ip: String,
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct VmInfo {
     pub name: String,
     pub state: String,

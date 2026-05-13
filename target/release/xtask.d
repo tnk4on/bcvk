@@ -1,0 +1,1 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/xtask: /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/xtask/src/man.rs /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/xtask/src/xtask.rs

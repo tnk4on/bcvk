@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct SshForward {
     port: u16,
     stop: Arc<Notify>,

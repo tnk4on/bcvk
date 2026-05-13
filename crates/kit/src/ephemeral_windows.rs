@@ -61,7 +61,7 @@ impl EphemeralCommands {
             Self::Ssh { name } => {
                 let meta = EphemeralVmMetadata::load(&name)?;
                 let key_path = std::path::Path::new(&meta.ssh_key);
-                crate::run_ephemeral_macos::run_ssh_interactive(meta.ssh_port, key_path, "root")
+                crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root").map(|_| ())
             }
             Self::Ps => {
                 let vms = EphemeralVmMetadata::list_all()?;

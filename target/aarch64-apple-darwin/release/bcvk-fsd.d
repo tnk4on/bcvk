@@ -1,0 +1,1 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/aarch64-apple-darwin/release/bcvk-fsd: /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-fsd/src/lib.rs /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-fsd/src/main.rs

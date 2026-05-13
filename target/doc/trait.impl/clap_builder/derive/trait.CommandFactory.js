@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["bcvk",[["impl <a class=\"trait\" href=\"clap_builder/derive/trait.CommandFactory.html\" title=\"trait clap_builder::derive::CommandFactory\">CommandFactory</a> for <a class=\"struct\" href=\"bcvk/run_ephemeral_macos/struct.RunEphemeralOpts.html\" title=\"struct bcvk::run_ephemeral_macos::RunEphemeralOpts\">RunEphemeralOpts</a>"],["impl <a class=\"trait\" href=\"clap_builder/derive/trait.CommandFactory.html\" title=\"trait clap_builder::derive::CommandFactory\">CommandFactory</a> for <a class=\"struct\" href=\"bcvk/vfkit/rm/struct.VmRmOpts.html\" title=\"struct bcvk::vfkit::rm::VmRmOpts\">VmRmOpts</a>"],["impl <a class=\"trait\" href=\"clap_builder/derive/trait.CommandFactory.html\" title=\"trait clap_builder::derive::CommandFactory\">CommandFactory</a> for <a class=\"struct\" href=\"bcvk/vfkit/run/struct.VmRunOpts.html\" title=\"struct bcvk::vfkit::run::VmRunOpts\">VmRunOpts</a>"],["impl <a class=\"trait\" href=\"clap_builder/derive/trait.CommandFactory.html\" title=\"trait clap_builder::derive::CommandFactory\">CommandFactory</a> for <a class=\"struct\" href=\"bcvk/vfkit/ssh/struct.VmSshOpts.html\" title=\"struct bcvk::vfkit::ssh::VmSshOpts\">VmSshOpts</a>"],["impl <a class=\"trait\" href=\"clap_builder/derive/trait.CommandFactory.html\" title=\"trait clap_builder::derive::CommandFactory\">CommandFactory</a> for <a class=\"struct\" href=\"bcvk/vfkit/start/struct.VmStartOpts.html\" title=\"struct bcvk::vfkit::start::VmStartOpts\">VmStartOpts</a>"]]],["clap",[]],["clap_builder",[]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1475,12,20]}
