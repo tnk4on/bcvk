@@ -219,8 +219,9 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
                 let filename = extract_string(&data[2..]);
                 let files = files.clone();
                 let stop = stop.clone();
+                let sip = server_ip;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tftp_read(from, &filename, &files, stop).await {
+                    if let Err(e) = handle_tftp_read(from, &filename, &files, stop, sip).await {
                         warn!("TFTP error for {}: {}", filename, e);
                     }
                 });
@@ -231,7 +232,7 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>) -> Result<()> {
+async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>, server_ip: [u8; 4]) -> Result<()> {
     let normalized = filename.replace('/', "\\");
     let data = files.get(filename)
         .or_else(|| files.get(&normalized))
@@ -241,7 +242,7 @@ async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<St
         Some(d) => d,
         None => {
             warn!("TFTP: file not found: {}", filename);
-            let xfer = UdpSocket::bind("0.0.0.0:0").await?;
+            let xfer = UdpSocket::bind(format!("{}.{}.{}.{}:0", server_ip[0], server_ip[1], server_ip[2], server_ip[3])).await?;
             let err = [0u8, 5, 0, 1, b'N', b'o', b't', b' ', b'f', b'o', b'u', b'n', b'd', 0];
             xfer.send_to(&err, client).await?;
             return Ok(());
@@ -250,7 +251,7 @@ async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<St
 
     info!("TFTP: serving {} ({} bytes) to {}", filename, data.len(), client.ip());
 
-    let xfer = UdpSocket::bind("0.0.0.0:0").await?;
+    let xfer = UdpSocket::bind(format!("{}.{}.{}.{}:0", server_ip[0], server_ip[1], server_ip[2], server_ip[3])).await?;
     let block_size: usize = 512;
     let mut block_num: u16 = 1;
     let mut offset: usize = 0;
