@@ -71,6 +71,24 @@ mod run_ephemeral_macos;
 #[cfg(target_os = "macos")]
 mod vfkit;
 
+// Windows-only modules (Hyper-V PXE + NBD backend)
+#[cfg(target_os = "windows")]
+mod ephemeral_windows;
+#[cfg(target_os = "windows")]
+mod nbdkit_macos;
+#[cfg(target_os = "windows")]
+mod run_ephemeral_macos;
+#[cfg(target_os = "windows")]
+mod hyperv;
+#[cfg(target_os = "windows")]
+mod ssh_forward;
+#[cfg(target_os = "windows")]
+mod pxe_server;
+#[cfg(target_os = "windows")]
+mod boot_files;
+#[cfg(target_os = "windows")]
+mod run_ephemeral_windows;
+
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]
 pub const CONTAINER_STATEDIR: &str = "/var/lib/bcvk";
@@ -116,7 +134,7 @@ enum InternalsCmds {
 }
 
 /// Stub subcommands for unsupported platforms
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[derive(Debug, Subcommand)]
 pub enum StubEphemeralCommands {
     /// Run bootc containers as ephemeral VMs
@@ -162,8 +180,14 @@ enum Commands {
     #[clap(subcommand)]
     Vm(vfkit::VmCommands),
 
+    // Windows: Hyper-V PXE + NBD backend
+    #[cfg(target_os = "windows")]
+    /// Manage ephemeral VMs for bootc containers (Hyper-V + PXE backend)
+    #[clap(subcommand)]
+    Ephemeral(ephemeral_windows::EphemeralCommands),
+
     // Other platforms: stub
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     /// Manage ephemeral VMs for bootc containers (not available on this platform)
     #[clap(subcommand)]
     Ephemeral(StubEphemeralCommands),
@@ -313,11 +337,14 @@ fn main() -> Result<(), Report> {
         #[cfg(target_os = "macos")]
         Commands::Vm(cmd) => cmd.run()?,
 
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(target_os = "windows")]
+        Commands::Ephemeral(cmd) => cmd.run()?,
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Commands::Ephemeral(_) => {
             return Err(color_eyre::eyre::eyre!(
                 "The 'ephemeral' command is not available on this platform.\n\
-                 bcvk requires Linux with KVM/QEMU or macOS with vfkit for VM operations."
+                 bcvk requires Linux with KVM/QEMU, macOS with vfkit, or Windows with Hyper-V."
             ));
         }
 
