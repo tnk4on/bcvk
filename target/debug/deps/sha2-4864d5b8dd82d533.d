@@ -1,0 +1,11 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/sha2-4864d5b8dd82d533.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/core_api.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/consts.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256/soft.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512/soft.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/libsha2-4864d5b8dd82d533.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/core_api.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/consts.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256/soft.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512/soft.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/core_api.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/consts.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha256/soft.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.10.9/src/sha512/soft.rs:

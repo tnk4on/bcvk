@@ -1,0 +1,11 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/litemap-f31360cc74fb2391.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/map.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/mod.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/slice_impl.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/vec_impl.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/liblitemap-f31360cc74fb2391.rlib: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/map.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/mod.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/slice_impl.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/vec_impl.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/liblitemap-f31360cc74fb2391.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/map.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/mod.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/slice_impl.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/vec_impl.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/map.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/mod.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/slice_impl.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/litemap-0.8.0/src/store/vec_impl.rs:

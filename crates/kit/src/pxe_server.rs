@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct BootFiles {
     pub grub_efi: Vec<u8>,
     pub kernel: Vec<u8>,
@@ -28,6 +29,7 @@ pub struct BootFiles {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct PxeServer {
     server_ip: [u8; 4],
     client_ip: [u8; 4],
@@ -61,7 +63,7 @@ impl PxeServer {
         })
     }
 
-    pub async fn serve(&self) -> Result<()> {
+    pub fn start_background(&self) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
         let dhcp_handle = tokio::spawn({
             let sip = self.server_ip;
             let cip = self.client_ip;
@@ -85,11 +87,7 @@ impl PxeServer {
             }
         });
 
-        tokio::select! {
-            _ = dhcp_handle => {},
-            _ = tftp_handle => {},
-        }
-        Ok(())
+        (dhcp_handle, tftp_handle)
     }
 
     pub fn stop(&self) {

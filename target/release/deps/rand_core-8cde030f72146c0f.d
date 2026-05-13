@@ -1,0 +1,11 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/rand_core-8cde030f72146c0f.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/block.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/impls.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/le.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/os.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/librand_core-8cde030f72146c0f.rlib: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/block.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/impls.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/le.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/os.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/librand_core-8cde030f72146c0f.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/block.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/impls.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/le.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/os.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/block.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/impls.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/le.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_core-0.9.3/src/os.rs:

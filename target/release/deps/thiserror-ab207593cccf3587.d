@@ -1,0 +1,14 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/thiserror-ab207593cccf3587.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/build/thiserror-f6f08af3317288e4/out/private.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/libthiserror-ab207593cccf3587.rlib: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/build/thiserror-f6f08af3317288e4/out/private.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/libthiserror-ab207593cccf3587.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/build/thiserror-f6f08af3317288e4/out/private.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/build/thiserror-f6f08af3317288e4/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/build/thiserror-f6f08af3317288e4/out

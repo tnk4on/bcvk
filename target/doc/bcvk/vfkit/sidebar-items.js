@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["VmCommands"],"mod":["inspect","list","rm","rm_all","run","ssh","start","stop"],"struct":["VmMetadata"]};

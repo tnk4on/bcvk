@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["clear_xattr","detect_machine_name","ephemeral_base_dir","expose_ssh_port","find_available_ssh_port","find_vfkit","generate_mac","parse_memory_to_mb","run","run_ssh_command","run_ssh_interactive","start_gvproxy","wait_for_ssh"],"struct":["EphemeralVmMetadata","RunEphemeralOpts"]};

@@ -1,0 +1,17 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/krun_utils-7ea9b6222a76ec6b.d: /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/lib.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/byte_order.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/mod.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/epoll.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/eventfd.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/pollable_channel.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sized_vec.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sm.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/syscall.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/time.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/worker_message.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/libkrun_utils-7ea9b6222a76ec6b.rlib: /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/lib.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/byte_order.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/mod.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/epoll.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/eventfd.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/pollable_channel.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sized_vec.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sm.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/syscall.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/time.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/worker_message.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/release/deps/libkrun_utils-7ea9b6222a76ec6b.rmeta: /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/lib.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/byte_order.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/mod.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/epoll.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/eventfd.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/pollable_channel.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sized_vec.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sm.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/syscall.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/time.rs /Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/worker_message.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/lib.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/byte_order.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/mod.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/epoll.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/macos/eventfd.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/pollable_channel.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sized_vec.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/sm.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/syscall.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/time.rs:
+/Users/shtanaka/tmp/bootc-man-dev/refs/libkrun/src/utils/src/worker_message.rs:

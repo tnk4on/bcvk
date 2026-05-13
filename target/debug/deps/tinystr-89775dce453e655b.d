@@ -1,0 +1,12 @@
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/tinystr-89775dce453e655b.d: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/macros.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ascii.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/asciibyte.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/error.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/int_ops.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/unvalidated.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ule.rs
+
+/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/deps/libtinystr-89775dce453e655b.rmeta: /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/lib.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/macros.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ascii.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/asciibyte.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/error.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/int_ops.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/unvalidated.rs /Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ule.rs
+
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/lib.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/macros.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ascii.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/asciibyte.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/error.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/int_ops.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/unvalidated.rs:
+/Users/shtanaka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tinystr-0.8.1/src/ule.rs:
