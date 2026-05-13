@@ -117,6 +117,7 @@ fn find_grub(dir: &std::path::Path) -> Option<PathBuf> {
         None
     }
     walk(&dir.join("usr/lib"), "grubaa64.efi")
+        .or_else(|| walk(&dir.join("usr/lib"), "grubx64.efi"))
 }
 
 #[no_mangle]
