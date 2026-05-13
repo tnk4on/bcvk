@@ -41,5 +41,5 @@ pub mod ephemeral_windows;
 
 // nbdkit module: shared between macOS and Windows
 // Contains podman machine ssh calls (OS-independent)
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 pub mod nbdkit_macos;

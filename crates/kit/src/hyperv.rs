@@ -67,13 +67,13 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     let existing_ip = powershell(&format!(
         "Get-NetIPAddress -InterfaceIndex {} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress",
         if_index
-    ))?;
+    )).unwrap_or_default();
 
     if !existing_ip.contains(host_ip) {
-        powershell(&format!(
+        powershell_ignore_error(&format!(
             "New-NetIPAddress -InterfaceIndex {} -IPAddress {} -PrefixLength {}",
             if_index, host_ip, prefix_len
-        ))?;
+        ));
         info!("assigned {} to switch {}", host_ip, name);
     }
 
@@ -93,7 +93,7 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     );
     // Disable firewall for the Internal Switch profile
     powershell_ignore_error(
-        "Set-NetFirewallProfile -Profile Private -Enabled False -ErrorAction SilentlyContinue"
+        "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
     );
 
     Ok(SwitchInfo {

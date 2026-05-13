@@ -130,7 +130,7 @@ impl Drop for VmCleanup {
         }
         let _ = hyperv::remove_vm(&self.vm_name);
         if let Some(ref name) = self.nbd_container {
-            crate::nbdkit_macos::stop_nbdkit_container(name);
+            stop_nbdkit_container(name);
         }
         EphemeralVmMetadata::remove(&self.name);
     }
@@ -198,11 +198,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let machine = crate::run_ephemeral_windows::detect_machine_name()?;
     info!("podman machine: {}", machine);
 
+    // rootful check: podman machine inspect (no SSH needed)
     let rootful = {
-        let out = std::process::Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "id", "-u"])
+        let out = Command::new("podman")
+            .args(["machine", "inspect", &machine])
+            .stdout(Stdio::piped()).stderr(Stdio::null())
             .output()?;
-        String::from_utf8_lossy(&out.stdout).trim() == "0"
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout.contains("\"Rootful\": true") || stdout.contains("\"Rootful\":true")
     };
 
     let vm_name_suffix = opts.name.clone().unwrap_or_else(|| {
@@ -237,16 +240,65 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         String::new()
     };
 
-    // 1. Start nbdkit
-    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
-    let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
-    info!("overlay merged: {}", merged_path);
+    // 1. Start nbdkit (Windows: podman リモートクライアント経由、podman machine ssh 不使用)
+    let nbd_port = find_available_nbd_port();
+    let nbd_container_name = format!("bcvk-nbd-{}", name);
 
-    let cmdline = "root=/dev/vda2 ro rootfstype=erofs"; // cmdline for nbdkit plugin (GPT disk layout)
-    let nbd_container = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
-        &machine, &merged_path, cmdline, &ssh_pubkey, nbd_port, &name,
-    )?;
-    info!("nbdkit on port {}", nbd_port);
+    // 既存コンテナを削除
+    let _ = Command::new("podman")
+        .args(["rm", "-f", &nbd_container_name])
+        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+
+    // nbdkit コンテナ起動: bootc イメージ自体を使い、その rootfs (/) を dir= で参照
+    // podman image mount は不要 — コンテナ内で直接 rootfs にアクセス
+    let cmdline_val = format!("cmdline=root=/dev/vda2 ro rootfstype=erofs");
+    let ssh_pubkey_arg = if !ssh_pubkey.is_empty() {
+        format!("ssh_pubkey={}", ssh_pubkey)
+    } else {
+        String::new()
+    };
+
+    let mut podman_args = vec![
+        "run".to_string(), "-d".to_string(),
+        "--name".to_string(), nbd_container_name.clone(),
+        "--security-opt".to_string(), "label=disable".to_string(),
+        "-p".to_string(), format!("{}:10809", nbd_port),
+        opts.image.clone(),
+        "bash".to_string(), "-c".to_string(),
+        format!(
+            "dnf install -y nbdkit >/dev/null 2>&1; \
+             nbdkit -f -p 10809 -r /usr/lib64/nbdkit/plugins/nbdkit-file-plugin.so file=/ || \
+             nbdkit -f -p 10809 -r \
+             /var/tmp/bcvk/libnbdkit_erofs_plugin.so \
+             'dir=/' '{}'{}",
+            cmdline_val,
+            if ssh_pubkey_arg.is_empty() { String::new() } else { format!(" '{}'", ssh_pubkey_arg) }
+        ),
+    ];
+
+    let output = Command::new("podman")
+        .args(&podman_args)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to start nbdkit container: {}", stderr.trim());
+    }
+    let nbd_container = nbd_container_name.clone();
+    info!("nbdkit container started on port {}", nbd_port);
+
+    // nbdkit ready 待ち
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::time::Instant::now() > deadline {
+            bail!("nbdkit did not become ready in 30s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{}", nbd_port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    info!("nbdkit ready on port {}", nbd_port);
 
     // 2. Extract boot files to memory
     let boot_files = boot_files::extract_boot_files(&opts.image, HOST_IP, nbd_port)?;
@@ -330,6 +382,25 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+// --- nbdkit helpers ---
+
+#[cfg(target_os = "windows")]
+fn find_available_nbd_port() -> u16 {
+    for port in 10800..10900 {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    10800
+}
+
+#[cfg(target_os = "windows")]
+fn stop_nbdkit_container(name: &str) {
+    let _ = Command::new("podman")
+        .args(["rm", "-f", name])
+        .stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---
