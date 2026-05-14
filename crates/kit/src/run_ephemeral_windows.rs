@@ -324,6 +324,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started on port {}", nbd_port);
 
+    // NBD ポートのファイアウォールルール追加
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            &format!("New-NetFirewallRule -DisplayName 'bcvk-nbd-{}' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue", nbd_port, nbd_port)])
+        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+
     // nbdkit ready 待ち
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
