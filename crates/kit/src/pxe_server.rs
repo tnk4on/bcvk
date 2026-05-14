@@ -224,11 +224,12 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
                 if opcode != 1 { continue; } // RRQ only
 
                 let filename = extract_string(&data[2..]);
+                let raw_req = data.to_vec();
                 let files = files.clone();
                 let stop = stop.clone();
                 let sip = server_ip;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tftp_read(from, &filename, &files, stop, sip).await {
+                    if let Err(e) = handle_tftp_read(from, &raw_req, &filename, &files, stop, sip).await {
                         warn!("TFTP error for {}: {}", filename, e);
                     }
                 });
@@ -239,7 +240,7 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>, server_ip: [u8; 4]) -> Result<()> {
+async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>, server_ip: [u8; 4]) -> Result<()> {
     let stripped = filename.trim_start_matches('/').trim_start_matches('\\');
     let with_fwd = stripped.replace('\\', "/");
     let with_back = stripped.replace('/', "\\");
@@ -261,14 +262,55 @@ async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<St
         }
     };
 
-    let block_size: usize = 512;
+    // Parse blksize from RRQ options
+    let mut block_size: usize = 512;
+    let mut has_options = false;
+    {
+        let mut i = 2;
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; } // skip filename
+        i += 1;
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; } // skip mode
+        i += 1;
+        while i < raw_request.len() {
+            let opt_start = i;
+            while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+            let opt_name = String::from_utf8_lossy(&raw_request[opt_start..i]).to_lowercase();
+            i += 1;
+            let val_start = i;
+            while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+            let opt_val = String::from_utf8_lossy(&raw_request[val_start..i]);
+            i += 1;
+            if opt_name == "blksize" {
+                if let Ok(bs) = opt_val.parse::<usize>() {
+                    block_size = bs.min(1468).max(8);
+                    has_options = true;
+                }
+            } else if opt_name == "tsize" {
+                has_options = true;
+            }
+        }
+    }
 
-    info!("TFTP: serving {} ({} bytes) to {}", filename, data.len(), client.ip());
+    info!("TFTP: serving {} ({} bytes, blksize={}) to {}", filename, data.len(), block_size, client.ip());
 
     let xfer = UdpSocket::bind(&bind_addr).await?;
     let mut ack_buf = [0u8; 600];
 
-    // No OACK - just send DATA blocks directly with 512-byte standard size
+    // Send OACK if client requested options; bail on timeout (client will retry)
+    if has_options {
+        let mut oack = vec![0u8, 6];
+        oack.extend_from_slice(b"blksize\0");
+        oack.extend_from_slice(block_size.to_string().as_bytes());
+        oack.push(0);
+        oack.extend_from_slice(b"tsize\0");
+        oack.extend_from_slice(data.len().to_string().as_bytes());
+        oack.push(0);
+        xfer.send_to(&oack, client).await?;
+        match tokio::time::timeout(Duration::from_secs(3), xfer.recv_from(&mut ack_buf)).await {
+            Ok(Ok((_, _))) => {} // ACK(0) received
+            _ => { bail!("TFTP: OACK timeout (client will retry)"); }
+        }
+    }
 
     let mut block_num: u16 = 1;
     let mut offset: usize = 0;
