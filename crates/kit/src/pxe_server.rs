@@ -300,7 +300,7 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
     let xfer = UdpSocket::bind(&bind_addr).await?;
     let mut ack_buf = [0u8; 600];
 
-    // Send OACK if options were requested
+    // Send OACK if options were requested; fall back to 512 if client doesn't respond
     if block_size != 512 || tsize_requested {
         let mut oack = vec![0u8, 6]; // OACK opcode
         if block_size != 512 {
@@ -313,12 +313,17 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
             oack.extend_from_slice(data.len().to_string().as_bytes());
             oack.push(0);
         }
-        for retry in 0..5 {
+        let mut oack_ok = false;
+        for _retry in 0..3 {
             xfer.send_to(&oack, client).await?;
-            match tokio::time::timeout(Duration::from_secs(3), xfer.recv_from(&mut ack_buf)).await {
-                Ok(Ok((_, _))) => break,
-                _ => { if retry == 4 { bail!("TFTP: OACK timeout"); } }
+            match tokio::time::timeout(Duration::from_secs(2), xfer.recv_from(&mut ack_buf)).await {
+                Ok(Ok((_, _))) => { oack_ok = true; break; }
+                _ => {}
             }
+        }
+        if !oack_ok {
+            warn!("TFTP: OACK not acknowledged, falling back to 512-byte blocks");
+            block_size = 512;
         }
     }
 
