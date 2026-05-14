@@ -125,14 +125,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         name
     ))?;
 
-    // Add a second NIC on Default Switch for NBD TCP access
-    // Internal Switch doesn't support TCP from VM to host (Strong Host Model)
-    powershell_ignore_error(&format!(
-        "Add-VMNetworkAdapter -VMName '{}' -SwitchName 'Default Switch' -Name 'NBD'",
-        name
-    ));
-
-    info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB, 2 NICs)", name, vcpus, memory_mb);
+    info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)", name, vcpus, memory_mb);
     Ok(())
 }
 
@@ -145,6 +138,25 @@ pub fn get_default_switch_ip() -> Result<String> {
         bail!("Default Switch IP not found");
     }
     Ok(ip)
+}
+
+#[cfg(target_os = "windows")]
+pub fn add_pxe_firewall_rules(nbd_port: u16) -> Result<()> {
+    powershell_ignore_error(
+        "New-NetFirewallRule -DisplayName 'bcvk-pxe-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67,4011 -Action Allow -ErrorAction SilentlyContinue"
+    );
+    powershell_ignore_error(
+        "New-NetFirewallRule -DisplayName 'bcvk-pxe-tftp' -Direction Inbound -Protocol UDP -LocalPort 69 -Action Allow -ErrorAction SilentlyContinue"
+    );
+    powershell_ignore_error(&format!(
+        "New-NetFirewallRule -DisplayName 'bcvk-nbd' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue",
+        nbd_port
+    ));
+    powershell_ignore_error(
+        "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
+    );
+    debug!("firewall rules added");
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
