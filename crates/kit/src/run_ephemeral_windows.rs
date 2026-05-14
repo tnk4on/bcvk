@@ -378,7 +378,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // gvproxy binds 0.0.0.0:nbd_port, blocking 10.0.0.1:nbd_port
         // so we use a different proxy port on the Internal Switch IP
         let nbd_proxy = tokio::spawn({
-            let bind_addr = format!("{}:{}", HOST_IP, nbd_proxy_port);
+            let bind_addr = format!("0.0.0.0:{}", nbd_proxy_port);
             let target_addr = format!("127.0.0.1:{}", nbd_port);
             async move {
                 let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
