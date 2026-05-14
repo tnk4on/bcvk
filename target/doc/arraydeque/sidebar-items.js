@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["behavior"],"struct":["ArrayDeque","CapacityError","Drain","IntoIter","Iter","IterMut"],"trait":["RangeArgument"]};

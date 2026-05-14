@@ -1,2 +1,0 @@
-clang diag: /opt/homebrew/include/libkrun.h:696:61: warning: '/*' within block comment [-Wcomment]
-clang diag: /opt/homebrew/include/libkrun.h:701:49: warning: '/*' within block comment [-Wcomment]

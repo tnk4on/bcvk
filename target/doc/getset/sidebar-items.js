@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"derive":["CloneGetters","CopyGetters","Getters","MutGetters","Setters","WithSetters"]};
