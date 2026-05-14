@@ -324,12 +324,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started on port {}", nbd_port);
 
-    // NBD ポートのファイアウォールルール追加
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command",
-            &format!("New-NetFirewallRule -DisplayName 'bcvk-nbd-{}' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue", nbd_port, nbd_port)])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status();
-
     // nbdkit ready 待ち
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -344,7 +338,17 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("nbdkit ready on port {}", nbd_port);
 
     // 2. Extract boot files to memory
-    let boot_files = boot_files::extract_boot_files(&opts.image, HOST_IP, nbd_port)?;
+    // NBD proxy port: VM accesses this port on Internal Switch IP
+    // because gvproxy binds 0.0.0.0:nbd_port which blocks 10.0.0.1:nbd_port
+    let nbd_proxy_port = nbd_port + 100;
+
+    // NBD proxy port のファイアウォールルール追加
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            &format!("New-NetFirewallRule -DisplayName 'bcvk-nbd-{}' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue", nbd_proxy_port, nbd_proxy_port)])
+        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+
+    let boot_files = boot_files::extract_boot_files(&opts.image, HOST_IP, nbd_proxy_port)?;
 
     // 3. Internal Switch
     let switch = hyperv::ensure_internal_switch(SWITCH_NAME, HOST_IP, 24)?;
@@ -370,12 +374,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Start PXE server in background
         let (dhcp_handle, tftp_handle) = pxe.start_background();
 
-        // NBD proxy: 10.0.0.1:nbd_port → 127.0.0.1:nbd_port
-        // Windows doesn't route connections from Internal Switch IP to localhost
-        let nbd_proxy_port = nbd_port;
+        // NBD proxy: 10.0.0.1:nbd_proxy_port → 127.0.0.1:nbd_port
+        // gvproxy binds 0.0.0.0:nbd_port, blocking 10.0.0.1:nbd_port
+        // so we use a different proxy port on the Internal Switch IP
         let nbd_proxy = tokio::spawn({
             let bind_addr = format!("{}:{}", HOST_IP, nbd_proxy_port);
-            let target_addr = format!("127.0.0.1:{}", nbd_proxy_port);
+            let target_addr = format!("127.0.0.1:{}", nbd_port);
             async move {
                 let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
                     Ok(l) => l,
