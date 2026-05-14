@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 #[cfg(target_os = "windows")]
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[cfg(target_os = "windows")]
 use crate::boot_files;
@@ -364,11 +364,39 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         ssh_forward: None,
     };
 
-    // Run PXE server + VM boot + SSH in async runtime
+    // Run PXE server + NBD proxy + VM boot + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         // Start PXE server in background
         let (dhcp_handle, tftp_handle) = pxe.start_background();
+
+        // NBD proxy: 10.0.0.1:nbd_port → 127.0.0.1:nbd_port
+        // Windows doesn't route connections from Internal Switch IP to localhost
+        let nbd_proxy_port = nbd_port;
+        let nbd_proxy = tokio::spawn({
+            let bind_addr = format!("{}:{}", HOST_IP, nbd_proxy_port);
+            let target_addr = format!("127.0.0.1:{}", nbd_proxy_port);
+            async move {
+                let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+                    Ok(l) => l,
+                    Err(e) => { warn!("NBD proxy bind failed: {}", e); return; }
+                };
+                info!("NBD proxy: {} → {}", bind_addr, target_addr);
+                loop {
+                    match listener.accept().await {
+                        Ok((mut client, _)) => {
+                            let target = target_addr.clone();
+                            tokio::spawn(async move {
+                                if let Ok(mut server) = tokio::net::TcpStream::connect(&target).await {
+                                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                                }
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
 
         // Start VM
         hyperv::start_vm(&vm_name)?;
@@ -421,6 +449,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         pxe.stop();
         dhcp_handle.abort();
         tftp_handle.abort();
+        nbd_proxy.abort();
         Ok::<(), color_eyre::Report>(())
     })?;
 
