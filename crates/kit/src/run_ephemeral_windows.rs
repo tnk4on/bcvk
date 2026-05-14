@@ -249,41 +249,78 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .args(["rm", "-f", &nbd_container_name])
         .stdout(Stdio::null()).stderr(Stdio::null()).status();
 
-    // nbdkit コンテナ起動: bootc イメージ自体を使い、その rootfs (/) を dir= で参照
-    // podman image mount は不要 — コンテナ内で直接 rootfs にアクセス
-    let cmdline_val = format!("cmdline=root=/dev/vda2 ro rootfstype=erofs");
-    let ssh_pubkey_arg = if !ssh_pubkey.is_empty() {
-        format!("ssh_pubkey={}", ssh_pubkey)
-    } else {
-        String::new()
-    };
+    // nbdkit: Podman Machine に直接 SSH して起動 (podman machine ssh ではなく ssh コマンド)
+    // podman machine inspect から SSH ポートとキーを取得
+    let inspect_out = Command::new("podman")
+        .args(["machine", "inspect", &machine])
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .output()?;
+    let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
 
-    let mut podman_args = vec![
-        "run".to_string(), "-d".to_string(),
-        "--name".to_string(), nbd_container_name.clone(),
-        "--security-opt".to_string(), "label=disable".to_string(),
-        "-p".to_string(), format!("{}:10809", nbd_port),
-        opts.image.clone(),
-        "bash".to_string(), "-c".to_string(),
-        format!(
-            "dnf install -y nbdkit >/dev/null 2>&1; \
-             nbdkit -f -p 10809 -r /usr/lib64/nbdkit/plugins/nbdkit-file-plugin.so file=/ || \
-             nbdkit -f -p 10809 -r \
-             /var/tmp/bcvk/libnbdkit_erofs_plugin.so \
-             'dir=/' '{}'{}",
-            cmdline_val,
-            if ssh_pubkey_arg.is_empty() { String::new() } else { format!(" '{}'", ssh_pubkey_arg) }
-        ),
-    ];
+    // SSH port を抽出
+    let pm_ssh_port = inspect_json.lines()
+        .find(|l| l.contains("\"Port\""))
+        .and_then(|l| l.trim().trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+        .unwrap_or(22);
+    // SSH identity path を抽出
+    let pm_identity = inspect_json.lines()
+        .find(|l| l.contains("\"IdentityPath\""))
+        .map(|l| l.split('"').nth(3).unwrap_or("").to_string())
+        .unwrap_or_default();
 
-    let output = Command::new("podman")
-        .args(&podman_args)
+    info!("Podman Machine SSH: port={}, key={}", pm_ssh_port, pm_identity);
+
+    fn shell_escape(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    // image mount + nbdkit start を 1 コマンドで実行
+    let mut ssh_param_str = String::new();
+    if !ssh_pubkey.is_empty() {
+        ssh_param_str = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
+    }
+    let remote_script = format!(
+        "MERGED=$(sudo podman image mount {image}); \
+         echo MERGED=$MERGED; \
+         sudo podman rm -f {name} 2>/dev/null; \
+         sudo podman run -d --name {name} --security-opt label=disable \
+         -p {port}:10809 \
+         -v $MERGED:$MERGED:ro \
+         -v /var/tmp/bcvk/libnbdkit_erofs_plugin.so:/plugin.so:ro \
+         -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
+         -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
+         quay.io/fedora/fedora:latest \
+         nbdkit -f -p 10809 -r /plugin.so \
+         'dir='$MERGED \
+         'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}",
+        image = opts.image,
+        name = nbd_container_name,
+        port = nbd_port,
+        ssh = ssh_param_str,
+    );
+
+    let output = Command::new("ssh")
+        .args([
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-i", &pm_identity,
+            "-p", &pm_ssh_port.to_string(),
+            "core@127.0.0.1",
+            &remote_script,
+        ])
         .stdout(Stdio::piped()).stderr(Stdio::piped())
         .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to start nbdkit container: {}", stderr.trim());
+        bail!("failed to start nbdkit: {} {}", stderr.trim(), stdout.trim());
     }
+    info!("nbdkit output: {}", stdout.trim());
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started on port {}", nbd_port);
 
