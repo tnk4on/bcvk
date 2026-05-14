@@ -406,10 +406,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         hyperv::start_vm(&vm_name)?;
         info!("VM {} started, PXE booting...", vm_name);
 
-        // Wait for VM to get IP
+        // Wait for VM to get IP (spawn_blocking to avoid blocking async runtime)
         let vm_ip = loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Ok(Some(ip)) = hyperv::get_vm_ip(&vm_name) {
+            let name_clone = vm_name.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                hyperv::get_vm_ip(&name_clone)
+            }).await?;
+            if let Ok(Some(ip)) = result {
                 break ip;
             }
             debug!("waiting for VM IP...");
