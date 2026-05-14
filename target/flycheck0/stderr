@@ -1,19 +1,5 @@
-   0.209814917s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: stale: changed "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/run_ephemeral_macos.rs"
-   0.209853917s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:           (vs) "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-07ab954ab4b61c84/dep-lib-bcvk"
-   0.209857333s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1778507601, nanos: 746240508 } < FileTime { seconds: 1778518155, nanos: 745967451 }
-   0.210557875s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: fingerprint dirty for bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("bcvk", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/lib.rs", Edition2021) }
-   0.210571000s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-07ab954ab4b61c84/dep-lib-bcvk", reference_mtime: FileTime { seconds: 1778507601, nanos: 746240508 }, stale: "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/run_ephemeral_macos.rs", stale_mtime: FileTime { seconds: 1778518155, nanos: 745967451 } }))
-   0.254595875s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: stale: changed "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/lib.rs"
-   0.254607417s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:           (vs) "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-8285e3e58cbb9ee9/dep-test-lib-bcvk"
-   0.254609333s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1778507601, nanos: 752978152 } < FileTime { seconds: 1778518155, nanos: 745305738 }
-   0.254937583s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: fingerprint dirty for bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("bcvk", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/lib.rs", Edition2021) }
-   0.254948875s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-8285e3e58cbb9ee9/dep-test-lib-bcvk", reference_mtime: FileTime { seconds: 1778507601, nanos: 752978152 }, stale: "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/lib.rs", stale_mtime: FileTime { seconds: 1778518155, nanos: 745305738 } }))
-   0.257073125s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: fingerprint dirty for bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit)/Check { test: false }/TargetInner { name: "bcvk", doc: true, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/main.rs", Edition2021) }
-   0.257080250s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "bcvk" })
-   0.258599333s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint: fingerprint dirty for bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit)/Check { test: true }/TargetInner { name: "bcvk", doc: true, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit/src/main.rs", Edition2021) }
-   0.258610583s  INFO prepare_target{force=false package_id=bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit) target="bcvk"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "bcvk" })
-   0.264210625s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint: fingerprint error for bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("bcvk_qemu", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu/src/lib.rs", Edition2021) }
-   0.264226375s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-qemu-0164197ff2aa2e96/lib-bcvk_qemu`
+   0.199966292s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint: fingerprint error for bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("bcvk_qemu", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu/src/lib.rs", Edition2021) }
+   0.199994500s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-qemu-0164197ff2aa2e96/lib-bcvk_qemu`
 
 Caused by:
     No such file or directory (os error 2)
@@ -36,8 +22,8 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.284625875s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint: fingerprint error for bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("bcvk_qemu", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu/src/lib.rs", Edition2021) }
-   0.284641167s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-qemu-e929fceb062f9a26/test-lib-bcvk_qemu`
+   0.208028750s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint: fingerprint error for bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("bcvk_qemu", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu/src/lib.rs", Edition2021) }
+   0.208043792s  INFO prepare_target{force=false package_id=bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu) target="bcvk_qemu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/bcvk-qemu-e929fceb062f9a26/test-lib-bcvk_qemu`
 
 Caused by:
     No such file or directory (os error 2)
@@ -60,16 +46,8 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.289344083s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration_tests"}: cargo::core::compiler::fingerprint: fingerprint dirty for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("integration_tests", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/lib.rs", Edition2021) }
-   0.289353917s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration_tests"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "bcvk" })
-   0.293762708s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration_tests"}: cargo::core::compiler::fingerprint: fingerprint dirty for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("integration_tests", ["lib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/lib.rs", Edition2021) }
-   0.293777958s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration_tests"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "bcvk" })
-   0.295268000s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="test-cleanup"}: cargo::core::compiler::fingerprint: fingerprint dirty for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: false }/TargetInner { name: "test-cleanup", doc: true, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/bin/cleanup.rs", Edition2021) }
-   0.295280750s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="test-cleanup"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "integration_tests" })
-   0.296494792s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="test-cleanup"}: cargo::core::compiler::fingerprint: fingerprint dirty for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: true }/TargetInner { name: "test-cleanup", doc: true, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/bin/cleanup.rs", Edition2021) }
-   0.296507250s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="test-cleanup"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "integration_tests" })
-   0.297479083s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration-tests"}: cargo::core::compiler::fingerprint: fingerprint error for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: true }/TargetInner { kind: "test", name: "integration-tests", benched: false, harness: false, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/main.rs", Edition2021) }
-   0.297486792s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration-tests"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/integration-tests-fd15c6d5fef959fa/test-integration-test-integration-tests`
+   0.216937458s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration-tests"}: cargo::core::compiler::fingerprint: fingerprint error for integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)/Check { test: true }/TargetInner { kind: "test", name: "integration-tests", benched: false, harness: false, ..: with_path("/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests/src/main.rs", Edition2021) }
+   0.216954583s  INFO prepare_target{force=false package_id=integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests) target="integration-tests"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/integration-tests-fd15c6d5fef959fa/test-integration-test-integration-tests`
 
 Caused by:
     No such file or directory (os error 2)
@@ -92,56 +70,6 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.302483000s  INFO prepare_target{force=false package_id=nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin) target="nbdkit_erofs_plugin"}: cargo::core::compiler::fingerprint: fingerprint error for nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("nbdkit_erofs_plugin", ["cdylib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin/src/lib.rs", Edition2021) }
-   0.302496292s  INFO prepare_target{force=false package_id=nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin) target="nbdkit_erofs_plugin"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/nbdkit-erofs-plugin-f941937f0f30232e/lib-nbdkit_erofs_plugin`
-
-Caused by:
-    No such file or directory (os error 2)
-
-Stack backtrace:
-   0: std::backtrace::Backtrace::create
-   1: <std::io::error::Error as anyhow::context::ext::StdError>::ext_context::<alloc::string::String>
-   2: cargo_util::paths::read
-   3: cargo::core::compiler::fingerprint::prepare_target
-   4: cargo::core::compiler::compile
-   5: <cargo::core::compiler::build_runner::BuildRunner>::compile
-   6: cargo::ops::cargo_compile::compile_ws
-   7: cargo::ops::cargo_compile::compile_with_exec
-   8: cargo::ops::cargo_compile::compile
-   9: cargo::commands::check::exec
-  10: <cargo::cli::Exec>::exec
-  11: cargo::cli::main
-  12: cargo::main
-  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
-  14: std::rt::lang_start::<()>::{closure#0}
-  15: std::rt::lang_start_internal
-  16: _main
-   0.303168500s  INFO prepare_target{force=false package_id=nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin) target="nbdkit_erofs_plugin"}: cargo::core::compiler::fingerprint: fingerprint error for nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("nbdkit_erofs_plugin", ["cdylib"], "/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin/src/lib.rs", Edition2021) }
-   0.303177292s  INFO prepare_target{force=false package_id=nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin) target="nbdkit_erofs_plugin"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/target/debug/.fingerprint/nbdkit-erofs-plugin-c44f2b46745eb660/test-lib-nbdkit_erofs_plugin`
-
-Caused by:
-    No such file or directory (os error 2)
-
-Stack backtrace:
-   0: std::backtrace::Backtrace::create
-   1: <std::io::error::Error as anyhow::context::ext::StdError>::ext_context::<alloc::string::String>
-   2: cargo_util::paths::read
-   3: cargo::core::compiler::fingerprint::prepare_target
-   4: cargo::core::compiler::compile
-   5: <cargo::core::compiler::build_runner::BuildRunner>::compile
-   6: cargo::ops::cargo_compile::compile_ws
-   7: cargo::ops::cargo_compile::compile_with_exec
-   8: cargo::ops::cargo_compile::compile
-   9: cargo::commands::check::exec
-  10: <cargo::cli::Exec>::exec
-  11: cargo::cli::main
-  12: cargo::main
-  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
-  14: std::rt::lang_start::<()>::{closure#0}
-  15: std::rt::lang_start_internal
-  16: _main
-    Checking bcvk v0.15.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/kit)
-    Checking nbdkit-erofs-plugin v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/nbdkit-erofs-plugin)
     Checking bcvk-qemu v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/bcvk-qemu)
     Checking integration-tests v0.1.0 (/Users/shtanaka/tmp/bootc-man-dev/refs/bcvk/crates/integration-tests)
 error: could not compile `bcvk-qemu` (lib) due to 3 previous errors

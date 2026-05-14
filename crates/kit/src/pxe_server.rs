@@ -262,15 +262,18 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
         }
     };
 
-    // Parse blksize from RRQ options
+    // Parse blksize option from RRQ (RFC 2348)
     let mut block_size: usize = 512;
-    let mut has_options = false;
+    let mut tsize_requested = false;
     {
         let mut i = 2;
-        while i < raw_request.len() && raw_request[i] != 0 { i += 1; } // skip filename
+        // skip filename
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
         i += 1;
-        while i < raw_request.len() && raw_request[i] != 0 { i += 1; } // skip mode
+        // skip mode
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
         i += 1;
+        // parse options
         while i < raw_request.len() {
             let opt_start = i;
             while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
@@ -280,13 +283,14 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
             while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
             let opt_val = String::from_utf8_lossy(&raw_request[val_start..i]);
             i += 1;
-            if opt_name == "blksize" {
-                if let Ok(bs) = opt_val.parse::<usize>() {
-                    block_size = bs.min(1468).max(8);
-                    has_options = true;
+            match opt_name.as_str() {
+                "blksize" => {
+                    if let Ok(bs) = opt_val.parse::<usize>() {
+                        block_size = bs.min(1468).max(8);
+                    }
                 }
-            } else if opt_name == "tsize" {
-                has_options = true;
+                "tsize" => { tsize_requested = true; }
+                _ => {}
             }
         }
     }
@@ -296,19 +300,25 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
     let xfer = UdpSocket::bind(&bind_addr).await?;
     let mut ack_buf = [0u8; 600];
 
-    // Send OACK if client requested options; bail on timeout (client will retry)
-    if has_options {
-        let mut oack = vec![0u8, 6];
-        oack.extend_from_slice(b"blksize\0");
-        oack.extend_from_slice(block_size.to_string().as_bytes());
-        oack.push(0);
-        oack.extend_from_slice(b"tsize\0");
-        oack.extend_from_slice(data.len().to_string().as_bytes());
-        oack.push(0);
-        xfer.send_to(&oack, client).await?;
-        match tokio::time::timeout(Duration::from_secs(3), xfer.recv_from(&mut ack_buf)).await {
-            Ok(Ok((_, _))) => {} // ACK(0) received
-            _ => { bail!("TFTP: OACK timeout (client will retry)"); }
+    // Send OACK if options were requested
+    if block_size != 512 || tsize_requested {
+        let mut oack = vec![0u8, 6]; // OACK opcode
+        if block_size != 512 {
+            oack.extend_from_slice(b"blksize\0");
+            oack.extend_from_slice(block_size.to_string().as_bytes());
+            oack.push(0);
+        }
+        if tsize_requested {
+            oack.extend_from_slice(b"tsize\0");
+            oack.extend_from_slice(data.len().to_string().as_bytes());
+            oack.push(0);
+        }
+        for retry in 0..5 {
+            xfer.send_to(&oack, client).await?;
+            match tokio::time::timeout(Duration::from_secs(3), xfer.recv_from(&mut ack_buf)).await {
+                Ok(Ok((_, _))) => break,
+                _ => { if retry == 4 { bail!("TFTP: OACK timeout"); } }
+            }
         }
     }
 
