@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ModeFileType"],"fn":["trailer"],"struct":["Builder","Entry","Reader","Writer"]};

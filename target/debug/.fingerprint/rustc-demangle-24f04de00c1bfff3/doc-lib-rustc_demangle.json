@@ -1,1 +1,0 @@
-{"rustc":6097697865481006981,"features":"[]","declared_features":"[\"compiler_builtins\", \"core\", \"rustc-dep-of-std\", \"std\"]","target":5864663298259408320,"profile":18121581068564224145,"path":9995671462309970061,"deps":[],"local":[{"Precalculated":"0.1.26"}],"rustflags":["-D","warnings"],"config":2069994364910194474,"compile_kind":0}

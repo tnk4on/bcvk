@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"macro":["cmd"],"struct":["Cmd","Error","PushDir","PushEnv","Shell","TempDir"],"type":["Result"]};

@@ -1,2 +1,0 @@
-cargo:rustc-link-search=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
-cargo:rustc-link-lib=dylib=clang
