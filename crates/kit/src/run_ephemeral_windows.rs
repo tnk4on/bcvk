@@ -32,12 +32,6 @@ use crate::ssh_forward::SshForward;
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[cfg(target_os = "windows")]
-const SWITCH_NAME: &str = "bcvk-pxe";
-#[cfg(target_os = "windows")]
-const HOST_IP: &str = "10.0.0.1";
-#[cfg(target_os = "windows")]
-const CLIENT_IP: &str = "10.0.0.100";
-#[cfg(target_os = "windows")]
 const VM_PREFIX: &str = "bcvk-ephemeral-";
 
 // --- Metadata ---
@@ -337,30 +331,21 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     info!("nbdkit ready on port {}", nbd_port);
 
-    // 2. Extract boot files to memory
-    // NBD proxy port: VM accesses this port on Internal Switch IP
-    // because gvproxy binds 0.0.0.0:nbd_port which blocks 10.0.0.1:nbd_port
-    // NBD: VM accesses via Default Switch (TCP works there, unlike Internal Switch)
+    // 2. Get Default Switch IP (used for NBD and TFTP)
     let default_switch_ip = hyperv::get_default_switch_ip()?;
-    info!("Default Switch IP: {} (for NBD access)", default_switch_ip);
+    info!("Default Switch IP: {}", default_switch_ip);
 
-    // NBD port firewall rule
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command",
-            &format!("New-NetFirewallRule -DisplayName 'bcvk-nbd-{}' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue", nbd_port, nbd_port)])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status();
-
-    // grub.cfg uses Default Switch IP for NBD (not Internal Switch)
+    // 3. Extract boot files to memory (NBD via Default Switch IP)
     let boot_files = boot_files::extract_boot_files(&opts.image, &default_switch_ip, nbd_port)?;
 
-    // 3. Internal Switch
-    let switch = hyperv::ensure_internal_switch(SWITCH_NAME, HOST_IP, 24)?;
+    // 4. PXE Server (proxy DHCP + TFTP on Default Switch)
+    let pxe = PxeServer::new(&default_switch_ip, "0.0.0.0", boot_files)?;
 
-    // 4. PXE Server
-    let pxe = PxeServer::new(HOST_IP, CLIENT_IP, boot_files)?;
+    // 5. Firewall rules
+    hyperv::add_pxe_firewall_rules(nbd_port)?;
 
-    // 5. Create + start VM
-    hyperv::create_gen2_vm(&vm_name, memory_mb, vcpus, &switch.name)?;
+    // 6. Create + start VM on Default Switch
+    hyperv::create_gen2_vm(&vm_name, memory_mb, vcpus, "Default Switch")?;
     hyperv::set_pxe_boot(&vm_name)?;
 
     let mut cleanup = VmCleanup {
