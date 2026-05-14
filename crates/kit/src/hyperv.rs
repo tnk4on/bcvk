@@ -150,7 +150,7 @@ pub fn get_default_switch_ip() -> Result<String> {
 #[cfg(target_os = "windows")]
 pub fn set_pxe_boot(name: &str) -> Result<()> {
     powershell(&format!(
-        "Set-VMFirmware -VMName '{}' -FirstBootDevice (Get-VMNetworkAdapter -VMName '{}')",
+        "Set-VMFirmware -VMName '{}' -FirstBootDevice (Get-VMNetworkAdapter -VMName '{}' | Select-Object -First 1)",
         name, name
     ))?;
     debug!("set PXE boot for {}", name);
