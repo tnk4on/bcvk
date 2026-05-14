@@ -51,8 +51,15 @@ impl PxeServer {
         files.insert("boot/vmlinuz".to_string(), files.get("boot\\vmlinuz").unwrap().clone());
         files.insert("boot\\initramfs.img".to_string(), boot_files.initramfs);
         files.insert("boot/initramfs.img".to_string(), files.get("boot\\initramfs.img").unwrap().clone());
-        files.insert("EFI\\BOOT\\grub.cfg".to_string(), boot_files.grub_cfg.into_bytes());
-        files.insert("EFI/BOOT/grub.cfg".to_string(), files.get("EFI\\BOOT\\grub.cfg").unwrap().clone());
+        let grub_cfg_bytes = boot_files.grub_cfg.into_bytes();
+        files.insert("EFI\\BOOT\\grub.cfg".to_string(), grub_cfg_bytes.clone());
+        files.insert("EFI/BOOT/grub.cfg".to_string(), grub_cfg_bytes.clone());
+        // GRUB searches multiple paths for its config
+        files.insert("grub.cfg".to_string(), grub_cfg_bytes.clone());
+        files.insert("/grub.cfg".to_string(), grub_cfg_bytes.clone());
+        files.insert("EFI/fedora/grub.cfg".to_string(), grub_cfg_bytes.clone());
+        files.insert("EFI\\fedora\\grub.cfg".to_string(), grub_cfg_bytes.clone());
+        files.insert("/EFI/fedora/grub.cfg".to_string(), grub_cfg_bytes.clone());
 
         Ok(Self {
             server_ip: sip,
@@ -217,11 +224,12 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
                 if opcode != 1 { continue; } // RRQ only
 
                 let filename = extract_string(&data[2..]);
+                let raw_req = data.to_vec();
                 let files = files.clone();
                 let stop = stop.clone();
                 let sip = server_ip;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tftp_read(from, &filename, &files, stop, sip).await {
+                    if let Err(e) = handle_tftp_read(from, &raw_req, &filename, &files, stop, sip).await {
                         warn!("TFTP error for {}: {}", filename, e);
                     }
                 });
@@ -232,30 +240,90 @@ async fn run_tftp(server_ip: [u8; 4], files: Arc<HashMap<String, Vec<u8>>>, stop
 }
 
 #[cfg(target_os = "windows")]
-async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>, server_ip: [u8; 4]) -> Result<()> {
-    let normalized = filename.replace('/', "\\");
+async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str, files: &HashMap<String, Vec<u8>>, _stop: Arc<Notify>, server_ip: [u8; 4]) -> Result<()> {
+    let stripped = filename.trim_start_matches('/').trim_start_matches('\\');
+    let with_fwd = stripped.replace('\\', "/");
+    let with_back = stripped.replace('/', "\\");
     let data = files.get(filename)
-        .or_else(|| files.get(&normalized))
-        .or_else(|| files.get(&filename.replace('\\', "/")));
+        .or_else(|| files.get(stripped))
+        .or_else(|| files.get(&with_fwd))
+        .or_else(|| files.get(&with_back))
+        .or_else(|| files.get(&format!("/{}", with_fwd)));
 
+    let bind_addr = format!("{}.{}.{}.{}:0", server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
     let data = match data {
         Some(d) => d,
         None => {
             warn!("TFTP: file not found: {}", filename);
-            let xfer = UdpSocket::bind(format!("{}.{}.{}.{}:0", server_ip[0], server_ip[1], server_ip[2], server_ip[3])).await?;
+            let xfer = UdpSocket::bind(&bind_addr).await?;
             let err = [0u8, 5, 0, 1, b'N', b'o', b't', b' ', b'f', b'o', b'u', b'n', b'd', 0];
             xfer.send_to(&err, client).await?;
             return Ok(());
         }
     };
 
-    info!("TFTP: serving {} ({} bytes) to {}", filename, data.len(), client.ip());
+    // Parse blksize option from RRQ (RFC 2348)
+    let mut block_size: usize = 512;
+    let mut tsize_requested = false;
+    {
+        let mut i = 2;
+        // skip filename
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+        i += 1;
+        // skip mode
+        while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+        i += 1;
+        // parse options
+        while i < raw_request.len() {
+            let opt_start = i;
+            while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+            let opt_name = String::from_utf8_lossy(&raw_request[opt_start..i]).to_lowercase();
+            i += 1;
+            let val_start = i;
+            while i < raw_request.len() && raw_request[i] != 0 { i += 1; }
+            let opt_val = String::from_utf8_lossy(&raw_request[val_start..i]);
+            i += 1;
+            match opt_name.as_str() {
+                "blksize" => {
+                    if let Ok(bs) = opt_val.parse::<usize>() {
+                        block_size = bs.min(1468).max(8);
+                    }
+                }
+                "tsize" => { tsize_requested = true; }
+                _ => {}
+            }
+        }
+    }
 
-    let xfer = UdpSocket::bind(format!("{}.{}.{}.{}:0", server_ip[0], server_ip[1], server_ip[2], server_ip[3])).await?;
-    let block_size: usize = 512;
+    info!("TFTP: serving {} ({} bytes, blksize={}) to {}", filename, data.len(), block_size, client.ip());
+
+    let xfer = UdpSocket::bind(&bind_addr).await?;
+    let mut ack_buf = [0u8; 600];
+
+    // Send OACK if options were requested
+    if block_size != 512 || tsize_requested {
+        let mut oack = vec![0u8, 6]; // OACK opcode
+        if block_size != 512 {
+            oack.extend_from_slice(b"blksize\0");
+            oack.extend_from_slice(block_size.to_string().as_bytes());
+            oack.push(0);
+        }
+        if tsize_requested {
+            oack.extend_from_slice(b"tsize\0");
+            oack.extend_from_slice(data.len().to_string().as_bytes());
+            oack.push(0);
+        }
+        for retry in 0..5 {
+            xfer.send_to(&oack, client).await?;
+            match tokio::time::timeout(Duration::from_secs(3), xfer.recv_from(&mut ack_buf)).await {
+                Ok(Ok((_, _))) => break,
+                _ => { if retry == 4 { bail!("TFTP: OACK timeout"); } }
+            }
+        }
+    }
+
     let mut block_num: u16 = 1;
     let mut offset: usize = 0;
-    let mut ack_buf = [0u8; 4];
 
     while offset < data.len() || offset == 0 {
         let end = std::cmp::min(offset + block_size, data.len());
@@ -279,12 +347,12 @@ async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<St
 
         offset += block_size;
         block_num = block_num.wrapping_add(1);
-        if block_num % 5000 == 0 {
+        if block_num % 2000 == 0 {
             debug!("TFTP: {} block {}...", filename, block_num);
         }
     }
 
-    info!("TFTP: {} complete ({} blocks)", filename, block_num);
+    info!("TFTP: {} complete ({} blocks, {} bytes)", filename, block_num, data.len());
     Ok(())
 }
 
