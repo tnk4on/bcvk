@@ -91,12 +91,6 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     powershell_ignore_error(
         "New-NetFirewallRule -DisplayName 'bcvk-pxe-tftp' -Direction Inbound -Protocol UDP -LocalPort 69 -Action Allow -ErrorAction SilentlyContinue"
     );
-    // Enable WeakHostReceive on Internal Switch vNIC for TCP from VMs
-    // WeakHostSend must stay Disabled or it breaks TFTP UDP responses
-    powershell_ignore_error(&format!(
-        "Set-NetIPInterface -InterfaceAlias 'vEthernet ({})' -WeakHostReceive Enabled -WeakHostSend Disabled -ErrorAction SilentlyContinue",
-        name
-    ));
     // Disable firewall for the Internal Switch profile
     powershell_ignore_error(
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
@@ -131,8 +125,26 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         name
     ))?;
 
-    info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)", name, vcpus, memory_mb);
+    // Add a second NIC on Default Switch for NBD TCP access
+    // Internal Switch doesn't support TCP from VM to host (Strong Host Model)
+    powershell_ignore_error(&format!(
+        "Add-VMNetworkAdapter -VMName '{}' -SwitchName 'Default Switch' -Name 'NBD'",
+        name
+    ));
+
+    info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB, 2 NICs)", name, vcpus, memory_mb);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_default_switch_ip() -> Result<String> {
+    let ip = powershell(
+        "Get-NetIPAddress -InterfaceAlias 'vEthernet (Default Switch)' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
+    )?;
+    if ip.is_empty() {
+        bail!("Default Switch IP not found");
+    }
+    Ok(ip)
 }
 
 #[cfg(target_os = "windows")]
