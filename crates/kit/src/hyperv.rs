@@ -91,12 +91,12 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     powershell_ignore_error(
         "New-NetFirewallRule -DisplayName 'bcvk-pxe-tftp' -Direction Inbound -Protocol UDP -LocalPort 69 -Action Allow -ErrorAction SilentlyContinue"
     );
-    // Enable Weak Host model for TCP connectivity from VMs to host vNIC
-    // Windows Strong Host Model (default since Vista) blocks TCP when
-    // packets arrive on a different interface than the listening one
-    powershell_ignore_error(
-        "Get-NetIPInterface -AddressFamily IPv4 | Set-NetIPInterface -WeakHostReceive Enabled -WeakHostSend Enabled -ErrorAction SilentlyContinue"
-    );
+    // Enable WeakHostReceive on Internal Switch vNIC for TCP from VMs
+    // WeakHostSend must stay Disabled or it breaks TFTP UDP responses
+    powershell_ignore_error(&format!(
+        "Set-NetIPInterface -InterfaceAlias 'vEthernet ({})' -WeakHostReceive Enabled -WeakHostSend Disabled -ErrorAction SilentlyContinue",
+        name
+    ));
     // Disable firewall for the Internal Switch profile
     powershell_ignore_error(
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"

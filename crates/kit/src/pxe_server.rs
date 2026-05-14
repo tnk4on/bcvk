@@ -261,13 +261,14 @@ async fn handle_tftp_read(client: SocketAddr, filename: &str, files: &HashMap<St
         }
     };
 
-    // Always use 512-byte blocks (no OACK) for maximum UEFI PXE compatibility
     let block_size: usize = 512;
 
     info!("TFTP: serving {} ({} bytes) to {}", filename, data.len(), client.ip());
 
     let xfer = UdpSocket::bind(&bind_addr).await?;
     let mut ack_buf = [0u8; 600];
+
+    // No OACK - just send DATA blocks directly with 512-byte standard size
 
     let mut block_num: u16 = 1;
     let mut offset: usize = 0;
