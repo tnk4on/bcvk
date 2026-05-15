@@ -274,19 +274,19 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         ssh_param_str = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
     }
     let remote_script = format!(
-        "MERGED=$(sudo podman image mount {image}); \
+        "sudo podman pull -q {image}; \
+         MERGED=$(sudo podman image mount {image}); \
          echo MERGED=$MERGED; \
          sudo podman rm -f {name} 2>/dev/null; \
          sudo podman run -d --name {name} --security-opt label=disable \
          -p {port}:10809 \
          -v $MERGED:$MERGED:ro \
-         -v /var/tmp/bcvk/libnbdkit_erofs_plugin.so:/plugin.so:ro \
-         -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
-         -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
+         -v /var/tmp/bcvk:/bcvk:z,exec \
          quay.io/fedora/fedora:latest \
-         nbdkit -f -p 10809 -r /plugin.so \
-         'dir='$MERGED \
-         'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}",
+         sh -c \"dnf install -y nbdkit >/dev/null 2>&1; \
+         exec nbdkit -f -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
+         dir=$MERGED \
+         'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}\"",
         image = opts.image,
         name = nbd_container_name,
         port = nbd_port,
@@ -331,21 +331,27 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     info!("nbdkit ready on port {}", nbd_port);
 
-    // 2. Get Default Switch IP (used for NBD and TFTP)
-    let default_switch_ip = hyperv::get_default_switch_ip()?;
-    info!("Default Switch IP: {}", default_switch_ip);
+    // 2. Internal Switch for PXE (bcvk is sole DHCP server, no ICS competition)
+    let switch_name = "bcvk-pxe";
+    let host_ip = "10.0.0.1";
+    let client_ip = "10.0.0.100";
+    let switch = hyperv::ensure_internal_switch(switch_name, host_ip, 24)?;
+    info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
 
-    // 3. Extract boot files to memory (NBD via Default Switch IP)
-    let boot_files = boot_files::extract_boot_files(&opts.image, &default_switch_ip, nbd_port)?;
+    // 3. Register hv_sock service for NBD (vsock port 10800)
+    let vsock_port = 10800u32;
+    crate::hv_sock_proxy::register_vsock_service(vsock_port)?;
 
-    // 4. PXE Server (proxy DHCP + TFTP on Default Switch)
-    let pxe = PxeServer::new(&default_switch_ip, "0.0.0.0", boot_files)?;
+    let boot_files = boot_files::extract_boot_files(&opts.image)?;
+
+    // 4. PXE Server (full DHCP + TFTP on Internal Switch)
+    let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
 
     // 5. Firewall rules
     hyperv::add_pxe_firewall_rules(nbd_port)?;
 
-    // 6. Create + start VM on Default Switch
-    hyperv::create_gen2_vm(&vm_name, memory_mb, vcpus, "Default Switch")?;
+    // 6. Create VM on Internal Switch (1 NIC)
+    hyperv::create_gen2_vm(&vm_name, memory_mb, vcpus, switch_name)?;
     hyperv::set_pxe_boot(&vm_name)?;
 
     let mut cleanup = VmCleanup {
@@ -362,8 +368,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Start PXE server in background
         let (dhcp_handle, tftp_handle) = pxe.start_background();
 
-        // No NBD proxy needed - VM accesses NBD via Default Switch NIC
-        // (Internal Switch doesn't support TCP from VM to host)
+        // Start hv_sock proxy: vsock port 10800 → 127.0.0.1:nbd_port (gvproxy)
+        let hvsock_stop = std::sync::Arc::new(tokio::sync::Notify::new());
+        let _hvsock_handle = crate::hv_sock_proxy::start_hvsock_proxy(
+            vsock_port,
+            format!("127.0.0.1:{}", nbd_port),
+            hvsock_stop.clone(),
+        )?;
 
         // Start VM
         hyperv::start_vm(&vm_name)?;

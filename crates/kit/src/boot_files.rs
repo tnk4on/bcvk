@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use crate::pxe_server::BootFiles;
 
 #[cfg(target_os = "windows")]
-pub fn extract_boot_files(image: &str, nbd_host: &str, nbd_port: u16) -> Result<BootFiles> {
+pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
     info!("extracting boot files from {} (memory only)", image);
 
     let kernel = podman_cat(image, "/usr/lib/modules/*/vmlinuz")?;
@@ -27,9 +27,26 @@ pub fn extract_boot_files(image: &str, nbd_host: &str, nbd_port: u16) -> Result<
 
     let initramfs = podman_run_stdout(
         image,
-        "dnf install -y nbd >/dev/null 2>&1; \
+        "dnf install -y nbd socat >/dev/null 2>&1; \
          KVER=$(ls /usr/lib/modules/ | head -1); \
-         dracut --force --no-hostonly --add nbd --add network --add base \
+         mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock; \
+         cat > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh << 'MODEOF'\n\
+#!/bin/bash\n\
+check() { return 0; }\n\
+depends() { return 0; }\n\
+install() {\n\
+    inst_multiple socat\n\
+    inst_hook pre-udev 00 \"$moddir/vsock-bridge.sh\"\n\
+}\n\
+MODEOF\n\
+         cat > /usr/lib/dracut/modules.d/99bcvk-vsock/vsock-bridge.sh << 'HOOKEOF'\n\
+#!/bin/bash\n\
+modprobe hv_sock 2>/dev/null\n\
+socat TCP-LISTEN:10809,fork,reuseaddr VSOCK-CONNECT:2:10800 &\n\
+HOOKEOF\n\
+         chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh; \
+         dracut --force --no-hostonly --add 'nbd network base bcvk-vsock' \
+         --add-drivers 'hv_sock hv_utils hv_vmbus vsock' \
          --kver $KVER /tmp/initramfs.img 2>/dev/null; \
          cat /tmp/initramfs.img",
     )?;
@@ -37,12 +54,10 @@ pub fn extract_boot_files(image: &str, nbd_host: &str, nbd_port: u16) -> Result<
 
     let grub_cfg = format!(
         "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
-         linux /boot/vmlinuz root=nbd:{host}:{port}:erofs:ro \
+         linux /boot/vmlinuz root=nbd:127.0.0.1:10809:erofs:ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 ip=dhcp \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}}",
-        host = nbd_host,
-        port = nbd_port,
     );
     debug!("grub.cfg:\n{}", grub_cfg);
 
