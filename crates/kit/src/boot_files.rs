@@ -59,6 +59,7 @@ pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
              echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
              chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
              chown -R 0:0 /sysroot/var/roothome/.ssh\n\
+             echo 'root:bcvk' | chroot /sysroot chpasswd\n\
              SSHEOF\n\
              chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/setup-ssh.sh && ",
             ssh_pubkey.trim()
@@ -175,6 +176,7 @@ chmod 700 /sysroot/var/roothome/.ssh\n\
 echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
 chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
 chown -R 0:0 /sysroot/var/roothome/.ssh\n\
+echo 'root:bcvk' | chroot /sysroot chpasswd\n\
 SSHEOF\n\
                  chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/setup-ssh.sh && ",
                 ssh_pubkey.trim()
