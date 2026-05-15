@@ -67,7 +67,7 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
     let output = Command::new("podman")
         .args([
             "run", "--rm", "--privileged",
-            "-v", "/tmp/bcvk-nbd-vsock:/tmp/nbd-vsock-host:ro",
+            "-v", "/tmp/bcvk-nbd-vsock:/tmp/nbd-vsock-host:ro,z",
             image, "bash", "-c", script,
         ])
         .stdout(Stdio::piped())
