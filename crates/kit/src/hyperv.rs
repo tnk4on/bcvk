@@ -131,6 +131,12 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         name
     ));
 
+    // COM1 → named pipe for serial console capture
+    powershell_ignore_error(&format!(
+        "Set-VMComPort -VMName '{}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{}'",
+        name, name
+    ));
+
     info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)", name, vcpus, memory_mb);
     Ok(())
 }

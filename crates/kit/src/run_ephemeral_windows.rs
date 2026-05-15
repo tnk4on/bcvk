@@ -380,6 +380,40 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         hyperv::start_vm(&vm_name)?;
         info!("VM {} started, PXE booting...", vm_name);
 
+        // Serial console log: read named pipe → log file (background)
+        let serial_log_path = base_dir.join(format!("serial-{}.log", name));
+        let pipe_path = format!("\\\\.\\pipe\\bcvk-serial-{}", vm_name);
+        let serial_log_path_clone = serial_log_path.clone();
+        let debug_mode = opts.debug;
+        let _serial_handle = tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let pipe = match std::fs::File::open(&pipe_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("serial pipe open failed ({}): {}", pipe_path, e);
+                    return;
+                }
+            };
+            let mut log = match std::fs::File::create(&serial_log_path_clone) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let reader = BufReader::new(pipe);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let _ = writeln!(log, "{}", l);
+                        let _ = log.flush();
+                        if debug_mode {
+                            eprintln!("[serial] {}", l);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        info!("serial log: {}", serial_log_path.display());
+
         // Wait for VM to get IP (spawn_blocking to avoid blocking async runtime)
         let vm_ip = loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
