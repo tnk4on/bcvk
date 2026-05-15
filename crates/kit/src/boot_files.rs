@@ -58,7 +58,7 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
          cat /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh >&2 && \
          echo INITRAMFS: dracut start >&2 && \
-         ls -la /root >&2; mkdir -p /root 2>/dev/null; \
+         rm -f /root 2>/dev/null; mkdir -p /root; \
          dracut --force --no-hostonly --add 'nbd network base bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd' \
          --kver $KVER /tmp/initramfs.img; \
