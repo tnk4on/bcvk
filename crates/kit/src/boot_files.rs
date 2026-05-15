@@ -46,9 +46,24 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
     info!("nbd-vsock binary copied to podman machine ({} bytes)", NBD_VSOCK_BIN.len());
 
     let script =
-        "dnf install -y nbd >/dev/null 2>&1; \
+        "dnf install -y nbd gcc make >/dev/null 2>&1; \
          KVER=$(ls /usr/lib/modules/ | head -1); \
          echo INITRAMFS: kver=$KVER >&2; \
+         dnf install -y kernel-devel-$KVER >/dev/null 2>&1; \
+         KVER_SHORT=$(echo $KVER | sed 's/-.*//'); \
+         KVER_MAJOR=${KVER_SHORT%%.*}; \
+         echo INITRAMFS: patching nbd.ko for AF_VSOCK >&2; \
+         mkdir -p /tmp/nbd-patch && cd /tmp/nbd-patch && \
+         curl -sfL https://cdn.kernel.org/pub/linux/kernel/v${KVER_MAJOR}.x/linux-${KVER_SHORT}.tar.xz \
+           | tar xJ --strip-components=3 linux-${KVER_SHORT}/drivers/block/nbd.c && \
+         sed -i '/!sk_is_tcp(sock->sk) &&/{N;s/!sk_is_stream_unix(sock->sk))/!sk_is_stream_unix(sock->sk) \\&\\& sock->sk->sk_family != AF_VSOCK)/}' nbd.c && \
+         grep -n AF_VSOCK nbd.c >&2 && \
+         echo 'obj-m += nbd.o' > Makefile && \
+         make -C /lib/modules/$KVER/build M=$(pwd) modules >/dev/null 2>&1 && \
+         cp nbd.ko /lib/modules/$KVER/kernel/drivers/block/nbd.ko && \
+         depmod -a $KVER && \
+         echo INITRAMFS: nbd.ko patched >&2; \
+         cd /; \
          mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock && \
          ls -la /tmp/nbd-vsock-host >&2 && \
          cp /tmp/nbd-vsock-host /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
