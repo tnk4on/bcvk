@@ -54,7 +54,7 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
          cp /tmp/nbd-vsock-host /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
          printf '#!/bin/bash\\ncheck() { return 0; }\\ndepends() { return 0; }\\ninstall() {\\n  inst_multiple nbd-client blockdev\\n  inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n  inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
-         printf '#!/bin/bash\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\nls -la /dev/nbd0* >&2\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
+         printf '#!/bin/bash\\nexec 2>/dev/console\\necho setup-nbd: start >&2\\nmodprobe vsock 2>/dev/null\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\necho setup-nbd: running nbd-vsock >&2\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800\\necho setup-nbd: nbd-vsock exit=$? >&2\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\nls -la /dev/nbd0* >&2\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
          cat /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh >&2 && \
          echo INITRAMFS: dracut start >&2 && \
