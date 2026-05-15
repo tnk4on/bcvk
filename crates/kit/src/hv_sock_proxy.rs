@@ -165,14 +165,12 @@ pub fn start_hvsock_proxy(
 async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
     use std::io::{Read, Write};
 
-    // Connect to TCP target
-    // Set send/recv timeouts on hv_sock to prevent blocking forever
-    let timeout: i32 = 30000; // 30 seconds
-    unsafe {
-        setsockopt(hvsock_fd, SOL_SOCKET, SO_SNDTIMEO,
-            &timeout as *const i32 as *const _, std::mem::size_of::<i32>() as i32);
-        setsockopt(hvsock_fd, SOL_SOCKET, SO_RCVTIMEO,
-            &timeout as *const i32 as *const _, std::mem::size_of::<i32>() as i32);
+    // Set up IOCP for hv_sock handle (required for Hyper-V sockets)
+    let iocp = unsafe { CreateIoCompletionPort(hvsock_fd as *mut _, std::ptr::null_mut(), 0, 0xFFFFFFFF) };
+    if iocp.is_null() {
+        warn!("hv_sock proxy: CreateIoCompletionPort failed: {}", unsafe { GetLastError() });
+        unsafe { closesocket(hvsock_fd); }
+        return;
     }
 
     info!("hv_sock proxy: connecting to TCP {}", tcp_target);
@@ -180,7 +178,7 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
         Ok(s) => { info!("hv_sock proxy: TCP connected"); s }
         Err(e) => {
             warn!("hv_sock proxy: TCP connect to {} failed: {}", tcp_target, e);
-            unsafe { closesocket(hvsock_fd); }
+            unsafe { closesocket(hvsock_fd); CloseHandle(iocp); }
             return;
         }
     };
@@ -190,44 +188,32 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
 
     let fd1 = hvsock_fd;
     let fd2 = hvsock_fd;
+    let iocp1 = iocp as usize;
+    let iocp2 = iocp as usize;
 
+    // hv_sock → TCP (read from VM, write to nbdkit)
     let h1 = std::thread::spawn(move || {
         let mut buf = vec![0u8; 65536];
         let mut total = 0u64;
         loop {
-            let mut bytes_read: u32 = 0;
-            let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
-            overlapped.h_event = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
-            let ok = unsafe {
-                ReadFile(
-                    fd1 as *mut std::ffi::c_void,
-                    buf.as_mut_ptr() as *mut _,
-                    buf.len() as u32,
-                    &mut bytes_read,
-                    &mut overlapped,
-                )
-            };
-            if ok == 0 {
-                let err = unsafe { GetLastError() };
-                if err == 997 {
-                    unsafe { GetOverlappedResult(fd1 as *mut std::ffi::c_void, &mut overlapped, &mut bytes_read, 1); }
-                } else {
-                    debug!("hv_sock→tcp: ReadFile err={}", err);
-                    unsafe { CloseHandle(overlapped.h_event); }
-                    break;
-                }
+            let n = hvsock_read(fd1, iocp1 as *mut _, &mut buf);
+            if n <= 0 {
+                debug!("hv_sock→tcp: read returned {}", n);
+                break;
             }
-            unsafe { CloseHandle(overlapped.h_event); }
-            if bytes_read == 0 { break; }
-            total += bytes_read as u64;
-            if tcp_write.write_all(&buf[..bytes_read as usize]).is_err() {
+            total += n as u64;
+            if tcp_write.write_all(&buf[..n as usize]).is_err() {
                 debug!("hv_sock→tcp: tcp write failed");
                 break;
+            }
+            if total <= 200 {
+                info!("hv_sock→tcp: relayed {} bytes (total {})", n, total);
             }
         }
         debug!("hv_sock→tcp: done, {} bytes", total);
     });
 
+    // TCP → hv_sock (read from nbdkit, write to VM)
     let h2 = std::thread::spawn(move || {
         let mut buf = vec![0u8; 65536];
         let mut total = 0u64;
@@ -238,38 +224,13 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
                 Ok(n) => n,
             };
             total += n as u64;
-            if total <= 100 {
-                info!("tcp→hv_sock: read {} bytes from nbdkit, sending to hv_sock...", n);
+            let written = hvsock_write(fd2, iocp2 as *mut _, &buf[..n]);
+            if written <= 0 {
+                warn!("tcp→hv_sock: write failed after {} bytes total", total);
+                break;
             }
-            let mut offset = 0usize;
-            while offset < n {
-                let mut written: u32 = 0;
-                let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
-                overlapped.h_event = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
-                let ok = unsafe {
-                    WriteFile(
-                        fd2 as *mut std::ffi::c_void,
-                        buf[offset..].as_ptr() as *const _,
-                        (n - offset) as u32,
-                        &mut written,
-                        &mut overlapped,
-                    )
-                };
-                if ok == 0 {
-                    let err = unsafe { GetLastError() };
-                    if err == 997 { // ERROR_IO_PENDING
-                        unsafe { GetOverlappedResult(fd2 as *mut std::ffi::c_void, &mut overlapped, &mut written, 1); }
-                    } else {
-                        warn!("tcp→hv_sock: WriteFile failed, err={}", err);
-                        unsafe { CloseHandle(overlapped.h_event); }
-                        return;
-                    }
-                }
-                unsafe { CloseHandle(overlapped.h_event); }
-                offset += written as usize;
-                if total <= 100 {
-                    info!("tcp→hv_sock: wrote {} bytes to hv_sock (offset {}/{})", written, offset, n);
-                }
+            if total <= 200 {
+                info!("tcp→hv_sock: relayed {} bytes (total {})", written, total);
             }
         }
         debug!("tcp→hv_sock: done, {} bytes", total);
@@ -279,6 +240,72 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
     let _ = h2.join();
     unsafe { closesocket(hvsock_fd); }
     debug!("hv_sock proxy connection closed");
+}
+
+// --- IOCP-based hv_sock I/O helpers ---
+
+#[cfg(target_os = "windows")]
+fn hvsock_write(fd: usize, _iocp: *mut std::ffi::c_void, data: &[u8]) -> i32 {
+    let mut wsabuf = WsaBuf {
+        len: data.len() as u32,
+        buf: data.as_ptr() as *mut u8,
+    };
+    let mut sent: u32 = 0;
+    let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
+    overlapped.h_event = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
+
+    let ret = unsafe {
+        WSASend(fd, &mut wsabuf, 1, &mut sent, 0, &mut overlapped, std::ptr::null_mut())
+    };
+
+    if ret != 0 {
+        let err = unsafe { WSAGetLastError() };
+        if err == 997 { // WSA_IO_PENDING
+            let mut flags: u32 = 0;
+            unsafe {
+                WSAGetOverlappedResult(fd, &mut overlapped, &mut sent, 1, &mut flags);
+            }
+        } else {
+            warn!("WSASend failed: err={}", err);
+            unsafe { CloseHandle(overlapped.h_event); }
+            return -1;
+        }
+    }
+
+    unsafe { CloseHandle(overlapped.h_event); }
+    sent as i32
+}
+
+#[cfg(target_os = "windows")]
+fn hvsock_read(fd: usize, _iocp: *mut std::ffi::c_void, buf: &mut [u8]) -> i32 {
+    let mut wsabuf = WsaBuf {
+        len: buf.len() as u32,
+        buf: buf.as_mut_ptr(),
+    };
+    let mut received: u32 = 0;
+    let mut flags: u32 = 0;
+    let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
+    overlapped.h_event = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
+
+    let ret = unsafe {
+        WSARecv(fd, &mut wsabuf, 1, &mut received, &mut flags, &mut overlapped, std::ptr::null_mut())
+    };
+
+    if ret != 0 {
+        let err = unsafe { WSAGetLastError() };
+        if err == 997 { // WSA_IO_PENDING
+            unsafe {
+                WSAGetOverlappedResult(fd, &mut overlapped, &mut received, 1, &mut flags);
+            }
+        } else {
+            debug!("WSARecv failed: err={}", err);
+            unsafe { CloseHandle(overlapped.h_event); }
+            return -1;
+        }
+    }
+
+    unsafe { CloseHandle(overlapped.h_event); }
+    received as i32
 }
 
 // --- Raw Windows API bindings ---
@@ -353,18 +380,21 @@ extern "system" {
     fn bind(s: usize, addr: *const std::ffi::c_void, namelen: i32) -> i32;
     fn listen(s: usize, backlog: i32) -> i32;
     fn accept(s: usize, addr: *mut std::ffi::c_void, addrlen: *mut i32) -> usize;
-    #[allow(dead_code)]
-    fn recv(s: usize, buf: *mut std::ffi::c_void, len: i32, flags: i32) -> i32;
-    #[allow(dead_code)]
-    fn send(s: usize, buf: *const std::ffi::c_void, len: i32, flags: i32) -> i32;
     fn closesocket(s: usize) -> i32;
-    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const std::ffi::c_void, optlen: i32) -> i32;
-    fn WriteFile(handle: *mut std::ffi::c_void, buf: *const std::ffi::c_void, len: u32, written: *mut u32, overlapped: *mut Overlapped) -> i32;
-    fn ReadFile(handle: *mut std::ffi::c_void, buf: *mut std::ffi::c_void, len: u32, read: *mut u32, overlapped: *mut Overlapped) -> i32;
-    fn GetOverlappedResult(handle: *mut std::ffi::c_void, overlapped: *mut Overlapped, transferred: *mut u32, wait: i32) -> i32;
+    fn WSASend(s: usize, bufs: *mut WsaBuf, count: u32, sent: *mut u32, flags: u32, overlapped: *mut Overlapped, completion: *const std::ffi::c_void) -> i32;
+    fn WSARecv(s: usize, bufs: *mut WsaBuf, count: u32, received: *mut u32, flags: *mut u32, overlapped: *mut Overlapped, completion: *const std::ffi::c_void) -> i32;
+    fn WSAGetOverlappedResult(s: usize, overlapped: *mut Overlapped, transferred: *mut u32, wait: i32, flags: *mut u32) -> i32;
+    fn CreateIoCompletionPort(handle: *mut std::ffi::c_void, existing: *mut std::ffi::c_void, key: usize, threads: u32) -> *mut std::ffi::c_void;
     fn CreateEventW(attrs: *mut std::ffi::c_void, manual_reset: i32, initial_state: i32, name: *const u16) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn GetLastError() -> u32;
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct WsaBuf {
+    len: u32,
+    buf: *mut u8,
 }
 
 #[cfg(target_os = "windows")]
@@ -377,9 +407,3 @@ struct Overlapped {
     h_event: *mut std::ffi::c_void,
 }
 
-#[cfg(target_os = "windows")]
-const SOL_SOCKET: i32 = 0xFFFF;
-#[cfg(target_os = "windows")]
-const SO_SNDTIMEO: i32 = 0x1005;
-#[cfg(target_os = "windows")]
-const SO_RCVTIMEO: i32 = 0x1006;
