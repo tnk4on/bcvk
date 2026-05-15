@@ -63,6 +63,8 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd' \
          --kver $KVER /tmp/initramfs.img; \
          echo INITRAMFS: dracut exit=$? >&2; \
+         lsinitrd /tmp/initramfs.img 2>&1 | grep -iE 'nbd|bcvk|setup-nbd' >&2; \
+         which nbd-client >&2 2>&1; \
          test -f /tmp/initramfs.img && cat /tmp/initramfs.img";
 
     let output = Command::new("podman")
