@@ -59,7 +59,7 @@ pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
              echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
              chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
              chown -R 0:0 /sysroot/var/roothome/.ssh\n\
-             echo 'root:bcvk' | chroot /sysroot chpasswd\n\
+             sed -i 's|^root:[^:]*:|root:\\$6\\$bcvksalt\\$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.:|' /sysroot/etc/shadow\n\
              SSHEOF\n\
              chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/setup-ssh.sh && ",
             ssh_pubkey.trim()
@@ -159,8 +159,8 @@ Description=Setup SSH authorized_keys for root\n\
 DefaultDependencies=no\n\
 ConditionPathExists=/etc/initrd-release\n\
 Before=initrd-fs.target\n\
-After=bcvk-var-ephemeral.service\n\
-Requires=bcvk-var-ephemeral.service\n\
+After=bcvk-var-ephemeral.service bcvk-etc-overlay.service\n\
+Requires=bcvk-var-ephemeral.service bcvk-etc-overlay.service\n\
 [Service]\n\
 Type=oneshot\n\
 RemainAfterExit=yes\n\
@@ -176,7 +176,7 @@ chmod 700 /sysroot/var/roothome/.ssh\n\
 echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
 chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
 chown -R 0:0 /sysroot/var/roothome/.ssh\n\
-echo 'root:bcvk' | chroot /sysroot chpasswd\n\
+sed -i 's|^root:[^:]*:|root:\\$6\\$bcvksalt\\$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.:|' /sysroot/etc/shadow\n\
 SSHEOF\n\
                  chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/setup-ssh.sh && ",
                 ssh_pubkey.trim()
