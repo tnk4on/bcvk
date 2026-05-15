@@ -28,36 +28,46 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
     )?;
     info!("GRUB EFI: {} bytes", grub_efi.len());
 
-    let bin_size = NBD_VSOCK_BIN.len();
-    let script = format!(
-        "head -c {} > /tmp/nbd-vsock && chmod +x /tmp/nbd-vsock && \
-         dnf install -y nbd >/dev/null 2>&1; \
+    // Write nbd-vsock binary into podman machine via SSH pipe
+    let mut scp = Command::new("podman")
+        .args(["machine", "ssh", "cat > /tmp/bcvk-nbd-vsock && chmod +x /tmp/bcvk-nbd-vsock"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    if let Some(mut stdin) = scp.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(NBD_VSOCK_BIN)?;
+    }
+    let scp_status = scp.wait()?;
+    if !scp_status.success() {
+        bail!("failed to copy nbd-vsock to podman machine");
+    }
+    info!("nbd-vsock binary copied to podman machine ({} bytes)", NBD_VSOCK_BIN.len());
+
+    let script =
+        "dnf install -y nbd >/dev/null 2>&1; \
          KVER=$(ls /usr/lib/modules/ | head -1); \
          mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock && \
-         cp /tmp/nbd-vsock /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
-         printf '#!/bin/bash\\ncheck() {{ return 0; }}\\ndepends() {{ return 0; }}\\ninstall() {{\\n  inst_multiple blockdev\\n  inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n  inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n}}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
+         cp /tmp/nbd-vsock-host /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
+         chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
+         printf '#!/bin/bash\\ncheck() { return 0; }\\ndepends() { return 0; }\\ninstall() {\\n  inst_multiple blockdev\\n  inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n  inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
          printf '#!/bin/bash\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\nls -la /dev/nbd0* >&2\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
          dracut --force --no-hostonly --add 'nbd network base bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd' \
          --kver $KVER /tmp/initramfs.img 2>/dev/null && \
-         cat /tmp/initramfs.img",
-        bin_size,
-    );
+         cat /tmp/initramfs.img";
 
-    let mut child = Command::new("podman")
-        .args(["run", "--rm", "--privileged", "-i", image, "bash", "-c", &script])
-        .stdin(Stdio::piped())
+    let output = Command::new("podman")
+        .args([
+            "run", "--rm", "--privileged",
+            "-v", "/tmp/bcvk-nbd-vsock:/tmp/nbd-vsock-host:ro",
+            image, "bash", "-c", script,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(NBD_VSOCK_BIN)?;
-    }
-
-    let output = child.wait_with_output()?;
+        .output()?;
     if !output.status.success() {
         bail!("podman run initramfs build failed");
     }
