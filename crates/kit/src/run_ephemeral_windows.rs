@@ -342,7 +342,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let vsock_port = 10800u32;
     crate::hv_sock_proxy::register_vsock_service(vsock_port)?;
 
-    let boot_files = boot_files::extract_boot_files(&opts.image)?;
+    let boot_files = boot_files::extract_boot_files(&opts.image, &ssh_pubkey)?;
 
     // 4. PXE Server (full DHCP + TFTP on Internal Switch)
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
