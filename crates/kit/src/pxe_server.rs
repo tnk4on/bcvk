@@ -104,7 +104,7 @@ impl PxeServer {
 
 #[cfg(target_os = "windows")]
 fn parse_ip(s: &str) -> Result<[u8; 4]> {
-    let parts: Vec<u8> = s.split('.').map(|p| p.parse()).collect::<std::result::Result<Vec<_>, _>>()?;
+    let parts: Vec<u8> = s.split('.').map(|p| p.parse::<u8>()).collect::<std::result::Result<Vec<_>, _>>()?;
     if parts.len() != 4 {
         bail!("invalid IP: {}", s);
     }
@@ -114,60 +114,64 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
 // === DHCP ===
 
 #[cfg(target_os = "windows")]
-async fn run_dhcp(server_ip: [u8; 4], _client_ip: [u8; 4], boot_file: &str, stop: Arc<Notify>) -> Result<()> {
-    // Proxy DHCP: listen on port 4011 for PXE requests
-    // Also listen on port 67 to catch DHCP DISCOVER with PXE options
-    // Windows ICS handles IP allocation; we only provide PXE boot info
-    let addr67 = format!("0.0.0.0:67");
-    let addr4011 = format!("0.0.0.0:4011");
-
-    let sock67 = UdpSocket::bind(&addr67).await;
-    let sock4011 = UdpSocket::bind(&addr4011).await;
-
-    // Try port 67 first; if ICS holds it, use port 4011 only
-    let (sock, port) = match sock67 {
-        Ok(s) => { s.set_broadcast(true)?; (s, 67u16) }
-        Err(_) => {
-            warn!("port 67 in use (ICS), using proxy DHCP on port 4011");
-            let s = sock4011?;
-            s.set_broadcast(true)?;
-            (s, 4011)
-        }
-    };
-    info!("ProxyDHCP listening on port {}", port);
+async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], boot_file: &str, stop: Arc<Notify>) -> Result<()> {
+    let bind_addr = format!("{}.{}.{}.{}:67", server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
+    let sock = UdpSocket::bind(&bind_addr).await?;
+    sock.set_broadcast(true)?;
+    info!("DHCP listening on {}", bind_addr);
 
     let mut buf = vec![0u8; 1500];
     loop {
         tokio::select! {
             _ = stop.notified() => break,
             result = sock.recv_from(&mut buf) => {
-                let (len, from) = result?;
+                let (len, _from) = result?;
                 let data = &buf[..len];
                 if data[0] != 1 || len < 240 { continue; }
 
                 let xid = &data[4..8];
                 let chaddr = &data[28..44];
-
-                // Check for PXE vendor class (Option 60 = "PXEClient")
-                let is_pxe = find_dhcp_option(data, 60)
-                    .map(|v| String::from_utf8_lossy(&v).starts_with("PXEClient"))
-                    .unwrap_or(false);
-
                 let msg_type = find_dhcp_option(data, 53).and_then(|v| v.first().copied()).unwrap_or(0);
 
-                if is_pxe && (msg_type == 1 || msg_type == 3) {
-                    // Proxy DHCP: respond with boot info only, no IP assignment
-                    let resp = build_proxy_dhcp_response(xid, chaddr, &server_ip, boot_file, msg_type);
+                if msg_type == 1 || msg_type == 3 {
+                    let resp_type = if msg_type == 1 { 2u8 } else { 5u8 };
+                    let resp = build_dhcp_response(xid, chaddr, &server_ip, &client_ip, boot_file, resp_type);
                     sock.send_to(&resp, "255.255.255.255:68").await?;
                     let mac = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                         chaddr[0], chaddr[1], chaddr[2], chaddr[3], chaddr[4], chaddr[5]);
-                    let type_name = if msg_type == 1 { "ProxyOFFER" } else { "ProxyACK" };
-                    info!("PXE {} → {} (boot: {})", type_name, mac, boot_file);
+                    let type_name = if msg_type == 1 { "OFFER" } else { "ACK" };
+                    info!("DHCP {} → {} ({})", type_name, format_ip(&client_ip), mac);
                 }
             }
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn build_dhcp_response(xid: &[u8], chaddr: &[u8], server_ip: &[u8; 4], client_ip: &[u8; 4], boot_file: &str, msg_type: u8) -> Vec<u8> {
+    let mut resp = vec![0u8; 512];
+    resp[0] = 2;
+    resp[1] = 1;
+    resp[2] = 6;
+    resp[4..8].copy_from_slice(xid);
+    resp[16..20].copy_from_slice(client_ip);
+    resp[20..24].copy_from_slice(server_ip);
+    resp[28..44].copy_from_slice(chaddr);
+    let sname = format_ip(server_ip);
+    resp[44..44 + sname.len()].copy_from_slice(sname.as_bytes());
+    let bf = boot_file.as_bytes();
+    resp[108..108 + bf.len()].copy_from_slice(bf);
+    resp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    let mut i = 240;
+    resp[i] = 53; resp[i + 1] = 1; resp[i + 2] = msg_type; i += 3;
+    resp[i] = 1; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(&[255, 255, 255, 0]); i += 6;
+    resp[i] = 3; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(server_ip); i += 6;
+    resp[i] = 54; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(server_ip); i += 6;
+    resp[i] = 51; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(&[0, 0, 14, 16]); i += 6;
+    resp[i] = 255; i += 1;
+    resp.truncate(i);
+    resp
 }
 
 #[cfg(target_os = "windows")]
@@ -183,52 +187,6 @@ fn find_dhcp_option(data: &[u8], option: u8) -> Option<Vec<u8>> {
         i += 2 + len;
     }
     None
-}
-
-#[cfg(target_os = "windows")]
-fn build_proxy_dhcp_response(xid: &[u8], chaddr: &[u8], server_ip: &[u8; 4], boot_file: &str, msg_type: u8) -> Vec<u8> {
-    let mut resp = vec![0u8; 300];
-    resp[0] = 2; // BOOTREPLY
-    resp[1] = 1; // Ethernet
-    resp[2] = 6; // HW addr len
-    resp[4..8].copy_from_slice(xid);
-    // yiaddr = 0.0.0.0 (proxy DHCP doesn't assign IP)
-    resp[20..24].copy_from_slice(server_ip); // siaddr = TFTP server
-    resp[28..44].copy_from_slice(chaddr);
-
-    // sname
-    let sname = format_ip(server_ip);
-    resp[44..44 + sname.len()].copy_from_slice(sname.as_bytes());
-
-    // file
-    let bf = boot_file.as_bytes();
-    resp[108..108 + bf.len()].copy_from_slice(bf);
-
-    // Magic cookie
-    resp[236..240].copy_from_slice(&[99, 130, 83, 99]);
-
-    let mut i = 240;
-    // Option 53: DHCP Message Type (OFFER=2 or ACK=5)
-    let resp_type = if msg_type == 1 { 2u8 } else { 5u8 };
-    resp[i] = 53; resp[i + 1] = 1; resp[i + 2] = resp_type; i += 3;
-    // Option 54: Server Identifier
-    resp[i] = 54; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(server_ip); i += 6;
-    // Option 60: Vendor Class "PXEClient"
-    let pxe_class = b"PXEClient";
-    resp[i] = 60; resp[i + 1] = pxe_class.len() as u8;
-    resp[i + 2..i + 2 + pxe_class.len()].copy_from_slice(pxe_class); i += 2 + pxe_class.len();
-    // Option 66: TFTP Server Name
-    let sname_bytes = sname.as_bytes();
-    resp[i] = 66; resp[i + 1] = sname_bytes.len() as u8;
-    resp[i + 2..i + 2 + sname_bytes.len()].copy_from_slice(sname_bytes); i += 2 + sname_bytes.len();
-    // Option 67: Boot File Name
-    resp[i] = 67; resp[i + 1] = bf.len() as u8;
-    resp[i + 2..i + 2 + bf.len()].copy_from_slice(bf); i += 2 + bf.len();
-    // End
-    resp[i] = 255; i += 1;
-
-    resp.truncate(i);
-    resp
 }
 
 // === TFTP ===
