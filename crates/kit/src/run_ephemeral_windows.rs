@@ -284,7 +284,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
          -v /var/tmp/bcvk:/bcvk:z,exec \
          quay.io/fedora/fedora:latest \
          sh -c \"dnf install -y nbdkit >/dev/null 2>&1; \
-         exec nbdkit -f -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
+         exec nbdkit -fv -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
          dir=$MERGED \
          'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}\"",
         image = opts.image,
