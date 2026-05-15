@@ -206,9 +206,7 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
                 debug!("hv_sock→tcp: tcp write failed");
                 break;
             }
-            if total <= 200 {
-                info!("hv_sock→tcp: relayed {} bytes (total {})", n, total);
-            }
+            info!("hv_sock→tcp: relayed {} bytes (total {})", n, total);
         }
         debug!("hv_sock→tcp: done, {} bytes", total);
     });
@@ -229,9 +227,7 @@ async fn handle_hvsock_connection(hvsock_fd: usize, tcp_target: &str) {
                 warn!("tcp→hv_sock: write failed after {} bytes total", total);
                 break;
             }
-            if total <= 200 {
-                info!("tcp→hv_sock: relayed {} bytes (total {})", written, total);
-            }
+            info!("tcp→hv_sock: relayed {} bytes (total {})", written, total);
         }
         debug!("tcp→hv_sock: done, {} bytes", total);
     });

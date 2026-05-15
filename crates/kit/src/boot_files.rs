@@ -148,8 +148,8 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
          gcc -o /tmp/nbd-vsock /tmp/nbd-vsock.c && \
          mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock && \
          cp /tmp/nbd-vsock /usr/lib/dracut/modules.d/99bcvk-vsock/ && \
-         printf '#!/bin/bash\\ncheck() { return 0; }\\ndepends() { return 0; }\\ninstall() {\\n  inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n  inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
-         printf '#!/bin/bash\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
+         printf '#!/bin/bash\\ncheck() { return 0; }\\ndepends() { return 0; }\\ninstall() {\\n  inst_multiple nbd-client blockdev\\n  inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n  inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
+         printf '#!/bin/bash\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800\\nsleep 3\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\nls -la /dev/nbd0* >&2\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
          dracut --force --no-hostonly --add 'nbd network base bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd' \
@@ -159,7 +159,7 @@ pub fn extract_boot_files(image: &str) -> Result<BootFiles> {
     info!("initramfs (nbd): {} bytes", initramfs.len());
 
     let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
-         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
+         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro rd.break=pre-mount \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 ip=dhcp \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}"
