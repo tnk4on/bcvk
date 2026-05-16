@@ -122,12 +122,16 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
     w.write_all(NBD_TCP_BIN)?;
     w.finish()?;
 
-    // setup-nbd.sh — wait for network, then connect
+    // setup-nbd.sh — bring up network via DHCP, then connect NBD
     let setup = format!(
         "#!/bin/bash\n\
+         modprobe hv_netvsc 2>/dev/null\n\
          modprobe nbd max_part=16 2>/dev/null\n\
+         sleep 1\n\
+         DEV=$(ip -o link show | grep -v lo | head -1 | awk -F: '{{print $2}}' | tr -d ' ')\n\
+         ip link set $DEV up 2>/dev/kmsg\n\
          for i in $(seq 1 30); do\n\
-           ip route get {host} >/dev/null 2>&1 && break\n\
+           dhclient -1 $DEV 2>/dev/null && break\n\
            sleep 1\n\
          done\n\
          /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg\n\
