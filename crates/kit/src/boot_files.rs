@@ -137,7 +137,7 @@ VAREOF\n\
          --no-early-microcode \
          --add 'nbd network bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
-         --kver $KVER /tmp/initramfs.img 2>&1; \
+         --kver $KVER /tmp/initramfs.img; \
          test -f /tmp/initramfs.img && cat /tmp/initramfs.img",
         ssh_install = if ssh_pubkey.is_empty() {
             String::new()
