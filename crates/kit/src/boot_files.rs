@@ -93,7 +93,7 @@ pub fn extract_boot_files(
         "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
          linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
-         rd.neednet=1 \
+         rd.neednet=1 rd.break \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}}"
     );
