@@ -346,12 +346,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let switch = hyperv::ensure_internal_switch(switch_name, host_ip, 24)?;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
 
-    // 3. Register hv_sock service for NBD (vsock port 10800)
-    let vsock_port = 10800u32;
-    crate::hv_sock_proxy::register_vsock_service(vsock_port)?;
-
-    // Extract boot files from mounted image (no container creation needed)
-    let boot_files = boot_files::extract_boot_files(&merged_path, &ssh_pubkey)?;
+    // Extract boot files — VM connects to host via TCP for NBD
+    let boot_files = boot_files::extract_boot_files(&merged_path, &ssh_pubkey, host_ip, nbd_port)?;
 
     // 4. PXE Server (full DHCP + TFTP on Internal Switch)
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
@@ -377,15 +373,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Start PXE server in background
         let (dhcp_handle, tftp_handle) = pxe.start_background();
 
-        // Start hv_sock proxy: vsock port 10800 → 127.0.0.1:nbd_port (gvproxy)
-        let hvsock_stop = std::sync::Arc::new(tokio::sync::Notify::new());
-        let _hvsock_handle = crate::hv_sock_proxy::start_hvsock_proxy(
-            vsock_port,
-            format!("127.0.0.1:{}", nbd_port),
-            hvsock_stop.clone(),
-        )?;
-
-        // Start VM
+        // Start VM (NBD via TCP directly, no hv_sock proxy needed)
         hyperv::start_vm(&vm_name)?;
         info!("VM {} started, PXE booting...", vm_name);
 
