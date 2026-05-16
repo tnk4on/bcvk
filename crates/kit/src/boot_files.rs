@@ -122,15 +122,18 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
     w.write_all(NBD_TCP_BIN)?;
     w.finish()?;
 
-    // setup-nbd.sh
+    // setup-nbd.sh — wait for network, then connect
     let setup = format!(
         "#!/bin/bash\n\
          modprobe nbd max_part=16 2>/dev/null\n\
-         sleep 1\n\
-         /usr/bin/nbd-tcp /dev/nbd0 {} {} 2>/dev/kmsg\n\
+         for i in $(seq 1 30); do\n\
+           ip route get {host} >/dev/null 2>&1 && break\n\
+           sleep 1\n\
+         done\n\
+         /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg\n\
          sleep 1\n\
          blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
-        host, port
+        host = host, port = port
     );
     let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup.len() as u32);
