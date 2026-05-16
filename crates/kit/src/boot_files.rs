@@ -156,16 +156,15 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     w.write_all(nm_conn.as_bytes())?;
     w.finish()?;
 
-    // setup-nbd.sh — debug + wait for network + connect
+    // setup-nbd.sh — start NM, wait for network, connect NBD
     let setup = format!(
         "#!/bin/bash\n\
-echo '<6>bcvk-setup-nbd: script started' > /dev/kmsg\n\
-echo '<6>bcvk-setup-nbd: files check' > /dev/kmsg\n\
-ls -la /usr/bin/nbd-tcp /usr/lib/bcvk/setup-nbd.sh /etc/NetworkManager/system-connections/ > /dev/kmsg 2>&1\n\
-echo '<6>bcvk-setup-nbd: systemctl status' > /dev/kmsg\n\
-systemctl list-units --no-pager 2>&1 | grep -iE 'network|nm-' > /dev/kmsg 2>&1\n\
 modprobe nbd max_part=16 2>/dev/null\n\
 \n\
+# Start NetworkManager if not running (it reads our .nmconnection)\n\
+systemctl start nm-initrd.service 2>/dev/null\n\
+\n\
+# Retry loop: wait for NM to bring up network, then connect\n\
 for i in $(seq 1 30); do\n\
   /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
   sleep 2\n\
