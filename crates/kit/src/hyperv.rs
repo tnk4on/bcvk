@@ -95,6 +95,11 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     powershell_ignore_error(
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
     );
+    // Disable NDIS Capture extension (blocks host→VM traffic)
+    powershell_ignore_error(&format!(
+        "Disable-VMSwitchExtension -VMSwitchName '{}' -Name 'Microsoft NDIS Capture' -ErrorAction SilentlyContinue",
+        name
+    ));
 
     Ok(SwitchInfo {
         name: name.to_string(),
