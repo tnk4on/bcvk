@@ -133,58 +133,39 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     w.write_all(NBD_TCP_BIN)?;
     w.finish()?;
 
-    // setup-nbd.sh — 3 methods for network, in priority order
+    // setup-nbd.sh — wait for NM to configure network, then connect
     let setup = format!(
         "#!/bin/bash\n\
 modprobe nbd max_part=16 2>/dev/null\n\
 \n\
-# Try connecting — kernel ip= may have already configured the network\n\
-if /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg; then\n\
-  sleep 1\n\
-  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
-  exit 0\n\
-fi\n\
-\n\
-# Method 2: static IP via ip command\n\
-DEV=$(ip -o link show | grep -v lo | head -1 | awk -F: '{{print $2}}' | tr -d ' ')\n\
-ip link set $DEV up 2>/dev/kmsg\n\
-ip addr add {client}/24 dev $DEV 2>/dev/kmsg\n\
-ip route add default via {gw} 2>/dev/kmsg\n\
+# Wait for network (NM should have configured it via rd.neednet=1)\n\
+for i in $(seq 1 30); do\n\
+  /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
+  sleep 2\n\
+done\n\
 sleep 1\n\
-if /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg; then\n\
-  sleep 1\n\
-  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
-  exit 0\n\
-fi\n\
-\n\
-# Method 3: udhcpc (if available)\n\
-if command -v udhcpc >/dev/null 2>&1; then\n\
-  udhcpc -i $DEV -n -q 2>/dev/kmsg\n\
-  sleep 1\n\
-  /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg\n\
-  sleep 1\n\
-  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
-fi\n",
-        host = host, port = port, client = client_ip, gw = gateway_ip
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
+        host = host, port = port
     );
     let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup.len() as u32);
     w.write_all(setup.as_bytes())?;
     w.finish()?;
 
-    // systemd service — no network dependency, script handles it
+    // systemd service — after NM configures network in initrd
     let service =
         "[Unit]\n\
          Description=Setup NBD TCP connection\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
          Before=sysroot.mount initrd-root-device.target\n\
-         After=systemd-modules-load.service\n\
+         After=nm-initrd.service dracut-initqueue.service systemd-modules-load.service\n\
+         Wants=nm-initrd.service\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
          RemainAfterExit=yes\n\
-         TimeoutStartSec=60\n\
+         TimeoutStartSec=120\n\
          ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n";
     let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-nbd.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, service.len() as u32);
