@@ -125,11 +125,11 @@ fn build_base_initramfs(merged_path: &str, kver: &str) -> Result<Vec<u8>> {
     // 2. Extract extra kernel modules needed but possibly missing from initramfs
     info!("extracting kernel modules...");
     let extra_modules = extract_kernel_modules(merged_path, kver, &[
-        "net/vmw_vsock/vsock.ko*",
-        "net/vmw_vsock/vmw_vsock_virtio_transport_common.ko*",
-        "drivers/hv/hv_sock.ko*",
-        "fs/overlayfs/overlay.ko*",
-        "fs/erofs/erofs.ko*",
+        "net/vmw_vsock/vsock",
+        "net/vmw_vsock/vmw_vsock_virtio_transport_common",
+        "net/vmw_vsock/hv_sock",
+        "fs/overlayfs/overlay",
+        "fs/erofs/erofs",
     ])?;
 
     // 3. Build patched nbd.ko via podman run (only needed for AF_VSOCK support)
@@ -189,8 +189,8 @@ fn extract_kernel_modules(
     let base = format!("{}/usr/lib/modules/{}/kernel", merged_path, kver);
     for pattern in patterns {
         let find_cmd = format!(
-            "find {} -path '*{}' 2>/dev/null | head -1",
-            base, pattern.replace('*', "")
+            "find {} -path '*/{}.ko*' 2>/dev/null | head -1",
+            base, pattern.rsplit('/').next().unwrap_or(pattern)
         );
         let path_out = podman_machine_cmd(&find_cmd)?;
         let path = String::from_utf8_lossy(&path_out).trim().to_string();
@@ -259,14 +259,15 @@ fn create_nbd_cpio(kver: &str, nbd_ko: &[u8], extra_modules: &[(String, Vec<u8>)
         w.finish()?;
     }
 
-    // setup-nbd.sh script — use insmod as fallback if modprobe fails
+    // setup-nbd.sh — modprobe with depmod fallback
     let setup_nbd = format!(
         "#!/bin/bash\n\
-modprobe vsock 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/net/vmw_vsock/vsock.ko.xz 2>/dev/null\n\
-modprobe hv_sock 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/drivers/hv/hv_sock.ko.xz 2>/dev/null\n\
-modprobe nbd max_part=16 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/drivers/block/nbd.ko max_part=16 2>/dev/null\n\
-modprobe overlay 2>/dev/null\n\
-modprobe erofs 2>/dev/null\n\
+depmod -a {kver} 2>/dev/null\n\
+modprobe vsock 2>/dev/kmsg\n\
+modprobe hv_sock 2>/dev/kmsg\n\
+modprobe nbd max_part=16 2>/dev/kmsg\n\
+modprobe overlay 2>/dev/kmsg\n\
+modprobe erofs 2>/dev/kmsg\n\
 sleep 1\n\
 /usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\n\
 sleep 1\n\
