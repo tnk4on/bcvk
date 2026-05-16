@@ -347,7 +347,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
 
     // Extract boot files — VM connects to host via TCP for NBD
-    let boot_files = boot_files::extract_boot_files(&merged_path, &ssh_pubkey, host_ip, nbd_port)?;
+    let boot_files = boot_files::extract_boot_files(
+        &merged_path, &ssh_pubkey, host_ip, nbd_port, client_ip, host_ip
+    )?;
 
     // 4. PXE Server (full DHCP + TFTP on Internal Switch)
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;

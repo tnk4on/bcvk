@@ -23,10 +23,16 @@ const PASSWORD_HASH: &str =
 
 /// Extract boot files using the already-mounted image overlay.
 #[cfg(target_os = "windows")]
-pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str, nbd_host: &str, nbd_port: u16) -> Result<BootFiles> {
+pub fn extract_boot_files(
+    merged_path: &str,
+    ssh_pubkey: &str,
+    nbd_host: &str,
+    nbd_port: u16,
+    client_ip: &str,
+    gateway_ip: &str,
+) -> Result<BootFiles> {
     info!("extracting boot files from {}", merged_path);
 
-    // Read kernel version, kernel, grub_efi in minimal SSH calls
     let meta = podman_machine_cmd(&format!(
         "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
          echo KVER=$KVER; \
@@ -66,11 +72,11 @@ pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str, nbd_host: &str, n
     if initramfs.is_empty() { bail!("initramfs not found"); }
     info!("container initramfs: {} bytes", initramfs.len());
 
-    // Append NBD setup CPIO (nbd-tcp binary + systemd service)
-    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port)?;
+    // Append NBD setup CPIO
+    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port, client_ip, gateway_ip)?;
     append_cpio(&mut initramfs, &nbd_cpio);
 
-    // Append overlay CPIO (etc-overlay + var-ephemeral)
+    // Append overlay CPIO
     let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
     append_cpio(&mut initramfs, &overlay_cpio);
 
@@ -82,12 +88,16 @@ pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str, nbd_host: &str, n
 
     info!("final initramfs: {} bytes", initramfs.len());
 
-    let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
+    // Method 3: kernel ip= static config (processed by kernel, no userspace needed)
+    let grub_cfg = format!(
+        "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
          linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
-         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 ip=dhcp \
+         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
+         ip={client}::{gw}:255.255.255.0::eth0:off \
          systemd.journald.storage=volatile\n  \
-         initrd /boot/initramfs.img\n}"
-        .to_string();
+         initrd /boot/initramfs.img\n}}",
+        client = client_ip, gw = gateway_ip
+    );
     debug!("grub.cfg:\n{}", grub_cfg);
 
     if kernel.is_empty() || grub_efi.is_empty() || initramfs.is_empty() {
@@ -97,9 +107,10 @@ pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str, nbd_host: &str, n
     Ok(BootFiles { grub_efi, kernel, initramfs, grub_cfg })
 }
 
-/// Create CPIO with nbd-tcp binary + systemd service for NBD connection.
+/// Create CPIO with nbd-tcp binary + systemd service.
+/// setup-nbd.sh tries: 1) kernel ip= already configured, 2) ip cmd static, 3) udhcpc
 #[cfg(target_os = "windows")]
-fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
+fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
     use std::io::Write;
@@ -122,37 +133,53 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
     w.write_all(NBD_TCP_BIN)?;
     w.finish()?;
 
-    // setup-nbd.sh — bring up network via DHCP, then connect NBD
+    // setup-nbd.sh — 3 methods for network, in priority order
     let setup = format!(
         "#!/bin/bash\n\
-         modprobe hv_netvsc 2>/dev/null\n\
-         modprobe nbd max_part=16 2>/dev/null\n\
-         sleep 1\n\
-         DEV=$(ip -o link show | grep -v lo | head -1 | awk -F: '{{print $2}}' | tr -d ' ')\n\
-         ip link set $DEV up 2>/dev/kmsg\n\
-         for i in $(seq 1 30); do\n\
-           dhclient -1 $DEV 2>/dev/null && break\n\
-           sleep 1\n\
-         done\n\
-         /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg\n\
-         sleep 1\n\
-         blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
-        host = host, port = port
+modprobe nbd max_part=16 2>/dev/null\n\
+\n\
+# Try connecting — kernel ip= may have already configured the network\n\
+if /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg; then\n\
+  sleep 1\n\
+  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
+  exit 0\n\
+fi\n\
+\n\
+# Method 2: static IP via ip command\n\
+DEV=$(ip -o link show | grep -v lo | head -1 | awk -F: '{{print $2}}' | tr -d ' ')\n\
+ip link set $DEV up 2>/dev/kmsg\n\
+ip addr add {client}/24 dev $DEV 2>/dev/kmsg\n\
+ip route add default via {gw} 2>/dev/kmsg\n\
+sleep 1\n\
+if /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg; then\n\
+  sleep 1\n\
+  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
+  exit 0\n\
+fi\n\
+\n\
+# Method 3: udhcpc (if available)\n\
+if command -v udhcpc >/dev/null 2>&1; then\n\
+  udhcpc -i $DEV -n -q 2>/dev/kmsg\n\
+  sleep 1\n\
+  /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg\n\
+  sleep 1\n\
+  blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
+fi\n",
+        host = host, port = port, client = client_ip, gw = gateway_ip
     );
     let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup.len() as u32);
     w.write_all(setup.as_bytes())?;
     w.finish()?;
 
-    // systemd service
+    // systemd service — no network dependency, script handles it
     let service =
         "[Unit]\n\
          Description=Setup NBD TCP connection\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
          Before=sysroot.mount initrd-root-device.target\n\
-         After=network-online.target\n\
-         Wants=network-online.target\n\
+         After=systemd-modules-load.service\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
@@ -164,7 +191,6 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
     w.write_all(service.as_bytes())?;
     w.finish()?;
 
-    // Drop-in
     let dropin = b"[Unit]\nWants=bcvk-setup-nbd.service\n";
     let b = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf").mode(0o644).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, dropin.len() as u32);
