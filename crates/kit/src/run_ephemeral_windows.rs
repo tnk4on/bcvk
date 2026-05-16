@@ -314,7 +314,15 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("failed to start nbdkit: {} {}", stderr.trim(), stdout.trim());
     }
-    info!("nbdkit output: {}", stdout.trim());
+    // Extract MERGED path from nbdkit output
+    let merged_path = stdout.lines()
+        .find(|l| l.starts_with("MERGED="))
+        .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
+        .unwrap_or_default();
+    if merged_path.is_empty() {
+        bail!("failed to get MERGED path from nbdkit output");
+    }
+    info!("image mounted at: {}", merged_path);
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started on port {}", nbd_port);
 
@@ -342,7 +350,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let vsock_port = 10800u32;
     crate::hv_sock_proxy::register_vsock_service(vsock_port)?;
 
-    let boot_files = boot_files::extract_boot_files(&opts.image, &ssh_pubkey)?;
+    // Extract boot files from mounted image (no container creation needed)
+    let boot_files = boot_files::extract_boot_files(&merged_path, &ssh_pubkey)?;
 
     // 4. PXE Server (full DHCP + TFTP on Internal Switch)
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;

@@ -1,7 +1,8 @@
 //! Extract boot files from bootc container image via podman run.
 //!
-//! All files are captured to memory via stdout pipe — no disk writes.
-//! Base initramfs is cached on podman machine for fast subsequent runs.
+//! Uses the already-mounted container image overlay (MERGED path from
+//! podman image mount) to read files directly via podman machine ssh,
+//! avoiding expensive container creation for each file.
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
@@ -20,53 +21,85 @@ const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
 
+/// Extract boot files using the already-mounted image overlay.
+/// `merged_path` is from `podman image mount` (inside podman machine).
 #[cfg(target_os = "windows")]
-pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
-    info!("extracting boot files from {} (memory only)", image);
+pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str) -> Result<BootFiles> {
+    info!("extracting boot files from {}", merged_path);
 
-    let kernel = podman_cat(image, "/usr/lib/modules/*/vmlinuz")?;
-    info!("kernel: {} bytes", kernel.len());
+    // Read kernel, grub_efi, kver in one SSH call
+    let all_paths = podman_machine_cmd(&format!(
+        "KVER=$(ls {merged}/usr/lib/modules/ | head -1); \
+         echo KVER=$KVER; \
+         GRUB=$(find {merged}/usr/lib -name 'grubx64.efi' -o -name 'grubaa64.efi' 2>/dev/null | head -1); \
+         echo GRUB=$GRUB",
+        merged = merged_path,
+    ))?;
+    let all_paths_str = String::from_utf8_lossy(&all_paths);
 
-    let grub_efi = podman_run_stdout(
-        image,
-        "find /usr/lib -name 'grubx64.efi' -o -name 'grubaa64.efi' | head -1 | xargs cat",
-    )?;
-    info!("GRUB EFI: {} bytes", grub_efi.len());
+    let kver = all_paths_str.lines()
+        .find(|l| l.starts_with("KVER="))
+        .map(|l| l.trim_start_matches("KVER=").trim().to_string())
+        .unwrap_or_default();
+    let grub_path = all_paths_str.lines()
+        .find(|l| l.starts_with("GRUB="))
+        .map(|l| l.trim_start_matches("GRUB=").trim().to_string())
+        .unwrap_or_default();
 
-    // Copy nbd-vsock binary to podman machine
-    copy_to_podman_machine(NBD_VSOCK_BIN, "/tmp/bcvk-nbd-vsock", true)?;
-    info!("nbd-vsock binary: {} bytes", NBD_VSOCK_BIN.len());
-
-    // Get kernel version
-    let kver = podman_run_stdout(image, "ls /usr/lib/modules/ | head -1")?;
-    let kver = String::from_utf8_lossy(&kver).trim().to_string();
+    if kver.is_empty() {
+        bail!("kernel version not found in {}", merged_path);
+    }
     info!("kernel version: {}", kver);
 
-    // Check initramfs cache on podman machine
+    let kernel = podman_machine_cmd(&format!(
+        "cat {}/usr/lib/modules/{}/vmlinuz", merged_path, kver
+    ))?;
+    info!("kernel: {} bytes", kernel.len());
+
+    let grub_efi = if grub_path.is_empty() {
+        bail!("GRUB EFI not found in {}", merged_path);
+    } else {
+        podman_machine_cmd(&format!("cat {}", grub_path))?
+    };
+    info!("GRUB EFI: {} bytes", grub_efi.len());
+
+    // Copy nbd-vsock binary (skip if already exists with same size)
+    let size_check = podman_machine_cmd(
+        "stat -c %s /tmp/bcvk-nbd-vsock 2>/dev/null || echo 0"
+    )?;
+    let remote_size: usize = String::from_utf8_lossy(&size_check)
+        .trim().parse().unwrap_or(0);
+    if remote_size != NBD_VSOCK_BIN.len() {
+        copy_to_podman_machine(NBD_VSOCK_BIN, "/tmp/bcvk-nbd-vsock", true)?;
+        info!("nbd-vsock binary copied: {} bytes", NBD_VSOCK_BIN.len());
+    } else {
+        info!("nbd-vsock binary already present: {} bytes", NBD_VSOCK_BIN.len());
+    }
+
+    // Check initramfs cache
     let cache_path = format!("/tmp/bcvk-initramfs-{}", kver.replace('.', "_"));
     let base_initramfs = if check_cache(&cache_path)? {
         info!("initramfs cache hit: {}", cache_path);
         read_from_podman_machine(&cache_path)?
     } else {
         info!("initramfs cache miss, building...");
-        let base = build_base_initramfs(image, &kver)?;
+        let base = build_base_initramfs(merged_path, &kver)?;
         write_to_podman_machine(&base, &cache_path)?;
         info!("initramfs cached: {} ({} bytes)", cache_path, base.len());
         base
     };
     info!("base initramfs: {} bytes", base_initramfs.len());
 
-    // Append overlay CPIO (4-byte aligned)
+    // Append overlay CPIO
     let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
     let mut initramfs = base_initramfs;
     append_cpio(&mut initramfs, &overlay_cpio);
 
-    // Append SSH CPIO if pubkey provided
+    // Append SSH CPIO
     if !ssh_pubkey.is_empty() {
         let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim(), PASSWORD_HASH)?;
         append_cpio(&mut initramfs, &ssh_cpio);
     }
-
     info!("final initramfs: {} bytes", initramfs.len());
 
     let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
@@ -90,12 +123,11 @@ pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
 }
 
 /// Build base initramfs with nbd-vsock + patched nbd.ko + setup-nbd hook.
-/// No overlay or SSH — those are appended via CPIO.
 #[cfg(target_os = "windows")]
-fn build_base_initramfs(image: &str, kver: &str) -> Result<Vec<u8>> {
+fn build_base_initramfs(merged_path: &str, kver: &str) -> Result<Vec<u8>> {
     let script = format!(
         "dnf install -y nbd gcc make >/dev/null 2>&1; \
-         KVER={}; \
+         KVER={kver}; \
          dnf install -y kernel-devel-$KVER >/dev/null 2>&1; \
          KVER_SHORT=$(echo $KVER | sed 's/-.*//'); \
          KVER_MAJOR=${{KVER_SHORT%%.*}}; \
@@ -128,14 +160,16 @@ fn build_base_initramfs(image: &str, kver: &str) -> Result<Vec<u8>> {
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
          --kver $KVER /tmp/initramfs.img; \
          test -f /tmp/initramfs.img && cat /tmp/initramfs.img",
-        kver,
+        kver = kver,
     );
 
+    // build_base_initramfs still needs podman run for dnf/gcc/dracut
+    let image = format!("quay.io/fedora/fedora-bootc:latest");
     let output = Command::new("podman")
         .args([
             "run", "--rm", "--privileged",
             "-v", "/tmp/bcvk-nbd-vsock:/tmp/nbd-vsock-host:ro,z",
-            image, "bash", "-c", &script,
+            &image, "bash", "-c", &script,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -147,7 +181,6 @@ fn build_base_initramfs(image: &str, kver: &str) -> Result<Vec<u8>> {
     Ok(initramfs)
 }
 
-/// Append a CPIO archive to initramfs with 4-byte alignment padding.
 #[cfg(target_os = "windows")]
 fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     let aligned = (initramfs.len() + 3) & !3;
@@ -155,7 +188,20 @@ fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     initramfs.extend_from_slice(cpio);
 }
 
-/// Copy binary data to podman machine via SSH pipe.
+/// Run command on podman machine and return stdout.
+#[cfg(target_os = "windows")]
+fn podman_machine_cmd(cmd: &str) -> Result<Vec<u8>> {
+    let output = Command::new("podman")
+        .args(["machine", "ssh", cmd])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        bail!("podman machine ssh failed: {}", cmd);
+    }
+    Ok(output.stdout)
+}
+
 #[cfg(target_os = "windows")]
 fn copy_to_podman_machine(data: &[u8], remote_path: &str, executable: bool) -> Result<()> {
     let chmod = if executable {
@@ -181,7 +227,6 @@ fn copy_to_podman_machine(data: &[u8], remote_path: &str, executable: bool) -> R
     Ok(())
 }
 
-/// Check if cached file exists on podman machine.
 #[cfg(target_os = "windows")]
 fn check_cache(path: &str) -> Result<bool> {
     let output = Command::new("podman")
@@ -192,7 +237,6 @@ fn check_cache(path: &str) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).contains("HIT"))
 }
 
-/// Read file from podman machine via SSH pipe.
 #[cfg(target_os = "windows")]
 fn read_from_podman_machine(path: &str) -> Result<Vec<u8>> {
     let output = Command::new("podman")
@@ -206,34 +250,7 @@ fn read_from_podman_machine(path: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Write file to podman machine via SSH pipe.
 #[cfg(target_os = "windows")]
 fn write_to_podman_machine(data: &[u8], path: &str) -> Result<()> {
     copy_to_podman_machine(data, path, false)
-}
-
-#[cfg(target_os = "windows")]
-fn podman_cat(image: &str, glob_path: &str) -> Result<Vec<u8>> {
-    let output = Command::new("podman")
-        .args(["run", "--rm", image, "bash", "-c", &format!("cat {}", glob_path)])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-    if !output.status.success() {
-        bail!("podman run cat {} failed", glob_path);
-    }
-    Ok(output.stdout)
-}
-
-#[cfg(target_os = "windows")]
-fn podman_run_stdout(image: &str, script: &str) -> Result<Vec<u8>> {
-    let output = Command::new("podman")
-        .args(["run", "--rm", "--privileged", image, "bash", "-c", script])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()?;
-    if !output.status.success() {
-        bail!("podman run script failed");
-    }
-    Ok(output.stdout)
 }
