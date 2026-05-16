@@ -1,11 +1,11 @@
 /*
- * nbd-vsock: connect NBD device to server via AF_VSOCK using netlink API.
+ * nbd-tcp: connect NBD device to server via TCP using netlink API.
  *
- * Usage: nbd-vsock /dev/nbdN cid port
+ * Usage: nbd-tcp /dev/nbdN host port
  *
- * The netlink generic API hands the vsock fd to the kernel's internal
- * NBD I/O threads, which survive dracut switch-root (unlike the old
- * ioctl NBD_DO_IT approach that required a userspace process to stay alive).
+ * The netlink generic API hands the TCP socket to the kernel's internal
+ * NBD I/O threads, which survive dracut switch-root.
+ * TCP works with stock nbd.ko — no kernel patch needed.
  */
 
 #include <stdio.h>
@@ -15,7 +15,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
-#include <linux/vm_sockets.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <stdint.h>
@@ -73,7 +74,6 @@ static void nla_put_u64(char *buf, int *pos, uint16_t type, uint64_t val) {
     hdr.nla_type = type;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     memcpy(buf + *pos, &val, 8); *pos += 8;
-    /* u64 is already 4-byte aligned (12 → pad to 12, no gap) */
 }
 
 static void nla_put_string(char *buf, int *pos, uint16_t type, const char *s) {
@@ -89,7 +89,7 @@ static void nla_put_string(char *buf, int *pos, uint16_t type, const char *s) {
 static int nla_nest_start(char *buf, int *pos, uint16_t type) {
     struct nlattr { uint16_t nla_len; uint16_t nla_type; } hdr;
     int start = *pos;
-    hdr.nla_len = 0; /* placeholder */
+    hdr.nla_len = 0;
     hdr.nla_type = type | NLA_F_NESTED;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     return start;
@@ -117,15 +117,12 @@ static int genl_resolve_family(int nl, const char *name) {
     char buf[4096];
     int pos = 0;
 
-    /* nlmsghdr */
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     pos = sizeof(struct nlmsghdr);
 
-    /* genlmsghdr */
     struct genlmsghdr gh = { .cmd = CTRL_CMD_GETFAMILY, .version = 1 };
     memcpy(buf + pos, &gh, sizeof(gh)); pos += sizeof(gh);
 
-    /* CTRL_ATTR_FAMILY_NAME */
     nla_put_string(buf, &pos, CTRL_ATTR_FAMILY_NAME, name);
 
     nh->nlmsg_len = pos;
@@ -145,7 +142,6 @@ static int genl_resolve_family(int nl, const char *name) {
         if (*err) { errno = -*err; return -1; }
     }
 
-    /* parse NLAs for CTRL_ATTR_FAMILY_ID */
     int off = sizeof(struct nlmsghdr) + sizeof(struct genlmsghdr);
     while (off + 4 <= n) {
         uint16_t alen, atype;
@@ -180,7 +176,6 @@ static int nbd_connect_netlink(int nl, int family_id, int dev_index,
     nla_put_u64(buf, &pos, NBD_ATTR_BLOCK_SIZE_BYTES, blksize);
     nla_put_u64(buf, &pos, NBD_ATTR_SERVER_FLAGS, server_flags);
 
-    /* NBD_ATTR_SOCKETS > NBD_SOCK_ITEM > NBD_SOCK_FD */
     int socks_start = nla_nest_start(buf, &pos, NBD_ATTR_SOCKETS);
     int item_start = nla_nest_start(buf, &pos, NBD_SOCK_ITEM);
     nla_put_u32(buf, &pos, NBD_SOCK_FD, sock_fd);
@@ -202,7 +197,7 @@ static int nbd_connect_netlink(int nl, int family_id, int dev_index,
     if (nh->nlmsg_type == NLMSG_ERROR) {
         int *err = (int *)(buf + sizeof(struct nlmsghdr));
         if (*err) {
-            fprintf(stderr, "nbd-vsock: NBD_CMD_CONNECT error: %s\n", strerror(-*err));
+            fprintf(stderr, "nbd-tcp: NBD_CMD_CONNECT error: %s\n", strerror(-*err));
             return -1;
         }
     }
@@ -213,61 +208,62 @@ static int nbd_connect_netlink(int nl, int family_id, int dev_index,
 
 int main(int argc, char **argv) {
     if (argc != 4) {
-        fprintf(stderr, "Usage: nbd-vsock /dev/nbdX cid port\n");
+        fprintf(stderr, "Usage: nbd-tcp /dev/nbdX host port\n");
         return 1;
     }
     const char *dev = argv[1];
-    unsigned int cid = atoi(argv[2]);
+    const char *host = argv[2];
     unsigned int port = atoi(argv[3]);
 
-    /* parse device index from /dev/nbdN */
     int dev_index = atoi(dev + strlen("/dev/nbd"));
 
-    /* AF_VSOCK connect */
-    int vs = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (vs < 0) { perror("vsock socket"); return 1; }
-    struct sockaddr_vm a = {0};
-    a.svm_family = AF_VSOCK; a.svm_cid = cid; a.svm_port = port;
-    fprintf(stderr, "nbd-vsock: connecting cid=%u port=%u\n", cid, port);
-    if (connect(vs, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        perror("vsock connect"); return 1;
+    /* TCP connect */
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("tcp socket"); return 1; }
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &sa.sin_addr) <= 0) {
+        fprintf(stderr, "nbd-tcp: invalid host: %s\n", host);
+        return 1;
     }
-    fprintf(stderr, "nbd-vsock: connected\n");
+    fprintf(stderr, "nbd-tcp: connecting %s:%u\n", host, port);
+    if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        perror("tcp connect"); return 1;
+    }
+    fprintf(stderr, "nbd-tcp: connected\n");
 
     /* NBD newstyle-fixed handshake */
     uint64_t magic, ihaveopt;
     uint16_t hflags;
-    if (readall(vs, &magic, 8) < 0 || readall(vs, &ihaveopt, 8) < 0 ||
-        readall(vs, &hflags, 2) < 0) {
-        fprintf(stderr, "nbd-vsock: handshake read failed\n"); return 1;
+    if (readall(sock, &magic, 8) < 0 || readall(sock, &ihaveopt, 8) < 0 ||
+        readall(sock, &hflags, 2) < 0) {
+        fprintf(stderr, "nbd-tcp: handshake read failed\n"); return 1;
     }
     magic = be64toh(magic); ihaveopt = be64toh(ihaveopt); hflags = be16toh(hflags);
-    fprintf(stderr, "nbd-vsock: magic=%llx flags=%x\n",
+    fprintf(stderr, "nbd-tcp: magic=%llx flags=%x\n",
             (unsigned long long)ihaveopt, hflags);
 
-    /* client flags */
-    uint32_t cflags = htobe32(1); /* NBD_FLAG_C_FIXED_NEWSTYLE */
-    writeall(vs, &cflags, 4);
+    uint32_t cflags = htobe32(1);
+    writeall(sock, &cflags, 4);
 
-    /* NBD_OPT_EXPORT_NAME (option 1, empty name) */
     uint64_t opt_magic = htobe64(0x49484156454F5054ULL);
     uint32_t opt_id = htobe32(1);
     uint32_t opt_len = htobe32(0);
-    writeall(vs, &opt_magic, 8);
-    writeall(vs, &opt_id, 4);
-    writeall(vs, &opt_len, 4);
+    writeall(sock, &opt_magic, 8);
+    writeall(sock, &opt_id, 4);
+    writeall(sock, &opt_len, 4);
 
-    /* receive export info */
     uint64_t export_size;
     uint16_t tflags;
     char pad[124];
-    if (readall(vs, &export_size, 8) < 0 || readall(vs, &tflags, 2) < 0 ||
-        readall(vs, pad, 124) < 0) {
-        fprintf(stderr, "nbd-vsock: export info read failed\n"); return 1;
+    if (readall(sock, &export_size, 8) < 0 || readall(sock, &tflags, 2) < 0 ||
+        readall(sock, pad, 124) < 0) {
+        fprintf(stderr, "nbd-tcp: export info read failed\n"); return 1;
     }
     export_size = be64toh(export_size);
     tflags = be16toh(tflags);
-    fprintf(stderr, "nbd-vsock: export size=%llu bytes, flags=%x\n",
+    fprintf(stderr, "nbd-tcp: export size=%llu bytes, flags=%x\n",
             (unsigned long long)export_size, tflags);
 
     /* netlink: connect NBD device */
@@ -276,20 +272,19 @@ int main(int argc, char **argv) {
 
     int family_id = genl_resolve_family(nl, NBD_GENL_FAMILY_NAME);
     if (family_id < 0) {
-        fprintf(stderr, "nbd-vsock: failed to resolve nbd genl family: %s\n",
+        fprintf(stderr, "nbd-tcp: failed to resolve nbd genl family: %s\n",
                 strerror(errno));
         return 1;
     }
-    fprintf(stderr, "nbd-vsock: nbd genl family_id=%d\n", family_id);
+    fprintf(stderr, "nbd-tcp: nbd genl family_id=%d\n", family_id);
 
-    if (nbd_connect_netlink(nl, family_id, dev_index, vs,
+    if (nbd_connect_netlink(nl, family_id, dev_index, sock,
                             export_size, 512, tflags) < 0) {
-        fprintf(stderr, "nbd-vsock: netlink NBD_CMD_CONNECT failed\n");
+        fprintf(stderr, "nbd-tcp: netlink NBD_CMD_CONNECT failed\n");
         return 1;
     }
 
-    fprintf(stderr, "nbd-vsock: kernel I/O threads started, exiting\n");
+    fprintf(stderr, "nbd-tcp: kernel I/O threads started, exiting\n");
     close(nl);
-    /* vs fd is NOT closed — kernel duplicated it internally via sockfd_lookup */
     return 0;
 }
