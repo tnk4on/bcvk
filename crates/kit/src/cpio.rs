@@ -35,6 +35,16 @@ enum Entry {
     File(&'static str, &'static [u8]),
 }
 
+fn write_file_exec(writer: &mut impl Write, path: &str, content: &[u8]) -> io::Result<()> {
+    let builder = NewcBuilder::new(path)
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut cpio_writer = builder.write(writer, content.len() as u32);
+    cpio_writer.write_all(content)?;
+    cpio_writer.finish()?;
+    Ok(())
+}
+
 /// Create a CPIO archive with bcvk initramfs units for ephemeral VM setup.
 pub fn create_initramfs_units_cpio() -> io::Result<Vec<u8>> {
     use Entry::*;
@@ -109,6 +119,89 @@ pub fn create_initramfs_units_cpio() -> io::Result<Vec<u8>> {
             File(path, content) => write_file(&mut buf, path, content)?,
         }
     }
+
+    cpio::newc::trailer(buf)
+}
+
+/// Create a CPIO archive with overlay + var-ephemeral services for Windows Hyper-V.
+#[cfg(target_os = "windows")]
+pub fn create_windows_overlay_cpio() -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+
+    write_directory(&mut buf, "usr")?;
+    write_directory(&mut buf, "usr/lib")?;
+    write_directory(&mut buf, "usr/lib/systemd")?;
+    write_directory(&mut buf, "usr/lib/systemd/system")?;
+    write_directory(&mut buf, "usr/lib/systemd/system/initrd-fs.target.d")?;
+
+    write_file(
+        &mut buf,
+        "usr/lib/systemd/system/bcvk-etc-overlay.service",
+        include_bytes!("units/bcvk-etc-overlay.service"),
+    )?;
+    write_file(
+        &mut buf,
+        "usr/lib/systemd/system/bcvk-var-ephemeral.service",
+        include_bytes!("units/bcvk-var-ephemeral.service"),
+    )?;
+    write_file(
+        &mut buf,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-overlay.conf",
+        b"[Unit]\nWants=bcvk-etc-overlay.service bcvk-var-ephemeral.service\n",
+    )?;
+
+    cpio::newc::trailer(buf)
+}
+
+/// Create a CPIO archive with SSH setup for Windows Hyper-V.
+#[cfg(target_os = "windows")]
+pub fn create_windows_ssh_cpio(pubkey: &str, password_hash: &str) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+
+    write_directory(&mut buf, "usr")?;
+    write_directory(&mut buf, "usr/lib")?;
+    write_directory(&mut buf, "usr/lib/bcvk")?;
+    write_directory(&mut buf, "usr/lib/systemd")?;
+    write_directory(&mut buf, "usr/lib/systemd/system")?;
+    write_directory(&mut buf, "usr/lib/systemd/system/initrd-fs.target.d")?;
+
+    let setup_script = format!(
+        "#!/bin/bash\n\
+         mkdir -p /sysroot/var/roothome /sysroot/var/empty /sysroot/var/log /sysroot/var/tmp\n\
+         chmod 700 /sysroot/var/roothome\n\
+         chmod 711 /sysroot/var/empty\n\
+         mkdir -p /sysroot/var/roothome/.ssh\n\
+         chmod 700 /sysroot/var/roothome/.ssh\n\
+         echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
+         chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
+         chown -R 0:0 /sysroot/var/roothome/.ssh\n\
+         sed -i 's|^root:[^:]*:|root:{}:|' /sysroot/etc/shadow\n",
+        pubkey, password_hash
+    );
+    write_file_exec(&mut buf, "usr/lib/bcvk/setup-ssh.sh", setup_script.as_bytes())?;
+
+    write_file(
+        &mut buf,
+        "usr/lib/systemd/system/bcvk-ssh-setup.service",
+        b"[Unit]\n\
+          Description=Setup SSH authorized_keys for root\n\
+          DefaultDependencies=no\n\
+          ConditionPathExists=/etc/initrd-release\n\
+          Before=initrd-fs.target\n\
+          After=bcvk-var-ephemeral.service bcvk-etc-overlay.service\n\
+          Requires=bcvk-var-ephemeral.service bcvk-etc-overlay.service\n\
+          \n\
+          [Service]\n\
+          Type=oneshot\n\
+          RemainAfterExit=yes\n\
+          ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-ssh.sh\n",
+    )?;
+
+    write_file(
+        &mut buf,
+        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-ssh-setup.conf",
+        b"[Unit]\nWants=bcvk-ssh-setup.service\n",
+    )?;
 
     cpio::newc::trailer(buf)
 }
