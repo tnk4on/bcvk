@@ -211,20 +211,74 @@ fn create_nbd_cpio(kver: &str, nbd_ko: &[u8]) -> Result<Vec<u8>> {
     w.write_all(nbd_ko)?;
     w.finish()?;
 
-    // setup-nbd.sh (pre-udev hook)
+    // setup-nbd.sh script
     let setup_nbd = b"#!/bin/bash\n\
-        modprobe vsock 2>/dev/null\n\
-        modprobe hv_sock 2>/dev/null\n\
-        modprobe nbd max_part=16 2>/dev/null\n\
-        sleep 1\n\
-        /usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\n\
-        sleep 1\n\
-        blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
-    let builder = NewcBuilder::new("var/lib/dracut/hooks/pre-udev/00-setup-nbd.sh")
+modprobe vsock 2>/dev/null\n\
+modprobe hv_sock 2>/dev/null\n\
+modprobe nbd max_part=16 2>/dev/null\n\
+sleep 1\n\
+/usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\n\
+sleep 1\n\
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
+
+    // usr/lib/bcvk directory
+    let dirs2 = ["usr/lib/bcvk"];
+    for dir in &dirs2 {
+        let builder = NewcBuilder::new(dir)
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Directory);
+        builder.write(&mut buf, 0).finish()?;
+    }
+
+    let builder = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh")
         .mode(0o755)
         .set_mode_file_type(ModeFileType::Regular);
     let mut w = builder.write(&mut buf, setup_nbd.len() as u32);
     w.write_all(setup_nbd)?;
+    w.finish()?;
+
+    // systemd service unit (runs before sysinit, after basic target)
+    let service = format!(
+        "[Unit]\n\
+         Description=Setup NBD vsock connection\n\
+         DefaultDependencies=no\n\
+         ConditionPathExists=/etc/initrd-release\n\
+         Before=sysinit.target\n\
+         After=systemd-modules-load.service\n\
+         Wants=systemd-modules-load.service\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         RemainAfterExit=yes\n\
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n"
+    );
+
+    // systemd unit dirs (may already exist but CPIO allows dupes)
+    let unit_dirs = [
+        "usr/lib/systemd", "usr/lib/systemd/system",
+        "usr/lib/systemd/system/sysinit.target.d",
+    ];
+    for dir in &unit_dirs {
+        let builder = NewcBuilder::new(dir)
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Directory);
+        builder.write(&mut buf, 0).finish()?;
+    }
+
+    let builder = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-nbd.service")
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = builder.write(&mut buf, service.len() as u32);
+    w.write_all(service.as_bytes())?;
+    w.finish()?;
+
+    // Drop-in to pull into sysinit.target
+    let dropin = b"[Unit]\nWants=bcvk-setup-nbd.service\n";
+    let builder = NewcBuilder::new("usr/lib/systemd/system/sysinit.target.d/bcvk-setup-nbd.conf")
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = builder.write(&mut buf, dropin.len() as u32);
+    w.write_all(dropin)?;
     w.finish()?;
 
     Ok(cpio::newc::trailer(buf)?)
