@@ -163,7 +163,7 @@ echo '<6>bcvk: setup-nbd started' > /dev/kmsg\n\
 modprobe nbd max_part=16 2>/dev/null\n\
 systemctl start nm-initrd.service 2>/dev/kmsg\n\
 \n\
-for i in $(seq 1 30); do\n\
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
   sleep 2\n\
 done\n\
