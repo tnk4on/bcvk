@@ -93,7 +93,7 @@ pub fn extract_boot_files(
         "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
          linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
-         rd.neednet=1 init=/bin/bash \
+         rd.neednet=1 \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}}"
     );
@@ -156,12 +156,16 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     w.write_all(nm_conn.as_bytes())?;
     w.finish()?;
 
-    // setup-nbd.sh — wait for NM to configure network, then connect
+    // setup-nbd.sh — debug + wait for network + connect
     let setup = format!(
         "#!/bin/bash\n\
+echo '<6>bcvk-setup-nbd: script started' > /dev/kmsg\n\
+echo '<6>bcvk-setup-nbd: files check' > /dev/kmsg\n\
+ls -la /usr/bin/nbd-tcp /usr/lib/bcvk/setup-nbd.sh /etc/NetworkManager/system-connections/ > /dev/kmsg 2>&1\n\
+echo '<6>bcvk-setup-nbd: systemctl status' > /dev/kmsg\n\
+systemctl list-units --no-pager 2>&1 | grep -iE 'network|nm-' > /dev/kmsg 2>&1\n\
 modprobe nbd max_part=16 2>/dev/null\n\
 \n\
-# Wait for network (NM should have configured it via rd.neednet=1)\n\
 for i in $(seq 1 30); do\n\
   /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
   sleep 2\n\
