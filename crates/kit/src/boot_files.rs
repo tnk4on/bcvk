@@ -63,19 +63,6 @@ pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str) -> Result<BootFil
     };
     info!("GRUB EFI: {} bytes", grub_efi.len());
 
-    // Copy nbd-vsock binary (skip if already exists with same size)
-    let size_check = podman_machine_cmd(
-        "stat -c %s /tmp/bcvk-nbd-vsock 2>/dev/null || echo 0"
-    )?;
-    let remote_size: usize = String::from_utf8_lossy(&size_check)
-        .trim().parse().unwrap_or(0);
-    if remote_size != NBD_VSOCK_BIN.len() {
-        copy_to_podman_machine(NBD_VSOCK_BIN, "/tmp/bcvk-nbd-vsock", true)?;
-        info!("nbd-vsock binary copied: {} bytes", NBD_VSOCK_BIN.len());
-    } else {
-        info!("nbd-vsock binary already present: {} bytes", NBD_VSOCK_BIN.len());
-    }
-
     // Check initramfs cache
     let cache_path = format!("/tmp/bcvk-initramfs-{}", kver.replace('.', "_"));
     let base_initramfs = if check_cache(&cache_path)? {
@@ -122,11 +109,36 @@ pub fn extract_boot_files(merged_path: &str, ssh_pubkey: &str) -> Result<BootFil
     })
 }
 
-/// Build base initramfs with nbd-vsock + patched nbd.ko + setup-nbd hook.
+/// Build base initramfs: extract container's existing initramfs + patch nbd.ko.
+/// Follows Linux/macOS pattern — no dracut, just CPIO append.
 #[cfg(target_os = "windows")]
 fn build_base_initramfs(merged_path: &str, kver: &str) -> Result<Vec<u8>> {
+    // 1. Extract container's existing initramfs
+    let initramfs_path = format!("{}/usr/lib/modules/{}/initramfs.img", merged_path, kver);
+    info!("extracting container initramfs...");
+    let mut base = podman_machine_cmd(&format!("cat {}", initramfs_path))?;
+    if base.is_empty() {
+        bail!("container initramfs not found: {}", initramfs_path);
+    }
+    info!("container initramfs: {} bytes", base.len());
+
+    // 2. Build patched nbd.ko via podman run (only needed for AF_VSOCK support)
+    info!("building patched nbd.ko...");
+    let nbd_ko = build_patched_nbd_ko(kver)?;
+    info!("patched nbd.ko: {} bytes", nbd_ko.len());
+
+    // 3. Append nbd-vsock binary + patched nbd.ko + setup-nbd hook as CPIO
+    let nbd_cpio = create_nbd_cpio(kver, &nbd_ko)?;
+    append_cpio(&mut base, &nbd_cpio);
+
+    Ok(base)
+}
+
+/// Build patched nbd.ko module with AF_VSOCK support.
+#[cfg(target_os = "windows")]
+fn build_patched_nbd_ko(kver: &str) -> Result<Vec<u8>> {
     let script = format!(
-        "dnf install -y nbd gcc make >/dev/null 2>&1; \
+        "dnf install -y gcc make >/dev/null 2>&1; \
          KVER={kver}; \
          dnf install -y kernel-devel-$KVER >/dev/null 2>&1; \
          KVER_SHORT=$(echo $KVER | sed 's/-.*//'); \
@@ -137,48 +149,85 @@ fn build_base_initramfs(merged_path: &str, kver: &str) -> Result<Vec<u8>> {
          sed -i '/!sk_is_tcp(sock->sk) &&/{{N;s/!sk_is_stream_unix(sock->sk))/!sk_is_stream_unix(sock->sk) \\&\\& sock->sk->sk_family != AF_VSOCK)/}}' nbd.c && \
          echo 'obj-m += nbd.o' > Makefile && \
          make -C /lib/modules/$KVER/build M=$(pwd) modules >/dev/null 2>&1 && \
-         cp nbd.ko /lib/modules/$KVER/kernel/drivers/block/nbd.ko && \
-         depmod -a $KVER; \
-         cd /; \
-         mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock && \
-         cp /tmp/nbd-vsock-host /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
-         chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
-         printf '#!/bin/bash\\ncheck() {{ return 0; }}\\ndepends() {{ return 0; }}\\ninstall() {{\\n\
-           inst_multiple nbd-client blockdev mount cp mkdir chmod chown\\n\
-           inst_simple \"$moddir/nbd-vsock\" /usr/bin/nbd-vsock\\n\
-           inst_hook pre-udev 00 \"$moddir/setup-nbd.sh\"\\n\
-         }}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
-         printf '#!/bin/bash\\nmodprobe vsock 2>/dev/null\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
-         chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
-         mkdir -p /var/roothome 2>/dev/null; \
-         dracut --force --no-hostonly \
-         --omit 'crypt lvm mdraid multipath iscsi nfs fips dmsquash-live \
-                 clevis clevis-pin-null clevis-pin-sss clevis-pin-tang clevis-pin-tpm2 \
-                 systemd-cryptsetup fips-crypto-policies' \
-         --no-early-microcode \
-         --add 'nbd network bcvk-vsock' \
-         --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
-         --kver $KVER /tmp/initramfs.img; \
-         test -f /tmp/initramfs.img && cat /tmp/initramfs.img",
+         cat nbd.ko",
         kver = kver,
     );
 
-    // build_base_initramfs still needs podman run for dnf/gcc/dracut
-    let image = format!("quay.io/fedora/fedora-bootc:latest");
     let output = Command::new("podman")
         .args([
             "run", "--rm", "--privileged",
-            "-v", "/tmp/bcvk-nbd-vsock:/tmp/nbd-vsock-host:ro,z",
-            &image, "bash", "-c", &script,
+            "quay.io/fedora/fedora-bootc:latest",
+            "bash", "-c", &script,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()?;
-    let initramfs = output.stdout;
-    if initramfs.is_empty() {
-        bail!("base initramfs build failed (empty output)");
+    if output.stdout.is_empty() {
+        bail!("patched nbd.ko build failed");
     }
-    Ok(initramfs)
+    Ok(output.stdout)
+}
+
+/// Create CPIO archive with nbd-vsock, patched nbd.ko, and setup-nbd hook.
+#[cfg(target_os = "windows")]
+fn create_nbd_cpio(kver: &str, nbd_ko: &[u8]) -> Result<Vec<u8>> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
+    let mut buf = Vec::new();
+
+    // Directories
+    let dirs = [
+        "usr", "usr/bin", "usr/lib", "usr/lib/modules",
+        &format!("usr/lib/modules/{}", kver),
+        &format!("usr/lib/modules/{}/kernel", kver),
+        &format!("usr/lib/modules/{}/kernel/drivers", kver),
+        &format!("usr/lib/modules/{}/kernel/drivers/block", kver),
+        "var", "var/lib", "var/lib/dracut", "var/lib/dracut/hooks",
+        "var/lib/dracut/hooks/pre-udev",
+    ];
+    for dir in &dirs {
+        let builder = NewcBuilder::new(dir)
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Directory);
+        builder.write(&mut buf, 0).finish()?;
+    }
+
+    // nbd-vsock binary
+    let builder = NewcBuilder::new("usr/bin/nbd-vsock")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = builder.write(&mut buf, NBD_VSOCK_BIN.len() as u32);
+    w.write_all(NBD_VSOCK_BIN)?;
+    w.finish()?;
+
+    // Patched nbd.ko
+    let nbd_ko_path = format!("usr/lib/modules/{}/kernel/drivers/block/nbd.ko", kver);
+    let builder = NewcBuilder::new(&nbd_ko_path)
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = builder.write(&mut buf, nbd_ko.len() as u32);
+    w.write_all(nbd_ko)?;
+    w.finish()?;
+
+    // setup-nbd.sh (pre-udev hook)
+    let setup_nbd = b"#!/bin/bash\n\
+        modprobe vsock 2>/dev/null\n\
+        modprobe hv_sock 2>/dev/null\n\
+        modprobe nbd max_part=16 2>/dev/null\n\
+        sleep 1\n\
+        /usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\n\
+        sleep 1\n\
+        blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
+    let builder = NewcBuilder::new("var/lib/dracut/hooks/pre-udev/00-setup-nbd.sh")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = builder.write(&mut buf, setup_nbd.len() as u32);
+    w.write_all(setup_nbd)?;
+    w.finish()?;
+
+    Ok(cpio::newc::trailer(buf)?)
 }
 
 #[cfg(target_os = "windows")]
