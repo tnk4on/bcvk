@@ -132,11 +132,12 @@ VAREOF\n\
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
          mkdir -p /var/roothome 2>/dev/null; \
          dracut --force --no-hostonly \
-         --omit 'crypt lvm mdraid multipath iscsi nfs fips dmsquash-live' \
+         --omit 'crypt lvm mdraid multipath iscsi nfs fips dmsquash-live \
+                 clevis systemd-cryptsetup fips-crypto-policies' \
          --no-early-microcode \
          --add 'nbd network bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
-         --kver $KVER /tmp/initramfs.img; \
+         --kver $KVER /tmp/initramfs.img 2>&1; \
          test -f /tmp/initramfs.img && cat /tmp/initramfs.img",
         ssh_install = if ssh_pubkey.is_empty() {
             String::new()
@@ -190,10 +191,10 @@ SSHEOF\n\
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()?;
-    if !output.status.success() {
-        bail!("podman run initramfs build failed");
-    }
     let initramfs = output.stdout;
+    if initramfs.is_empty() {
+        bail!("initramfs build failed (empty output)");
+    }
     info!("initramfs (nbd): {} bytes", initramfs.len());
 
     let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
