@@ -93,10 +93,9 @@ pub fn extract_boot_files(
         "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
          linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
-         rd.neednet=1 ip={client}::{gw}:255.255.255.0::eth0:none \
+         rd.neednet=1 \
          systemd.journald.storage=volatile\n  \
-         initrd /boot/initramfs.img\n}}",
-        client = client_ip, gw = gateway_ip
+         initrd /boot/initramfs.img\n}}"
     );
     debug!("grub.cfg:\n{}", grub_cfg);
 
@@ -121,6 +120,7 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
         "usr", "usr/bin", "usr/lib", "usr/lib/bcvk",
         "usr/lib/systemd", "usr/lib/systemd/system",
         "usr/lib/systemd/system/initrd-root-device.target.d",
+        "etc", "etc/NetworkManager", "etc/NetworkManager/system-connections",
     ];
     for dir in &dirs {
         let b = NewcBuilder::new(dir).mode(0o755).set_mode_file_type(ModeFileType::Directory);
@@ -131,6 +131,29 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     let b = NewcBuilder::new("usr/bin/nbd-tcp").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, NBD_TCP_BIN.len() as u32);
     w.write_all(NBD_TCP_BIN)?;
+    w.finish()?;
+
+    // NetworkManager connection profile for static IP
+    let nm_conn = format!(
+        "[connection]\n\
+         id=bcvk-nbd\n\
+         type=ethernet\n\
+         interface-name=eth0\n\
+         autoconnect=true\n\
+         \n\
+         [ipv4]\n\
+         method=manual\n\
+         addresses={client}/24\n\
+         gateway={gw}\n\
+         \n\
+         [ipv6]\n\
+         method=disabled\n",
+        client = client_ip, gw = gateway_ip
+    );
+    let b = NewcBuilder::new("etc/NetworkManager/system-connections/bcvk-nbd.nmconnection")
+        .mode(0o600).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, nm_conn.len() as u32);
+    w.write_all(nm_conn.as_bytes())?;
     w.finish()?;
 
     // setup-nbd.sh — wait for NM to configure network, then connect
