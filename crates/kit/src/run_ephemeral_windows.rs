@@ -414,15 +414,20 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         });
         info!("serial log: {}", serial_log_path.display());
 
-        // Wait for VM to get IP (spawn_blocking to avoid blocking async runtime)
+        // Wait for VM to get IP, fall back to DHCP-assigned IP
+        let ip_deadline = std::time::Instant::now() + Duration::from_secs(30);
         let vm_ip = loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
             let name_clone = vm_name.clone();
             let result = tokio::task::spawn_blocking(move || {
                 hyperv::get_vm_ip(&name_clone)
             }).await?;
             if let Ok(Some(ip)) = result {
                 break ip;
+            }
+            if std::time::Instant::now() > ip_deadline {
+                info!("Hyper-V did not report VM IP, using DHCP-assigned {}", client_ip);
+                break client_ip.to_string();
             }
             debug!("waiting for VM IP...");
         };

@@ -69,21 +69,17 @@ pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
     let script = format!(
         "dnf install -y nbd gcc make >/dev/null 2>&1; \
          KVER=$(ls /usr/lib/modules/ | head -1); \
-         echo INITRAMFS: kver=$KVER >&2; \
          dnf install -y kernel-devel-$KVER >/dev/null 2>&1; \
          KVER_SHORT=$(echo $KVER | sed 's/-.*//'); \
          KVER_MAJOR=${{KVER_SHORT%%.*}}; \
-         echo INITRAMFS: patching nbd.ko for AF_VSOCK >&2; \
          mkdir -p /tmp/nbd-patch && cd /tmp/nbd-patch && \
          curl -sfL https://cdn.kernel.org/pub/linux/kernel/v${{KVER_MAJOR}}.x/linux-${{KVER_SHORT}}.tar.xz \
            | tar xJ --strip-components=3 linux-${{KVER_SHORT}}/drivers/block/nbd.c && \
          sed -i '/!sk_is_tcp(sock->sk) &&/{{N;s/!sk_is_stream_unix(sock->sk))/!sk_is_stream_unix(sock->sk) \\&\\& sock->sk->sk_family != AF_VSOCK)/}}' nbd.c && \
-         grep -n AF_VSOCK nbd.c >&2 && \
          echo 'obj-m += nbd.o' > Makefile && \
          make -C /lib/modules/$KVER/build M=$(pwd) modules >/dev/null 2>&1 && \
          cp nbd.ko /lib/modules/$KVER/kernel/drivers/block/nbd.ko && \
-         depmod -a $KVER && \
-         echo INITRAMFS: nbd.ko patched >&2; \
+         depmod -a $KVER; \
          cd /; \
          mkdir -p /usr/lib/dracut/modules.d/99bcvk-vsock && \
          cp /tmp/nbd-vsock-host /usr/lib/dracut/modules.d/99bcvk-vsock/nbd-vsock && \
@@ -99,7 +95,7 @@ pub fn extract_boot_files(image: &str, ssh_pubkey: &str) -> Result<BootFiles> {
            echo \"Wants=bcvk-etc-overlay.service bcvk-var-ephemeral.service\" >> \"$initdir/usr/lib/systemd/system/initrd-fs.target.d/bcvk-overlay.conf\"\\n\
            {ssh_install}\
          }}\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/module-setup.sh && \
-         printf '#!/bin/bash\\necho \"<6>setup-nbd: start\" > /dev/kmsg\\nmodprobe vsock 2>/dev/null\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\necho \"<6>setup-nbd: running nbd-vsock\" > /dev/kmsg\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\\necho \"<6>setup-nbd: nbd-vsock exit=$?\" > /dev/kmsg\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\nls -la /dev/nbd0* > /dev/kmsg 2>&1\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
+         printf '#!/bin/bash\\nmodprobe vsock 2>/dev/null\\nmodprobe hv_sock 2>/dev/null\\nmodprobe nbd max_part=16 2>/dev/null\\nsleep 1\\n/usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\\nsleep 1\\nblockdev --rereadpt /dev/nbd0 2>/dev/null\\n' > /usr/lib/dracut/modules.d/99bcvk-vsock/setup-nbd.sh && \
          cat > /usr/lib/dracut/modules.d/99bcvk-vsock/bcvk-etc-overlay.service << 'ETCEOF'\n\
 [Unit]\n\
 Description=Setup ephemeral /etc overlay\n\
@@ -134,12 +130,13 @@ ExecStart=/usr/bin/mount --bind /run/var-ephemeral /sysroot/var\n\
 VAREOF\n\
          {ssh_setup}\
          chmod +x /usr/lib/dracut/modules.d/99bcvk-vsock/*.sh && \
-         echo INITRAMFS: dracut start >&2 && \
          mkdir -p /var/roothome 2>/dev/null; \
-         dracut --force --no-hostonly --add 'nbd network bcvk-vsock' \
-         --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay' \
+         dracut --force --no-hostonly \
+         --omit 'crypt lvm mdraid multipath iscsi nfs fips dmsquash-live' \
+         --no-early-microcode \
+         --add 'nbd network bcvk-vsock' \
+         --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
          --kver $KVER /tmp/initramfs.img; \
-         echo INITRAMFS: dracut exit=$? >&2; \
          test -f /tmp/initramfs.img && cat /tmp/initramfs.img",
         ssh_install = if ssh_pubkey.is_empty() {
             String::new()
