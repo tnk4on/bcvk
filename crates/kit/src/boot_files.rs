@@ -133,7 +133,8 @@ VAREOF\n\
          mkdir -p /var/roothome 2>/dev/null; \
          dracut --force --no-hostonly \
          --omit 'crypt lvm mdraid multipath iscsi nfs fips dmsquash-live \
-                 clevis systemd-cryptsetup fips-crypto-policies' \
+                 clevis clevis-pin-null clevis-pin-sss clevis-pin-tang clevis-pin-tpm2 \
+                 systemd-cryptsetup fips-crypto-policies' \
          --no-early-microcode \
          --add 'nbd network bcvk-vsock' \
          --add-drivers 'hv_sock hv_utils hv_vmbus vsock nbd overlay erofs' \
