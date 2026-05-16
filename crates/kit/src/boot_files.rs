@@ -122,13 +122,23 @@ fn build_base_initramfs(merged_path: &str, kver: &str) -> Result<Vec<u8>> {
     }
     info!("container initramfs: {} bytes", base.len());
 
-    // 2. Build patched nbd.ko via podman run (only needed for AF_VSOCK support)
+    // 2. Extract extra kernel modules needed but possibly missing from initramfs
+    info!("extracting kernel modules...");
+    let extra_modules = extract_kernel_modules(merged_path, kver, &[
+        "net/vmw_vsock/vsock.ko*",
+        "net/vmw_vsock/vmw_vsock_virtio_transport_common.ko*",
+        "drivers/hv/hv_sock.ko*",
+        "fs/overlayfs/overlay.ko*",
+        "fs/erofs/erofs.ko*",
+    ])?;
+
+    // 3. Build patched nbd.ko via podman run (only needed for AF_VSOCK support)
     info!("building patched nbd.ko...");
     let nbd_ko = build_patched_nbd_ko(kver)?;
     info!("patched nbd.ko: {} bytes", nbd_ko.len());
 
-    // 3. Append nbd-vsock binary + patched nbd.ko + setup-nbd hook as CPIO
-    let nbd_cpio = create_nbd_cpio(kver, &nbd_ko)?;
+    // 4. Append nbd-vsock binary + patched nbd.ko + extra modules + setup-nbd as CPIO
+    let nbd_cpio = create_nbd_cpio(kver, &nbd_ko, &extra_modules)?;
     append_cpio(&mut base, &nbd_cpio);
 
     Ok(base)
@@ -168,9 +178,35 @@ fn build_patched_nbd_ko(kver: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Create CPIO archive with nbd-vsock, patched nbd.ko, and setup-nbd hook.
+/// Extract kernel modules from container image via podman machine ssh.
 #[cfg(target_os = "windows")]
-fn create_nbd_cpio(kver: &str, nbd_ko: &[u8]) -> Result<Vec<u8>> {
+fn extract_kernel_modules(
+    merged_path: &str,
+    kver: &str,
+    patterns: &[&str],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut modules = Vec::new();
+    let base = format!("{}/usr/lib/modules/{}/kernel", merged_path, kver);
+    for pattern in patterns {
+        let find_cmd = format!("find {}/{} -maxdepth 0 2>/dev/null | head -1", base, pattern);
+        let path_out = podman_machine_cmd(&find_cmd)?;
+        let path = String::from_utf8_lossy(&path_out).trim().to_string();
+        if path.is_empty() {
+            debug!("kernel module not found: {}", pattern);
+            continue;
+        }
+        let data = podman_machine_cmd(&format!("cat {}", path))?;
+        // Convert absolute path to relative for CPIO
+        let rel_path = path.trim_start_matches(merged_path).trim_start_matches('/');
+        info!("  module: {} ({} bytes)", rel_path, data.len());
+        modules.push((rel_path.to_string(), data));
+    }
+    Ok(modules)
+}
+
+/// Create CPIO archive with nbd-vsock, patched nbd.ko, extra modules, and setup-nbd.
+#[cfg(target_os = "windows")]
+fn create_nbd_cpio(kver: &str, nbd_ko: &[u8], extra_modules: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
     use std::io::Write;
@@ -211,15 +247,31 @@ fn create_nbd_cpio(kver: &str, nbd_ko: &[u8]) -> Result<Vec<u8>> {
     w.write_all(nbd_ko)?;
     w.finish()?;
 
-    // setup-nbd.sh script
-    let setup_nbd = b"#!/bin/bash\n\
-modprobe vsock 2>/dev/null\n\
-modprobe hv_sock 2>/dev/null\n\
-modprobe nbd max_part=16 2>/dev/null\n\
+    // Extra kernel modules (vsock, hv_sock, overlay, erofs)
+    for (path, data) in extra_modules {
+        let builder = NewcBuilder::new(path)
+            .mode(0o644)
+            .set_mode_file_type(ModeFileType::Regular);
+        let mut w = builder.write(&mut buf, data.len() as u32);
+        w.write_all(data)?;
+        w.finish()?;
+    }
+
+    // setup-nbd.sh script — use insmod as fallback if modprobe fails
+    let setup_nbd = format!(
+        "#!/bin/bash\n\
+modprobe vsock 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/net/vmw_vsock/vsock.ko.xz 2>/dev/null\n\
+modprobe hv_sock 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/drivers/hv/hv_sock.ko.xz 2>/dev/null\n\
+modprobe nbd max_part=16 2>/dev/null || insmod /usr/lib/modules/{kver}/kernel/drivers/block/nbd.ko max_part=16 2>/dev/null\n\
+modprobe overlay 2>/dev/null\n\
+modprobe erofs 2>/dev/null\n\
 sleep 1\n\
 /usr/bin/nbd-vsock /dev/nbd0 2 10800 2>/dev/kmsg\n\
 sleep 1\n\
-blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
+        kver = kver
+    );
+    let setup_nbd = setup_nbd.as_bytes();
 
     // usr/lib/bcvk directory
     let dirs2 = ["usr/lib/bcvk"];
@@ -237,26 +289,25 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
     w.write_all(setup_nbd)?;
     w.finish()?;
 
-    // systemd service unit (runs before sysinit, after basic target)
-    let service = format!(
+    // systemd service unit — runs early in initrd before sysroot.mount
+    let service =
         "[Unit]\n\
          Description=Setup NBD vsock connection\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
-         Before=sysinit.target\n\
-         After=systemd-modules-load.service\n\
+         Before=sysroot.mount initrd-root-device.target\n\
+         After=systemd-modules-load.service systemd-udevd.service\n\
          Wants=systemd-modules-load.service\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
          RemainAfterExit=yes\n\
-         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n"
-    );
+         TimeoutStartSec=60\n\
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n";
 
-    // systemd unit dirs (may already exist but CPIO allows dupes)
     let unit_dirs = [
         "usr/lib/systemd", "usr/lib/systemd/system",
-        "usr/lib/systemd/system/sysinit.target.d",
+        "usr/lib/systemd/system/initrd-root-device.target.d",
     ];
     for dir in &unit_dirs {
         let builder = NewcBuilder::new(dir)
@@ -272,9 +323,9 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n";
     w.write_all(service.as_bytes())?;
     w.finish()?;
 
-    // Drop-in to pull into sysinit.target
+    // Pull into initrd-root-device.target so it runs before root mount
     let dropin = b"[Unit]\nWants=bcvk-setup-nbd.service\n";
-    let builder = NewcBuilder::new("usr/lib/systemd/system/sysinit.target.d/bcvk-setup-nbd.conf")
+    let builder = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf")
         .mode(0o644)
         .set_mode_file_type(ModeFileType::Regular);
     let mut w = builder.write(&mut buf, dropin.len() as u32);
