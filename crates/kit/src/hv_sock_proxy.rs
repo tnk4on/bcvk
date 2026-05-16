@@ -1,10 +1,10 @@
 //! Hyper-V Socket (hv_sock) proxy: AF_HYPERV listener → TCP forward.
 //!
-//! Bypasses vmswitch.sys TCP blocking on Internal Switch by using VMBus
-//! (hv_sock) instead of virtual network for NBD traffic.
-//!
-//! Host: AF_HYPERV listen → accept → forward to 127.0.0.1:NBD_PORT
-//! Guest: socat TCP-LISTEN:10809 VSOCK-CONNECT:2:PORT → nbd-client localhost
+//! Previously used to bypass vmswitch.sys TCP blocking on Internal Switch.
+//! Now unused — NDIS Capture is disabled and TCP works directly.
+//! Kept for reference; will be removed after TCP approach is validated.
+
+#![allow(dead_code)]
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
