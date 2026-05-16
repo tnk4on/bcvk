@@ -159,9 +159,8 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     // setup-nbd.sh — start NM, wait for network, connect NBD
     let setup = format!(
         "#!/bin/bash\n\
-echo '<6>bcvk: setup-nbd started' > /dev/kmsg\n\
 modprobe nbd max_part=16 2>/dev/null\n\
-systemctl start nm-initrd.service 2>/dev/kmsg\n\
+systemctl start nm-initrd.service 2>/dev/null\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
