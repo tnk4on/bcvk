@@ -188,7 +188,10 @@ fn extract_kernel_modules(
     let mut modules = Vec::new();
     let base = format!("{}/usr/lib/modules/{}/kernel", merged_path, kver);
     for pattern in patterns {
-        let find_cmd = format!("find {}/{} -maxdepth 0 2>/dev/null | head -1", base, pattern);
+        let find_cmd = format!(
+            "find {} -path '*{}' 2>/dev/null | head -1",
+            base, pattern.replace('*', "")
+        );
         let path_out = podman_machine_cmd(&find_cmd)?;
         let path = String::from_utf8_lossy(&path_out).trim().to_string();
         if path.is_empty() {
@@ -196,7 +199,6 @@ fn extract_kernel_modules(
             continue;
         }
         let data = podman_machine_cmd(&format!("cat {}", path))?;
-        // Convert absolute path to relative for CPIO
         let rel_path = path.trim_start_matches(merged_path).trim_start_matches('/');
         info!("  module: {} ({} bytes)", rel_path, data.len());
         modules.push((rel_path.to_string(), data));
