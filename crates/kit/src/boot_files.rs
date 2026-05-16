@@ -175,15 +175,14 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
     w.write_all(setup.as_bytes())?;
     w.finish()?;
 
-    // systemd service — after NM configures network in initrd
+    // systemd service — run after udev and modules, script retries until network is up
     let service =
         "[Unit]\n\
          Description=Setup NBD TCP connection\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
          Before=sysroot.mount initrd-root-device.target\n\
-         After=nm-initrd.service dracut-initqueue.service systemd-modules-load.service\n\
-         Wants=nm-initrd.service\n\
+         After=systemd-udevd.service systemd-modules-load.service\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
