@@ -24,7 +24,7 @@ const PASSWORD_HASH: &str =
 
 /// SSH connection info for podman machine.
 #[cfg(target_os = "windows")]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PodmanSsh {
     pub port: u16,
     pub key: String,
