@@ -108,7 +108,8 @@ struct VmCleanup {
     vm_name: String,
     nbd_container: Option<String>,
     name: String,
-    dhcp_server: Option<DhcpServer>,
+    image: String,
+    vhdx_path: Option<String>,
     ssh_forward: Option<SshForward>,
 }
 
@@ -119,12 +120,18 @@ impl Drop for VmCleanup {
         if let Some(ref fwd) = self.ssh_forward {
             fwd.stop();
         }
-        if let Some(ref pxe) = self.dhcp_server {
-            pxe.stop();
-        }
         let _ = hyperv::remove_vm(&self.vm_name);
         if let Some(ref name) = self.nbd_container {
             stop_nbdkit_container(name);
+        }
+        if let Some(ref vhdx) = self.vhdx_path {
+            let _ = std::fs::remove_file(vhdx);
+        }
+        // Release container image overlay mount
+        if let Ok(machine) = detect_machine_name() {
+            let _ = Command::new("podman")
+                .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
+                .stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
         EphemeralVmMetadata::remove(&self.name);
     }
@@ -398,7 +405,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vm_name: vm_name.clone(),
         nbd_container: Some(nbd_container.clone()),
         name: name.clone(),
-        dhcp_server: None,
+        image: opts.image.clone(),
+        vhdx_path: Some(vhdx_path),
         ssh_forward: None,
     };
 
