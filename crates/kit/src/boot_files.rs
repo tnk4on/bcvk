@@ -176,36 +176,7 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     Ok((kernel, grub_efi, initramfs))
 }
 
-/// Fallback: fetch via SSH cat (when no cache dir available).
-#[cfg(target_os = "windows")]
-fn fetch_boot_files_ssh(merged_path: &str, ssh: &PodmanSsh) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let meta = ssh.ssh_cmd(&format!(
-        "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
-         echo KVER=$KVER; \
-         GRUB=$(find {m}/usr/lib -name 'grubx64.efi' -o -name 'grubaa64.efi' 2>/dev/null | head -1); \
-         echo GRUB=$GRUB",
-        m = merged_path,
-    ))?;
-    let meta_str = String::from_utf8_lossy(&meta);
 
-    let kver = meta_str.lines()
-        .find(|l| l.starts_with("KVER="))
-        .map(|l| l.trim_start_matches("KVER=").trim().to_string())
-        .unwrap_or_default();
-    let grub_path = meta_str.lines()
-        .find(|l| l.starts_with("GRUB="))
-        .map(|l| l.trim_start_matches("GRUB=").trim().to_string())
-        .unwrap_or_default();
-
-    if kver.is_empty() { bail!("kernel version not found"); }
-    if grub_path.is_empty() { bail!("GRUB EFI not found"); }
-
-    let kernel = ssh.ssh_cmd(&format!("cat {}/usr/lib/modules/{}/vmlinuz", merged_path, kver))?;
-    let grub_efi = ssh.ssh_cmd(&format!("cat {}", grub_path))?;
-    let initramfs = ssh.ssh_cmd(&format!("cat {}/usr/lib/modules/{}/initramfs.img", merged_path, kver))?;
-
-    Ok((kernel, grub_efi, initramfs))
-}
 
 /// Create a VHDX with FAT32 ESP containing GRUB + kernel + initramfs.
 /// Returns the path to the VHDX file.
