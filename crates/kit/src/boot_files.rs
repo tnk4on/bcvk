@@ -28,10 +28,15 @@ const PASSWORD_HASH: &str =
 pub struct PodmanSsh {
     pub port: u16,
     pub key: String,
+    pub rootful: bool,
 }
 
 #[cfg(target_os = "windows")]
 impl PodmanSsh {
+    fn user(&self) -> &str {
+        if self.rootful { "root" } else { "core" }
+    }
+
     fn ssh_args(&self) -> Vec<String> {
         vec![
             "-p".to_string(), self.port.to_string(),
@@ -42,11 +47,22 @@ impl PodmanSsh {
         ]
     }
 
+    fn user_host(&self) -> String {
+        format!("{}@127.0.0.1", self.user())
+    }
+
+    /// Run a command that needs root access to container storage.
+    /// Rootful: runs directly. Rootless: wraps with sudo.
     fn ssh_cmd(&self, cmd: &str) -> Result<Vec<u8>> {
+        let full_cmd = if self.rootful {
+            cmd.to_string()
+        } else {
+            format!("sudo {}", cmd)
+        };
         let output = Command::new("ssh")
             .args(self.ssh_args())
-            .arg("root@127.0.0.1")
-            .arg(cmd)
+            .arg(&self.user_host())
+            .arg(&full_cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()?;
@@ -57,7 +73,7 @@ impl PodmanSsh {
     }
 
     fn scp_to_local(&self, remote_path: &str, local_path: &std::path::Path) -> Result<()> {
-        let remote = format!("root@127.0.0.1:{}", remote_path);
+        let remote = format!("{}:{}", self.user_host(), remote_path);
         let status = Command::new("scp")
             .args(self.ssh_args())
             .arg(&remote)
@@ -69,6 +85,22 @@ impl PodmanSsh {
             bail!("scp failed: {} → {}", remote_path, local_path.display());
         }
         Ok(())
+    }
+
+    /// Mount image and return merged path.
+    /// Rootful: podman image mount. Rootless: podman unshare podman image mount.
+    pub fn image_mount(&self, image: &str) -> Result<String> {
+        let cmd = if self.rootful {
+            format!("podman image mount {}", image)
+        } else {
+            format!("podman unshare podman image mount {}", image)
+        };
+        let output = self.ssh_cmd(&cmd)?;
+        let path = String::from_utf8_lossy(&output).trim().to_string();
+        if path.is_empty() {
+            bail!("podman image mount returned empty path");
+        }
+        Ok(path)
     }
 }
 
