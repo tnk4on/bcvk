@@ -264,6 +264,11 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     info!("Podman Machine SSH: port={}, key={}", pm_ssh_port, pm_identity);
 
+    let podman_ssh = boot_files::PodmanSsh {
+        port: pm_ssh_port,
+        key: pm_identity.clone(),
+    };
+
     fn shell_escape(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
@@ -355,8 +360,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let spk = ssh_pubkey.clone();
         let hi = host_ip.to_string();
         let ci = client_ip.to_string();
+        let ps = podman_ssh.clone();
         std::thread::spawn(move || {
-            boot_files::extract_boot_files(&img, &mp, &spk, &hi, nbd_port, &ci, &hi)
+            boot_files::extract_boot_files(&img, &mp, &ps, &spk, &hi, nbd_port, &ci, &hi)
         })
     };
 

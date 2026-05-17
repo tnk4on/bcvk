@@ -1,8 +1,7 @@
 //! Extract boot files from bootc container image.
 //!
-//! Uses the container's existing initramfs and appends CPIO archives
-//! for NBD setup, overlay services, and SSH configuration.
-//! Boot files are cached on the Windows host by image digest.
+//! Uses direct SSH/SCP to podman machine for fast file transfer,
+//! with local cache by image digest for instant subsequent runs.
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
@@ -23,6 +22,56 @@ const NBD_TCP_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
 
+/// SSH connection info for podman machine.
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub struct PodmanSsh {
+    pub port: u16,
+    pub key: String,
+}
+
+#[cfg(target_os = "windows")]
+impl PodmanSsh {
+    fn ssh_args(&self) -> Vec<String> {
+        vec![
+            "-p".to_string(), self.port.to_string(),
+            "-i".to_string(), self.key.clone(),
+            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(), "LogLevel=ERROR".to_string(),
+        ]
+    }
+
+    fn ssh_cmd(&self, cmd: &str) -> Result<Vec<u8>> {
+        let output = Command::new("ssh")
+            .args(self.ssh_args())
+            .arg("root@127.0.0.1")
+            .arg(cmd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            bail!("ssh failed: {}", cmd);
+        }
+        Ok(output.stdout)
+    }
+
+    fn scp_to_local(&self, remote_path: &str, local_path: &std::path::Path) -> Result<()> {
+        let remote = format!("root@127.0.0.1:{}", remote_path);
+        let status = Command::new("scp")
+            .args(self.ssh_args())
+            .arg(&remote)
+            .arg(local_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            bail!("scp failed: {} → {}", remote_path, local_path.display());
+        }
+        Ok(())
+    }
+}
+
 /// Cache directory for boot files, keyed by image digest.
 #[cfg(target_os = "windows")]
 fn cache_dir(image: &str) -> Result<Option<PathBuf>> {
@@ -40,11 +89,12 @@ fn cache_dir(image: &str) -> Result<Option<PathBuf>> {
     Ok(Some(base))
 }
 
-/// Extract boot files using the already-mounted image overlay.
+/// Extract boot files using direct SSH/SCP to podman machine.
 #[cfg(target_os = "windows")]
 pub fn extract_boot_files(
     image: &str,
     merged_path: &str,
+    ssh: &PodmanSsh,
     ssh_pubkey: &str,
     nbd_host: &str,
     nbd_port: u16,
@@ -65,17 +115,16 @@ pub fn extract_boot_files(
                   kernel.len(), grub_efi.len(), initramfs.len());
             (kernel, grub_efi, initramfs)
         } else {
-            info!("boot files cache miss, fetching via SSH...");
-            let files = fetch_boot_files(merged_path)?;
-            save_cache(dir, &files)?;
+            info!("boot files cache miss, fetching via SCP...");
+            let files = fetch_boot_files(merged_path, ssh, dir)?;
             files
         }
     } else {
         info!("no cache available, fetching via SSH...");
-        fetch_boot_files(merged_path)?
+        fetch_boot_files_ssh(merged_path, ssh)?
     };
 
-    // Append CPIOs to initramfs (always, since SSH key changes per run)
+    // Append CPIOs
     let mut initramfs = base_initramfs;
 
     let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port, client_ip, gateway_ip)?;
@@ -107,11 +156,11 @@ pub fn extract_boot_files(
     Ok(BootFiles { grub_efi, kernel, initramfs, grub_cfg })
 }
 
-/// Fetch kernel, GRUB EFI, and initramfs from podman machine via single SSH call.
+/// Fetch boot files via SCP (fast, ~50MB/s) and cache locally.
 #[cfg(target_os = "windows")]
-fn fetch_boot_files(merged_path: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    // Get metadata first (small, fast)
-    let meta = podman_machine_cmd(&format!(
+fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    // Get metadata via SSH (small, fast)
+    let meta = ssh.ssh_cmd(&format!(
         "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
          echo KVER=$KVER; \
          GRUB=$(find {m}/usr/lib -name 'grubx64.efi' -o -name 'grubaa64.efi' 2>/dev/null | head -1); \
@@ -133,33 +182,60 @@ fn fetch_boot_files(merged_path: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     if grub_path.is_empty() { bail!("GRUB EFI not found"); }
     info!("kernel version: {}", kver);
 
-    // Fetch all three files (separate SSH calls for reliability with large binary data)
-    let kernel = podman_machine_cmd(&format!(
-        "cat {}/usr/lib/modules/{}/vmlinuz", merged_path, kver
-    ))?;
-    info!("kernel: {} bytes", kernel.len());
+    // SCP files directly to cache directory
+    std::fs::create_dir_all(cache_dir)?;
 
-    let grub_efi = podman_machine_cmd(&format!("cat {}", grub_path))?;
-    info!("GRUB EFI: {} bytes", grub_efi.len());
+    let vmlinuz_remote = format!("{}/usr/lib/modules/{}/vmlinuz", merged_path, kver);
+    let initramfs_remote = format!("{}/usr/lib/modules/{}/initramfs.img", merged_path, kver);
 
-    let initramfs = podman_machine_cmd(&format!(
-        "cat {}/usr/lib/modules/{}/initramfs.img", merged_path, kver
-    ))?;
-    if initramfs.is_empty() { bail!("initramfs not found"); }
-    info!("initramfs: {} bytes", initramfs.len());
+    ssh.scp_to_local(&vmlinuz_remote, &cache_dir.join("vmlinuz"))?;
+    info!("kernel: SCP complete");
+
+    ssh.scp_to_local(&grub_path, &cache_dir.join("grubx64.efi"))?;
+    info!("GRUB EFI: SCP complete");
+
+    ssh.scp_to_local(&initramfs_remote, &cache_dir.join("initramfs.img"))?;
+    info!("initramfs: SCP complete");
+
+    let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
+    let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
+    let initramfs = std::fs::read(cache_dir.join("initramfs.img"))?;
+
+    info!("kernel: {} bytes, GRUB: {} bytes, initramfs: {} bytes (SCP cached)",
+          kernel.len(), grub_efi.len(), initramfs.len());
 
     Ok((kernel, grub_efi, initramfs))
 }
 
-/// Save boot files to local cache.
+/// Fallback: fetch via SSH cat (when no cache dir available).
 #[cfg(target_os = "windows")]
-fn save_cache(dir: &PathBuf, files: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("vmlinuz"), &files.0)?;
-    std::fs::write(dir.join("grubx64.efi"), &files.1)?;
-    std::fs::write(dir.join("initramfs.img"), &files.2)?;
-    info!("boot files cached: {}", dir.display());
-    Ok(())
+fn fetch_boot_files_ssh(merged_path: &str, ssh: &PodmanSsh) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let meta = ssh.ssh_cmd(&format!(
+        "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
+         echo KVER=$KVER; \
+         GRUB=$(find {m}/usr/lib -name 'grubx64.efi' -o -name 'grubaa64.efi' 2>/dev/null | head -1); \
+         echo GRUB=$GRUB",
+        m = merged_path,
+    ))?;
+    let meta_str = String::from_utf8_lossy(&meta);
+
+    let kver = meta_str.lines()
+        .find(|l| l.starts_with("KVER="))
+        .map(|l| l.trim_start_matches("KVER=").trim().to_string())
+        .unwrap_or_default();
+    let grub_path = meta_str.lines()
+        .find(|l| l.starts_with("GRUB="))
+        .map(|l| l.trim_start_matches("GRUB=").trim().to_string())
+        .unwrap_or_default();
+
+    if kver.is_empty() { bail!("kernel version not found"); }
+    if grub_path.is_empty() { bail!("GRUB EFI not found"); }
+
+    let kernel = ssh.ssh_cmd(&format!("cat {}/usr/lib/modules/{}/vmlinuz", merged_path, kver))?;
+    let grub_efi = ssh.ssh_cmd(&format!("cat {}", grub_path))?;
+    let initramfs = ssh.ssh_cmd(&format!("cat {}/usr/lib/modules/{}/initramfs.img", merged_path, kver))?;
+
+    Ok((kernel, grub_efi, initramfs))
 }
 
 /// Create CPIO with nbd-tcp binary + NM profile + systemd service.
@@ -259,17 +335,4 @@ fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     let aligned = (initramfs.len() + 3) & !3;
     initramfs.resize(aligned, 0);
     initramfs.extend_from_slice(cpio);
-}
-
-#[cfg(target_os = "windows")]
-fn podman_machine_cmd(cmd: &str) -> Result<Vec<u8>> {
-    let output = Command::new("podman")
-        .args(["machine", "ssh", cmd])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-    if !output.status.success() {
-        bail!("podman machine ssh failed: {}", cmd);
-    }
-    Ok(output.stdout)
 }
