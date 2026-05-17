@@ -71,7 +71,7 @@ mod run_ephemeral_macos;
 #[cfg(target_os = "macos")]
 mod vfkit;
 
-// Windows-only modules (Hyper-V PXE + NBD backend)
+// Windows-only modules (Hyper-V + NBD backend)
 #[cfg(target_os = "windows")]
 mod ephemeral_windows;
 #[cfg(target_os = "windows")]
@@ -80,7 +80,7 @@ mod hyperv;
 #[cfg(target_os = "windows")]
 mod ssh_forward;
 #[cfg(target_os = "windows")]
-mod pxe_server;
+mod dhcp_server;
 #[cfg(target_os = "windows")]
 mod boot_files;
 #[cfg(target_os = "windows")]
@@ -177,9 +177,9 @@ enum Commands {
     #[clap(subcommand)]
     Vm(vfkit::VmCommands),
 
-    // Windows: Hyper-V PXE + NBD backend
+    // Windows: Hyper-V + NBD backend
     #[cfg(target_os = "windows")]
-    /// Manage ephemeral VMs for bootc containers (Hyper-V + PXE backend)
+    /// Manage ephemeral VMs for bootc containers (Hyper-V backend)
     #[clap(subcommand)]
     Ephemeral(ephemeral_windows::EphemeralCommands),
 

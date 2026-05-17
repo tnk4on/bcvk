@@ -19,7 +19,7 @@ pub mod run_ephemeral_macos;
 #[cfg(target_os = "macos")]
 pub mod vfkit;
 
-// Windows-only modules (Hyper-V PXE + NBD backend)
+// Windows-only modules (Hyper-V + NBD backend)
 #[cfg(target_os = "windows")]
 #[allow(missing_docs, dead_code)]
 pub mod hyperv;
@@ -28,7 +28,7 @@ pub mod hyperv;
 pub mod ssh_forward;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
-pub mod pxe_server;
+pub mod dhcp_server;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod boot_files;

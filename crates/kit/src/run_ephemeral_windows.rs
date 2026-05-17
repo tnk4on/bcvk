@@ -1,10 +1,10 @@
-//! Ephemeral VM launch flow for Windows using Hyper-V PXE + NBD EROFS.
+//! Ephemeral VM launch flow for Windows using Hyper-V VHDX + NBD EROFS.
 //!
 //! Architecture:
 //! 1. nbdkit erofs plugin serves EROFS rootfs via NBD (podman run -p)
 //! 2. bcvk extracts boot files (kernel, initramfs, GRUB) to memory
-//! 3. bcvk runs DHCP + TFTP server on Internal Switch
-//! 4. Hyper-V Gen2 VM PXE boots → GRUB → kernel → dracut NBD → EROFS rootfs
+//! 3. bcvk runs DHCP server on Internal Switch
+//! 4. Hyper-V Gen2 VM VHDX boots → GRUB → kernel → dracut NBD → EROFS rootfs
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::{bail, eyre}, Result};
@@ -24,7 +24,7 @@ use crate::boot_files;
 #[cfg(target_os = "windows")]
 use crate::hyperv;
 #[cfg(target_os = "windows")]
-use crate::pxe_server::PxeServer;
+use crate::dhcp_server::DhcpServer;
 #[cfg(target_os = "windows")]
 use crate::ssh_forward::SshForward;
 
@@ -108,7 +108,7 @@ struct VmCleanup {
     vm_name: String,
     nbd_container: Option<String>,
     name: String,
-    pxe_server: Option<PxeServer>,
+    dhcp_server: Option<DhcpServer>,
     ssh_forward: Option<SshForward>,
 }
 
@@ -119,7 +119,7 @@ impl Drop for VmCleanup {
         if let Some(ref fwd) = self.ssh_forward {
             fwd.stop();
         }
-        if let Some(ref pxe) = self.pxe_server {
+        if let Some(ref pxe) = self.dhcp_server {
             pxe.stop();
         }
         let _ = hyperv::remove_vm(&self.vm_name);
@@ -337,7 +337,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("nbdkit container started on port {}", nbd_port);
 
     // Parallel setup: switch + VM + firewall while waiting for nbdkit
-    let switch_name = "bcvk-pxe";
+    let switch_name = "bcvk";
     let host_ip = "10.0.0.1";
     let client_ip = "10.0.0.100";
 
@@ -398,7 +398,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vm_name: vm_name.clone(),
         nbd_container: Some(nbd_container.clone()),
         name: name.clone(),
-        pxe_server: None,
+        dhcp_server: None,
         ssh_forward: None,
     };
 
@@ -406,11 +406,11 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         // Start DHCP server (TFTP not needed with VHDX boot)
-        let dummy_boot_files = crate::pxe_server::BootFiles {
+        let dummy_boot_files = crate::dhcp_server::BootFiles {
             grub_efi: vec![], kernel: vec![], initramfs: vec![],
             grub_cfg: String::new(),
         };
-        let pxe = PxeServer::new(host_ip, client_ip, dummy_boot_files)?;
+        let pxe = DhcpServer::new(host_ip, client_ip, dummy_boot_files)?;
         let (dhcp_handle, _tftp_handle) = pxe.start_background();
 
         // Start VM from VHDX
