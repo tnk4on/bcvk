@@ -75,7 +75,13 @@ impl PodmanSsh {
     fn scp_to_local(&self, remote_path: &str, local_path: &std::path::Path) -> Result<()> {
         let remote = format!("{}:{}", self.user_host(), remote_path);
         let status = Command::new("scp")
-            .args(self.ssh_args())
+            .args([
+                "-P", &self.port.to_string(),
+                "-i", &self.key,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",
+            ])
             .arg(&remote)
             .arg(local_path)
             .stdout(Stdio::null())
