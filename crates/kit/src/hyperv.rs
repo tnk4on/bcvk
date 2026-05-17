@@ -136,6 +136,12 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         name
     ));
 
+    // Disable checkpoints (not needed for ephemeral VMs)
+    powershell_ignore_error(&format!(
+        "Set-VM -Name '{}' -CheckpointType Disabled",
+        name
+    ));
+
     // COM1 → named pipe for serial console capture
     powershell_ignore_error(&format!(
         "Set-VMComPort -VMName '{}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{}'",
