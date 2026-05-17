@@ -359,19 +359,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let firewall_handle = {
         std::thread::spawn(move || hyperv::add_pxe_firewall_rules(nbd_port))
     };
-    let boot_files_handle = {
-        let img = opts.image.clone();
-        let mp = merged_path.clone();
-        let spk = ssh_pubkey.clone();
-        let hi = host_ip.to_string();
-        let ci = client_ip.to_string();
-        let ps = podman_ssh.clone();
-        std::thread::spawn(move || {
-            boot_files::extract_boot_files(&img, &mp, &ps, &spk, &hi, nbd_port, &ci, &hi)
-        })
-    };
-
-    // Wait for nbdkit ready (concurrent with above)
+    // Wait for nbdkit ready (concurrent with switch/VM/firewall)
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if std::time::Instant::now() > deadline {
@@ -384,14 +372,17 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     info!("nbdkit ready on port {}", nbd_port);
 
-    // Collect parallel results
+    // Collect parallel results (switch/VM/firewall don't touch podman machine)
     let switch = switch_handle.join().map_err(|_| color_eyre::eyre::eyre!("switch thread panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
 
     vm_handle.join().map_err(|_| color_eyre::eyre::eyre!("VM thread panicked"))??;
     firewall_handle.join().map_err(|_| color_eyre::eyre::eyre!("firewall thread panicked"))??;
 
-    let boot_files = boot_files_handle.join().map_err(|_| color_eyre::eyre::eyre!("boot files thread panicked"))??;
+    // Extract boot files AFTER nbdkit is ready (SCP to podman machine must not overlap with nbdkit SSH)
+    let boot_files = boot_files::extract_boot_files(
+        &opts.image, &merged_path, &podman_ssh, &ssh_pubkey, host_ip, nbd_port, client_ip, host_ip
+    )?;
 
     // PXE Server
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
