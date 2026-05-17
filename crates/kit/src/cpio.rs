@@ -4,7 +4,7 @@
 //! so we can simply append our files to an existing initramfs.
 
 // On non-Linux, this module is unused as it's for initramfs manipulation
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 
 use std::io::{self, Write};
 
@@ -119,36 +119,6 @@ pub fn create_initramfs_units_cpio() -> io::Result<Vec<u8>> {
             File(path, content) => write_file(&mut buf, path, content)?,
         }
     }
-
-    cpio::newc::trailer(buf)
-}
-
-/// Create a CPIO archive with overlay + var-ephemeral services for Windows Hyper-V.
-#[cfg(target_os = "windows")]
-pub fn create_windows_overlay_cpio() -> io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-
-    write_directory(&mut buf, "usr")?;
-    write_directory(&mut buf, "usr/lib")?;
-    write_directory(&mut buf, "usr/lib/systemd")?;
-    write_directory(&mut buf, "usr/lib/systemd/system")?;
-    write_directory(&mut buf, "usr/lib/systemd/system/initrd-fs.target.d")?;
-
-    write_file(
-        &mut buf,
-        "usr/lib/systemd/system/bcvk-etc-overlay.service",
-        include_bytes!("units/bcvk-etc-overlay.service"),
-    )?;
-    write_file(
-        &mut buf,
-        "usr/lib/systemd/system/bcvk-var-ephemeral.service",
-        include_bytes!("units/bcvk-var-ephemeral.service"),
-    )?;
-    write_file(
-        &mut buf,
-        "usr/lib/systemd/system/initrd-fs.target.d/bcvk-overlay.conf",
-        b"[Unit]\nWants=bcvk-etc-overlay.service bcvk-var-ephemeral.service\n",
-    )?;
 
     cpio::newc::trailer(buf)
 }

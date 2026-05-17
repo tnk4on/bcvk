@@ -90,22 +90,6 @@ impl PodmanSsh {
         Ok(())
     }
 
-    /// Mount image and return merged path.
-    /// Rootful: podman image mount. Rootless: podman unshare podman image mount.
-    #[allow(dead_code)]
-    pub fn image_mount(&self, image: &str) -> Result<String> {
-        let cmd = if self.rootful {
-            format!("podman image mount {}", image)
-        } else {
-            format!("podman unshare podman image mount {}", image)
-        };
-        let output = self.ssh_cmd(&cmd)?;
-        let path = String::from_utf8_lossy(&output).trim().to_string();
-        if path.is_empty() {
-            bail!("podman image mount returned empty path");
-        }
-        Ok(path)
-    }
 }
 
 /// Cache directory for boot files, keyed by image digest.
@@ -209,7 +193,7 @@ pub fn create_boot_vhdx(
     let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port)?;
     append_cpio(&mut initramfs, &nbd_cpio);
 
-    let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
+    let overlay_cpio = crate::cpio::create_initramfs_units_cpio()?;
     append_cpio(&mut initramfs, &overlay_cpio);
 
     if !ssh_pubkey.is_empty() {
