@@ -267,6 +267,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let podman_ssh = boot_files::PodmanSsh {
         port: pm_ssh_port,
         key: pm_identity.clone(),
+        rootful,
     };
 
     fn shell_escape(s: &str) -> String {
@@ -278,12 +279,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if !ssh_pubkey.is_empty() {
         ssh_param_str = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
     }
+    let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
+    let podman_run = if rootful { "sudo podman" } else { "podman" };
     let remote_script = format!(
-        "sudo podman pull -q {image}; \
-         MERGED=$(sudo podman image mount {image}); \
+        "{pfx} pull -q {image}; \
+         MERGED=$({pfx} image mount {image}); \
          echo MERGED=$MERGED; \
-         sudo podman rm -f {name} 2>/dev/null; \
-         sudo podman run -d --name {name} --security-opt label=disable \
+         {run} rm -f {name} 2>/dev/null; \
+         {run} run -d --name {name} --security-opt label=disable \
          -p {port}:10809 \
          -v $MERGED:$MERGED:ro \
          -v /var/tmp/bcvk:/bcvk:z,exec \
@@ -292,6 +295,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
          exec nbdkit -fv -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
          dir=$MERGED \
          'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}\"",
+        pfx = podman_prefix,
+        run = podman_run,
         image = opts.image,
         name = nbd_container_name,
         port = nbd_port,
