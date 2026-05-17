@@ -249,6 +249,20 @@ pub fn set_pxe_boot(name: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+pub fn add_vhdx_boot(name: &str, vhdx_path: &str) -> Result<()> {
+    powershell(&format!(
+        "Add-VMHardDiskDrive -VMName '{}' -Path '{}' -ControllerType SCSI",
+        name, vhdx_path
+    ))?;
+    powershell(&format!(
+        "Set-VMFirmware -VMName '{}' -FirstBootDevice (Get-VMHardDiskDrive -VMName '{}' | Select-Object -First 1)",
+        name, name
+    ))?;
+    debug!("set VHDX boot for {}: {}", name, vhdx_path);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 pub fn start_vm(name: &str) -> Result<()> {
     powershell(&format!("Start-VM -Name '{}'", name))?;
     info!("started VM: {}", name);

@@ -352,22 +352,20 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let sn = switch_name.to_string();
         std::thread::spawn(move || -> Result<()> {
             hyperv::create_gen2_vm(&vn, memory_mb, vcpus, &sn)?;
-            hyperv::set_pxe_boot(&vn)?;
             Ok(())
         })
     };
     let firewall_handle = {
         std::thread::spawn(move || hyperv::add_pxe_firewall_rules(nbd_port))
     };
-    let boot_files_handle = {
+    let vhdx_handle = {
         let img = opts.image.clone();
         let mp = merged_path.clone();
         let spk = ssh_pubkey.clone();
         let hi = host_ip.to_string();
-        let ci = client_ip.to_string();
         let ps = podman_ssh.clone();
         std::thread::spawn(move || {
-            boot_files::extract_boot_files(&img, &mp, &ps, &spk, &hi, nbd_port, &ci, &hi)
+            boot_files::create_boot_vhdx(&img, &mp, &ps, &spk, &hi, nbd_port)
         })
     };
 
@@ -391,10 +389,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     vm_handle.join().map_err(|_| color_eyre::eyre::eyre!("VM thread panicked"))??;
     firewall_handle.join().map_err(|_| color_eyre::eyre::eyre!("firewall thread panicked"))??;
 
-    let boot_files = boot_files_handle.join().map_err(|_| color_eyre::eyre::eyre!("boot files thread panicked"))??;
+    let vhdx_path = vhdx_handle.join().map_err(|_| color_eyre::eyre::eyre!("VHDX thread panicked"))??;
 
-    // PXE Server
-    let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
+    // Attach VHDX and set boot device
+    hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
 
     let mut cleanup = VmCleanup {
         vm_name: vm_name.clone(),
@@ -404,15 +402,20 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         ssh_forward: None,
     };
 
-    // Run PXE server + NBD proxy + VM boot + SSH in async runtime
+    // Run DHCP server + VM boot + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        // Start PXE server in background
-        let (dhcp_handle, tftp_handle) = pxe.start_background();
+        // Start DHCP server (TFTP not needed with VHDX boot)
+        let dummy_boot_files = crate::pxe_server::BootFiles {
+            grub_efi: vec![], kernel: vec![], initramfs: vec![],
+            grub_cfg: String::new(),
+        };
+        let pxe = PxeServer::new(host_ip, client_ip, dummy_boot_files)?;
+        let (dhcp_handle, _tftp_handle) = pxe.start_background();
 
-        // Start VM (NBD via TCP directly, no hv_sock proxy needed)
+        // Start VM from VHDX
         hyperv::start_vm(&vm_name)?;
-        info!("VM {} started, PXE booting...", vm_name);
+        info!("VM {} started, VHDX booting...", vm_name);
 
         // Serial console log: read named pipe → log file (background)
         let serial_log_path = base_dir.join(format!("serial-{}.log", name));
@@ -503,7 +506,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
         pxe.stop();
         dhcp_handle.abort();
-        tftp_handle.abort();
         Ok::<(), color_eyre::Report>(())
     })?;
 

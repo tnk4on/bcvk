@@ -277,6 +277,199 @@ fn fetch_boot_files_ssh(merged_path: &str, ssh: &PodmanSsh) -> Result<(Vec<u8>, 
     Ok((kernel, grub_efi, initramfs))
 }
 
+/// Create a VHDX with FAT32 ESP containing GRUB + kernel + initramfs.
+/// Returns the path to the VHDX file.
+#[cfg(target_os = "windows")]
+pub fn create_boot_vhdx(
+    image: &str,
+    merged_path: &str,
+    ssh: &PodmanSsh,
+    ssh_pubkey: &str,
+    nbd_host: &str,
+    nbd_port: u16,
+) -> Result<String> {
+    info!("creating boot VHDX from {}", merged_path);
+
+    // Check/fetch boot files (cached)
+    let cache = cache_dir(image)?;
+    let cache_dir = cache.ok_or_else(|| color_eyre::eyre::eyre!("cannot determine cache dir"))?;
+
+    if !(cache_dir.join("vmlinuz").exists() && cache_dir.join("initramfs.img").exists()) {
+        info!("boot files cache miss, fetching via SCP...");
+        fetch_boot_files(merged_path, ssh, &cache_dir)?;
+    } else {
+        info!("boot files cache hit: {}", cache_dir.display());
+    }
+
+    // Append CPIOs to initramfs (always, SSH key changes per run)
+    let base_initramfs = std::fs::read(cache_dir.join("initramfs.img"))?;
+    let mut initramfs = base_initramfs;
+
+    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port)?;
+    append_cpio(&mut initramfs, &nbd_cpio);
+
+    let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
+    append_cpio(&mut initramfs, &overlay_cpio);
+
+    if !ssh_pubkey.is_empty() {
+        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim(), PASSWORD_HASH)?;
+        append_cpio(&mut initramfs, &ssh_cpio);
+    }
+
+    // Write initramfs with CPIOs to temp file
+    let initramfs_tmp = cache_dir.join("initramfs-final.img");
+    std::fs::write(&initramfs_tmp, &initramfs)?;
+    info!("final initramfs: {} bytes", initramfs.len());
+
+    // grub.cfg
+    let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
+         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
+         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
+         rd.neednet=1 \
+         systemd.journald.storage=volatile\n  \
+         initrd /boot/initramfs.img\n}";
+    let grub_cfg_path = cache_dir.join("grub.cfg");
+    std::fs::write(&grub_cfg_path, grub_cfg)?;
+
+    // Create VHDX via PowerShell
+    let vhdx_path = cache_dir.join("esp.vhdx");
+    let vhdx_str = vhdx_path.to_string_lossy().to_string();
+
+    let ps_script = format!(
+        "Remove-Item '{vhdx}' -Force -ErrorAction SilentlyContinue; \
+         New-VHD -Path '{vhdx}' -SizeBytes 256MB -Dynamic | Out-Null; \
+         Mount-VHD -Path '{vhdx}'; \
+         $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
+         Initialize-Disk -Number $disk.Number -PartitionStyle GPT -ErrorAction SilentlyContinue; \
+         $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter; \
+         Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel ESP -Confirm:$false | Out-Null; \
+         $d = $part.DriveLetter; \
+         New-Item -Path \"${{d}}:\\EFI\\BOOT\" -ItemType Directory -Force | Out-Null; \
+         New-Item -Path \"${{d}}:\\boot\" -ItemType Directory -Force | Out-Null; \
+         Copy-Item '{grub_efi}' \"${{d}}:\\EFI\\BOOT\\BOOTX64.EFI\"; \
+         Copy-Item '{kernel}' \"${{d}}:\\boot\\vmlinuz\"; \
+         Copy-Item '{initramfs}' \"${{d}}:\\boot\\initramfs.img\"; \
+         Copy-Item '{grub_cfg}' \"${{d}}:\\EFI\\BOOT\\grub.cfg\"; \
+         Dismount-VHD -Path '{vhdx}'; \
+         Write-Host 'VHDX_OK'",
+        vhdx = vhdx_str,
+        grub_efi = cache_dir.join("grubx64.efi").to_string_lossy(),
+        kernel = cache_dir.join("vmlinuz").to_string_lossy(),
+        initramfs = initramfs_tmp.to_string_lossy(),
+        grub_cfg = grub_cfg_path.to_string_lossy(),
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("VHDX_OK") {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("VHDX creation failed: {} {}", stderr.trim(), stdout.trim());
+    }
+
+    // Cleanup temp initramfs
+    let _ = std::fs::remove_file(&initramfs_tmp);
+    let _ = std::fs::remove_file(&grub_cfg_path);
+
+    info!("boot VHDX: {}", vhdx_str);
+    Ok(vhdx_str)
+}
+
+/// Create CPIO with nbd-tcp binary + NM profile (DHCP) + systemd service.
+#[cfg(target_os = "windows")]
+fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
+    let mut buf = Vec::new();
+
+    let dirs = [
+        "usr", "usr/bin", "usr/lib", "usr/lib/bcvk",
+        "usr/lib/systemd", "usr/lib/systemd/system",
+        "usr/lib/systemd/system/initrd-root-device.target.d",
+        "etc", "etc/NetworkManager", "etc/NetworkManager/system-connections",
+    ];
+    for dir in &dirs {
+        let b = NewcBuilder::new(dir).mode(0o755).set_mode_file_type(ModeFileType::Directory);
+        b.write(&mut buf, 0).finish()?;
+    }
+
+    let b = NewcBuilder::new("usr/bin/nbd-tcp").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, NBD_TCP_BIN.len() as u32);
+    w.write_all(NBD_TCP_BIN)?;
+    w.finish()?;
+
+    // NM connection: DHCP for multi-VM support
+    let nm_conn =
+        "[connection]\n\
+         id=bcvk-nbd\n\
+         type=ethernet\n\
+         interface-name=eth0\n\
+         autoconnect=true\n\
+         \n\
+         [ipv4]\n\
+         method=auto\n\
+         \n\
+         [ipv6]\n\
+         method=disabled\n";
+    let b = NewcBuilder::new("etc/NetworkManager/system-connections/bcvk-nbd.nmconnection")
+        .mode(0o600).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, nm_conn.len() as u32);
+    w.write_all(nm_conn.as_bytes())?;
+    w.finish()?;
+
+    let setup = format!(
+        "#!/bin/bash\n\
+modprobe nbd max_part=16 2>/dev/null\n\
+systemctl start nm-initrd.service 2>/dev/null\n\
+\n\
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
+  /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
+  sleep 2\n\
+done\n\
+sleep 1\n\
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
+        host = host, port = port
+    );
+    let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, setup.len() as u32);
+    w.write_all(setup.as_bytes())?;
+    w.finish()?;
+
+    let service =
+        "[Unit]\n\
+         Description=Setup NBD TCP connection\n\
+         DefaultDependencies=no\n\
+         ConditionPathExists=/etc/initrd-release\n\
+         Before=sysroot.mount initrd-root-device.target\n\
+         After=systemd-udevd.service systemd-modules-load.service\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         RemainAfterExit=yes\n\
+         TimeoutStartSec=120\n\
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-nbd.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, service.len() as u32);
+    w.write_all(service.as_bytes())?;
+    w.finish()?;
+
+    let dropin = b"[Unit]\nWants=bcvk-setup-nbd.service\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf").mode(0o644).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, dropin.len() as u32);
+    w.write_all(dropin)?;
+    w.finish()?;
+
+    Ok(cpio::newc::trailer(buf)?)
+}
+
+// ---- Legacy PXE support (kept for reference, will be removed) ----
+
 /// Create CPIO with nbd-tcp binary + NM profile + systemd service.
 #[cfg(target_os = "windows")]
 fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str) -> Result<Vec<u8>> {
