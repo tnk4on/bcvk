@@ -89,6 +89,7 @@ impl PodmanSsh {
 
     /// Mount image and return merged path.
     /// Rootful: podman image mount. Rootless: podman unshare podman image mount.
+    #[allow(dead_code)]
     pub fn image_mount(&self, image: &str) -> Result<String> {
         let cmd = if self.rootful {
             format!("podman image mount {}", image)
