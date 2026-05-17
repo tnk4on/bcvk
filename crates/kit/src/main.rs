@@ -84,9 +84,6 @@ mod pxe_server;
 #[cfg(target_os = "windows")]
 mod boot_files;
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-mod hv_sock_proxy;
-#[cfg(target_os = "windows")]
 mod run_ephemeral_windows;
 
 /// Default state directory for bcvk container data
