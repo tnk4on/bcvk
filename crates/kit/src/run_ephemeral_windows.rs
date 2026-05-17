@@ -363,7 +363,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         })
     };
     let firewall_handle = {
-        std::thread::spawn(move || hyperv::add_pxe_firewall_rules(nbd_port))
+        std::thread::spawn(move || hyperv::add_firewall_rules(nbd_port))
     };
     let vhdx_handle = {
         let img = opts.image.clone();

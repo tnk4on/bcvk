@@ -152,78 +152,9 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
 }
 
 #[cfg(target_os = "windows")]
-pub fn add_nic(vm_name: &str, switch: &str) -> Result<()> {
-    powershell(&format!(
-        "Add-VMNetworkAdapter -VMName '{}' -SwitchName '{}'",
-        vm_name, switch
-    ))?;
-    debug!("added NIC on '{}' to VM {}", switch, vm_name);
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn get_default_switch_ip() -> Result<String> {
-    let ip = powershell(
-        "Get-NetIPAddress -InterfaceAlias 'vEthernet (Default Switch)' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
-    )?;
-    if ip.is_empty() {
-        bail!("Default Switch IP not found");
-    }
-    Ok(ip)
-}
-
-#[cfg(target_os = "windows")]
-pub fn get_physical_ip() -> Result<String> {
-    let ip = powershell(
-        "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike 'vEthernet*' -and $_.InterfaceAlias -ne 'Loopback*' -and $_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1).IPAddress"
-    )?;
-    if ip.is_empty() {
-        bail!("no physical NIC IP found");
-    }
-    Ok(ip)
-}
-
-#[cfg(target_os = "windows")]
-pub fn ensure_external_switch(name: &str, nic_name: &str) -> Result<String> {
-    let check = powershell(&format!(
-        "Get-VMSwitch -Name '{}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
-        name
-    ))?;
-    if check.is_empty() {
-        info!("creating External Switch: {} on {}", name, nic_name);
-        powershell(&format!(
-            "New-VMSwitch -Name '{}' -NetAdapterName '{}' -AllowManagementOS $true",
-            name, nic_name
-        ))?;
-    }
-    Ok(name.to_string())
-}
-
-#[cfg(target_os = "windows")]
-pub fn ensure_iphlpsvc() -> Result<()> {
-    powershell_ignore_error("sc.exe config iphlpsvc start= demand");
-    powershell_ignore_error("net start iphlpsvc");
-    debug!("IP Helper service started");
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn setup_nbd_portproxy(listen_ip: &str, listen_port: u16, connect_port: u16) -> Result<()> {
-    powershell_ignore_error("netsh interface portproxy reset");
-    powershell(&format!(
-        "netsh interface portproxy add v4tov4 listenaddress={} listenport={} connectaddress=127.0.0.1 connectport={}",
-        listen_ip, listen_port, connect_port
-    ))?;
-    info!("netsh portproxy: {}:{} → 127.0.0.1:{}", listen_ip, listen_port, connect_port);
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn add_pxe_firewall_rules(nbd_port: u16) -> Result<()> {
+pub fn add_firewall_rules(nbd_port: u16) -> Result<()> {
     powershell_ignore_error(
-        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67,4011 -Action Allow -ErrorAction SilentlyContinue"
-    );
-    powershell_ignore_error(
+        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
     );
     powershell_ignore_error(&format!(
         "New-NetFirewallRule -DisplayName 'bcvk-nbd' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue",
@@ -233,16 +164,6 @@ pub fn add_pxe_firewall_rules(nbd_port: u16) -> Result<()> {
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
     );
     debug!("firewall rules added");
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn set_pxe_boot(name: &str) -> Result<()> {
-    powershell(&format!(
-        "Set-VMFirmware -VMName '{}' -FirstBootDevice (Get-VMNetworkAdapter -VMName '{}' | Select-Object -First 1)",
-        name, name
-    ))?;
-    debug!("set PXE boot for {}", name);
     Ok(())
 }
 
