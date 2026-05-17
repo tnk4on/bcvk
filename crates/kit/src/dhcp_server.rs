@@ -1,4 +1,4 @@
-//! Minimal DHCP + TFTP server for PXE boot on Windows.
+//! Minimal DHCP + TFTP server for VHDX boot on Windows.
 //!
 //! Single-client, memory-backed. Runs as async tasks within bcvk.exe.
 
@@ -30,7 +30,7 @@ pub struct BootFiles {
 
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
-pub struct PxeServer {
+pub struct DhcpServer {
     server_ip: [u8; 4],
     client_ip: [u8; 4],
     boot_file: String,
@@ -39,7 +39,7 @@ pub struct PxeServer {
 }
 
 #[cfg(target_os = "windows")]
-impl PxeServer {
+impl DhcpServer {
     pub fn new(server_ip: &str, client_ip: &str, boot_files: BootFiles) -> Result<Self> {
         let sip = parse_ip(server_ip)?;
         let cip = parse_ip(client_ip)?;

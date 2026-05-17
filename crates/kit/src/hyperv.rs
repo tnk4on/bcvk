@@ -84,12 +84,11 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
         nat_name, subnet
     ));
 
-    // Firewall rules for DHCP + TFTP
+    // Firewall rules for DHCP
     powershell_ignore_error(&format!(
-        "New-NetFirewallRule -DisplayName 'bcvk-pxe-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
+        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
     ));
     powershell_ignore_error(
-        "New-NetFirewallRule -DisplayName 'bcvk-pxe-tftp' -Direction Inbound -Protocol UDP -LocalPort 69 -Action Allow -ErrorAction SilentlyContinue"
     );
     // Disable firewall for the Internal Switch profile
     powershell_ignore_error(
@@ -222,10 +221,9 @@ pub fn setup_nbd_portproxy(listen_ip: &str, listen_port: u16, connect_port: u16)
 #[cfg(target_os = "windows")]
 pub fn add_pxe_firewall_rules(nbd_port: u16) -> Result<()> {
     powershell_ignore_error(
-        "New-NetFirewallRule -DisplayName 'bcvk-pxe-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67,4011 -Action Allow -ErrorAction SilentlyContinue"
+        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67,4011 -Action Allow -ErrorAction SilentlyContinue"
     );
     powershell_ignore_error(
-        "New-NetFirewallRule -DisplayName 'bcvk-pxe-tftp' -Direction Inbound -Protocol UDP -LocalPort 69 -Action Allow -ErrorAction SilentlyContinue"
     );
     powershell_ignore_error(&format!(
         "New-NetFirewallRule -DisplayName 'bcvk-nbd' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue",
