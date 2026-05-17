@@ -2,10 +2,12 @@
 //!
 //! Uses the container's existing initramfs and appends CPIO archives
 //! for NBD setup, overlay services, and SSH configuration.
-//! No dracut, no kernel patch — follows Linux/macOS pattern.
+//! Boot files are cached on the Windows host by image digest.
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
@@ -21,9 +23,27 @@ const NBD_TCP_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
 
+/// Cache directory for boot files, keyed by image digest.
+#[cfg(target_os = "windows")]
+fn cache_dir(image: &str) -> Result<Option<PathBuf>> {
+    let output = Command::new("podman")
+        .args(["image", "inspect", "--format", "{{.Digest}}", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if digest.is_empty() { return Ok(None); }
+    let short = digest.trim_start_matches("sha256:").chars().take(16).collect::<String>();
+    let base = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
+        .join("bcvk").join("cache").join(format!("boot-{}", short));
+    Ok(Some(base))
+}
+
 /// Extract boot files using the already-mounted image overlay.
 #[cfg(target_os = "windows")]
 pub fn extract_boot_files(
+    image: &str,
     merged_path: &str,
     ssh_pubkey: &str,
     nbd_host: &str,
@@ -33,6 +53,64 @@ pub fn extract_boot_files(
 ) -> Result<BootFiles> {
     info!("extracting boot files from {}", merged_path);
 
+    // Check local cache
+    let cache = cache_dir(image)?;
+    let (kernel, grub_efi, base_initramfs) = if let Some(ref dir) = cache {
+        if dir.join("vmlinuz").exists() && dir.join("initramfs.img").exists() {
+            info!("boot files cache hit: {}", dir.display());
+            let kernel = std::fs::read(dir.join("vmlinuz"))?;
+            let grub_efi = std::fs::read(dir.join("grubx64.efi"))?;
+            let initramfs = std::fs::read(dir.join("initramfs.img"))?;
+            info!("kernel: {} bytes, GRUB: {} bytes, initramfs: {} bytes (cached)",
+                  kernel.len(), grub_efi.len(), initramfs.len());
+            (kernel, grub_efi, initramfs)
+        } else {
+            info!("boot files cache miss, fetching via SSH...");
+            let files = fetch_boot_files(merged_path)?;
+            save_cache(dir, &files)?;
+            files
+        }
+    } else {
+        info!("no cache available, fetching via SSH...");
+        fetch_boot_files(merged_path)?
+    };
+
+    // Append CPIOs to initramfs (always, since SSH key changes per run)
+    let mut initramfs = base_initramfs;
+
+    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port, client_ip, gateway_ip)?;
+    append_cpio(&mut initramfs, &nbd_cpio);
+
+    let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
+    append_cpio(&mut initramfs, &overlay_cpio);
+
+    if !ssh_pubkey.is_empty() {
+        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim(), PASSWORD_HASH)?;
+        append_cpio(&mut initramfs, &ssh_cpio);
+    }
+
+    info!("final initramfs: {} bytes", initramfs.len());
+
+    let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
+         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
+         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
+         rd.neednet=1 \
+         systemd.journald.storage=volatile\n  \
+         initrd /boot/initramfs.img\n}"
+        .to_string();
+    debug!("grub.cfg:\n{}", grub_cfg);
+
+    if kernel.is_empty() || grub_efi.is_empty() || initramfs.is_empty() {
+        bail!("failed to extract one or more boot files");
+    }
+
+    Ok(BootFiles { grub_efi, kernel, initramfs, grub_cfg })
+}
+
+/// Fetch kernel, GRUB EFI, and initramfs from podman machine via single SSH call.
+#[cfg(target_os = "windows")]
+fn fetch_boot_files(merged_path: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    // Get metadata first (small, fast)
     let meta = podman_machine_cmd(&format!(
         "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
          echo KVER=$KVER; \
@@ -52,62 +130,39 @@ pub fn extract_boot_files(
         .unwrap_or_default();
 
     if kver.is_empty() { bail!("kernel version not found"); }
+    if grub_path.is_empty() { bail!("GRUB EFI not found"); }
     info!("kernel version: {}", kver);
 
+    // Fetch all three files (separate SSH calls for reliability with large binary data)
     let kernel = podman_machine_cmd(&format!(
         "cat {}/usr/lib/modules/{}/vmlinuz", merged_path, kver
     ))?;
     info!("kernel: {} bytes", kernel.len());
 
-    let grub_efi = if grub_path.is_empty() {
-        bail!("GRUB EFI not found");
-    } else {
-        podman_machine_cmd(&format!("cat {}", grub_path))?
-    };
+    let grub_efi = podman_machine_cmd(&format!("cat {}", grub_path))?;
     info!("GRUB EFI: {} bytes", grub_efi.len());
 
-    // Extract container's existing initramfs
-    let initramfs_path = format!("{}/usr/lib/modules/{}/initramfs.img", merged_path, kver);
-    let mut initramfs = podman_machine_cmd(&format!("cat {}", initramfs_path))?;
+    let initramfs = podman_machine_cmd(&format!(
+        "cat {}/usr/lib/modules/{}/initramfs.img", merged_path, kver
+    ))?;
     if initramfs.is_empty() { bail!("initramfs not found"); }
-    info!("container initramfs: {} bytes", initramfs.len());
+    info!("initramfs: {} bytes", initramfs.len());
 
-    // Append NBD setup CPIO
-    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port, client_ip, gateway_ip)?;
-    append_cpio(&mut initramfs, &nbd_cpio);
-
-    // Append overlay CPIO
-    let overlay_cpio = crate::cpio::create_windows_overlay_cpio()?;
-    append_cpio(&mut initramfs, &overlay_cpio);
-
-    // Append SSH CPIO
-    if !ssh_pubkey.is_empty() {
-        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim(), PASSWORD_HASH)?;
-        append_cpio(&mut initramfs, &ssh_cpio);
-    }
-
-    info!("final initramfs: {} bytes", initramfs.len());
-
-    // Method 3: kernel ip= static config (processed by kernel, no userspace needed)
-    let grub_cfg = format!(
-        "set timeout=0\nset default=0\nmenuentry bcvk {{\n  \
-         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
-         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
-         rd.neednet=1 \
-         systemd.journald.storage=volatile\n  \
-         initrd /boot/initramfs.img\n}}"
-    );
-    debug!("grub.cfg:\n{}", grub_cfg);
-
-    if kernel.is_empty() || grub_efi.is_empty() || initramfs.is_empty() {
-        bail!("failed to extract one or more boot files");
-    }
-
-    Ok(BootFiles { grub_efi, kernel, initramfs, grub_cfg })
+    Ok((kernel, grub_efi, initramfs))
 }
 
-/// Create CPIO with nbd-tcp binary + systemd service.
-/// setup-nbd.sh tries: 1) kernel ip= already configured, 2) ip cmd static, 3) udhcpc
+/// Save boot files to local cache.
+#[cfg(target_os = "windows")]
+fn save_cache(dir: &PathBuf, files: &(Vec<u8>, Vec<u8>, Vec<u8>)) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("vmlinuz"), &files.0)?;
+    std::fs::write(dir.join("grubx64.efi"), &files.1)?;
+    std::fs::write(dir.join("initramfs.img"), &files.2)?;
+    info!("boot files cached: {}", dir.display());
+    Ok(())
+}
+
+/// Create CPIO with nbd-tcp binary + NM profile + systemd service.
 #[cfg(target_os = "windows")]
 fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
@@ -127,13 +182,11 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
         b.write(&mut buf, 0).finish()?;
     }
 
-    // nbd-tcp binary
     let b = NewcBuilder::new("usr/bin/nbd-tcp").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, NBD_TCP_BIN.len() as u32);
     w.write_all(NBD_TCP_BIN)?;
     w.finish()?;
 
-    // NetworkManager connection profile for static IP
     let nm_conn = format!(
         "[connection]\n\
          id=bcvk-nbd\n\
@@ -156,7 +209,6 @@ fn create_nbd_tcp_cpio(host: &str, port: u16, client_ip: &str, gateway_ip: &str)
     w.write_all(nm_conn.as_bytes())?;
     w.finish()?;
 
-    // setup-nbd.sh — start NM, wait for network, connect NBD
     let setup = format!(
         "#!/bin/bash\n\
 modprobe nbd max_part=16 2>/dev/null\n\
@@ -175,7 +227,6 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
     w.write_all(setup.as_bytes())?;
     w.finish()?;
 
-    // systemd service — run after udev and modules, script retries until network is up
     let service =
         "[Unit]\n\
          Description=Setup NBD TCP connection\n\
