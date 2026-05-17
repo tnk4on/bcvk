@@ -270,7 +270,7 @@ async fn handle_tftp_read(client: SocketAddr, raw_request: &[u8], filename: &str
             match opt_name.as_str() {
                 "blksize" => {
                     if let Ok(bs) = opt_val.parse::<usize>() {
-                        block_size = bs.min(16384).max(8);
+                        block_size = bs.min(1468).max(8);
                     }
                 }
                 "tsize" => { tsize_requested = true; }
