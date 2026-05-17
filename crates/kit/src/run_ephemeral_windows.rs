@@ -326,7 +326,41 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started on port {}", nbd_port);
 
-    // nbdkit ready 待ち
+    // Parallel setup: switch + VM + firewall while waiting for nbdkit
+    let switch_name = "bcvk-pxe";
+    let host_ip = "10.0.0.1";
+    let client_ip = "10.0.0.100";
+
+    // Start parallel tasks
+    let switch_handle = {
+        let sn = switch_name.to_string();
+        let hi = host_ip.to_string();
+        std::thread::spawn(move || hyperv::ensure_internal_switch(&sn, &hi, 24))
+    };
+    let vm_handle = {
+        let vn = vm_name.clone();
+        let sn = switch_name.to_string();
+        std::thread::spawn(move || -> Result<()> {
+            hyperv::create_gen2_vm(&vn, memory_mb, vcpus, &sn)?;
+            hyperv::set_pxe_boot(&vn)?;
+            Ok(())
+        })
+    };
+    let firewall_handle = {
+        std::thread::spawn(move || hyperv::add_pxe_firewall_rules(nbd_port))
+    };
+    let boot_files_handle = {
+        let img = opts.image.clone();
+        let mp = merged_path.clone();
+        let spk = ssh_pubkey.clone();
+        let hi = host_ip.to_string();
+        let ci = client_ip.to_string();
+        std::thread::spawn(move || {
+            boot_files::extract_boot_files(&img, &mp, &spk, &hi, nbd_port, &ci, &hi)
+        })
+    };
+
+    // Wait for nbdkit ready (concurrent with above)
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if std::time::Instant::now() > deadline {
@@ -339,27 +373,17 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     info!("nbdkit ready on port {}", nbd_port);
 
-    // 2. Internal Switch for PXE (bcvk is sole DHCP server, no ICS competition)
-    let switch_name = "bcvk-pxe";
-    let host_ip = "10.0.0.1";
-    let client_ip = "10.0.0.100";
-    let switch = hyperv::ensure_internal_switch(switch_name, host_ip, 24)?;
+    // Collect parallel results
+    let switch = switch_handle.join().map_err(|_| color_eyre::eyre::eyre!("switch thread panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
 
-    // Extract boot files — VM connects to host via TCP for NBD
-    let boot_files = boot_files::extract_boot_files(
-        &opts.image, &merged_path, &ssh_pubkey, host_ip, nbd_port, client_ip, host_ip
-    )?;
+    vm_handle.join().map_err(|_| color_eyre::eyre::eyre!("VM thread panicked"))??;
+    firewall_handle.join().map_err(|_| color_eyre::eyre::eyre!("firewall thread panicked"))??;
 
-    // 4. PXE Server (full DHCP + TFTP on Internal Switch)
+    let boot_files = boot_files_handle.join().map_err(|_| color_eyre::eyre::eyre!("boot files thread panicked"))??;
+
+    // PXE Server
     let pxe = PxeServer::new(host_ip, client_ip, boot_files)?;
-
-    // 5. Firewall rules
-    hyperv::add_pxe_firewall_rules(nbd_port)?;
-
-    // 6. Create VM on Internal Switch (1 NIC)
-    hyperv::create_gen2_vm(&vm_name, memory_mb, vcpus, switch_name)?;
-    hyperv::set_pxe_boot(&vm_name)?;
 
     let mut cleanup = VmCleanup {
         vm_name: vm_name.clone(),

@@ -36,9 +36,6 @@ pub mod boot_files;
 #[allow(missing_docs)]
 pub mod run_ephemeral_windows;
 #[cfg(target_os = "windows")]
-#[allow(missing_docs, unsafe_code)]
-pub mod hv_sock_proxy;
-#[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod ephemeral_windows;
 
