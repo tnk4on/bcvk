@@ -1,4 +1,4 @@
-//! Extract boot files from bootc container image.
+//! Extract boot files and create VHDX for Hyper-V UEFI boot.
 //!
 //! Uses direct SSH/SCP to podman machine for fast file transfer,
 //! with local cache by image digest for instant subsequent runs.
@@ -10,10 +10,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
-use tracing::{debug, info};
-
-#[cfg(target_os = "windows")]
-use crate::pxe_server::BootFiles;
+use tracing::info;
 
 #[cfg(target_os = "windows")]
 const NBD_TCP_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
@@ -399,5 +396,12 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
     w.finish()?;
 
     Ok(cpio::newc::trailer(buf)?)
+}
+
+#[cfg(target_os = "windows")]
+fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
+    let aligned = (initramfs.len() + 3) & !3;
+    initramfs.resize(aligned, 0);
+    initramfs.extend_from_slice(cpio);
 }
 
