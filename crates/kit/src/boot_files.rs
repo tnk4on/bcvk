@@ -342,9 +342,9 @@ done\n\
 # Copy nbd-vsock to /run so it survives switch-root\n\
 cp /usr/bin/nbd-vsock /run/nbd-vsock\n\
 \n\
-# Start nbd-vsock outside any cgroup so switch-root won't kill it\n\
-# Use nsenter to escape the service's cgroup\n\
-nsenter -t 1 -m -- /run/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg &\n\
+# Move to root cgroup so switch-root cleanup won't kill the proxy\n\
+echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null\n\
+/run/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg &\n\
 \n\
 # Wait for NBD device\n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n\
