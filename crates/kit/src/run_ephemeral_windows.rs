@@ -277,14 +277,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         rootful,
     };
 
-    fn shell_escape(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-
     // image mount + nbdkit start を 1 コマンドで実行
     let mut ssh_param_str = String::new();
     if !ssh_pubkey.is_empty() {
-        ssh_param_str = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
+        let escaped = shlex::try_quote(&format!("ssh_pubkey={}", ssh_pubkey))
+            .map_err(|e| color_eyre::eyre::eyre!("shell escape failed: {}", e))?;
+        ssh_param_str = format!(" {}", escaped);
     }
     let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
     let podman_run = if rootful { "sudo podman" } else { "podman" };
