@@ -31,7 +31,8 @@ fn powershell(script: &str) -> Result<String> {
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("PowerShell failed: {}", stderr.trim());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("PowerShell failed ({}): stderr={} stdout={}", script.chars().take(80).collect::<String>(), stderr.trim(), stdout.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
