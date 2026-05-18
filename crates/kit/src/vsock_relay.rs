@@ -26,7 +26,7 @@ const AF_HYPERV: i32 = 34;
 #[cfg(target_os = "windows")]
 const HV_PROTOCOL_RAW: i32 = 1;
 #[cfg(target_os = "windows")]
-const RELAY_BUF_SIZE: usize = 1024 * 1024;
+const RELAY_BUF_SIZE: usize = 256 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -171,21 +171,8 @@ impl Drop for VsockRelay {
 }
 
 #[cfg(target_os = "windows")]
-fn set_socket_buffers(sock: RawSocket) {
-    unsafe {
-        // Disable Winsock internal send buffer — use our overlapped buffers directly
-        let zero: i32 = 0;
-        setsockopt(sock, 0xFFFF, 0x1001 /* SO_SNDBUF */, &zero as *const i32 as *const u8, 4);
-        // Large receive buffer
-        let rcv_size: i32 = 1024 * 1024;
-        setsockopt(sock, 0xFFFF, 0x1002 /* SO_RCVBUF */, &rcv_size as *const i32 as *const u8, 4);
-    }
-}
-
 fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32) -> Result<()> {
     let dial_sock = unsafe { hvsock_connect(target_guid, port)? };
-    set_socket_buffers(client_sock);
-    set_socket_buffers(dial_sock);
     info!("vsock relay: connected to podman machine");
 
     let cs = client_sock;
@@ -210,25 +197,16 @@ fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32)
 #[cfg(target_os = "windows")]
 fn relay_data(from: RawSocket, to: RawSocket) {
     let mut buf = vec![0u8; RELAY_BUF_SIZE];
-    let start = std::time::Instant::now();
-    let mut total_bytes: u64 = 0;
-    let mut total_ops: u64 = 0;
-    let mut recv_us: u64 = 0;
-    let mut send_us: u64 = 0;
-    let mut last_report = start;
     loop {
         let mut bytes_recv: u32 = 0;
         let mut flags: u32 = 0;
         let mut wsa_buf = WsaBuf { len: buf.len() as u32, buf: buf.as_mut_ptr() };
-        let t0 = std::time::Instant::now();
         let rc = unsafe {
             WSARecv(from, &mut wsa_buf, 1, &mut bytes_recv, &mut flags, std::ptr::null_mut(), std::ptr::null_mut())
         };
-        recv_us += t0.elapsed().as_micros() as u64;
         if rc != 0 || bytes_recv == 0 { break; }
         let n = bytes_recv as usize;
         let mut sent: usize = 0;
-        let t1 = std::time::Instant::now();
         while sent < n {
             let mut bytes_sent: u32 = 0;
             let mut send_buf = WsaBuf { len: (n - sent) as u32, buf: buf.as_mut_ptr().wrapping_add(sent) };
@@ -237,20 +215,6 @@ fn relay_data(from: RawSocket, to: RawSocket) {
             };
             if rc != 0 || bytes_sent == 0 { return; }
             sent += bytes_sent as usize;
-        }
-        send_us += t1.elapsed().as_micros() as u64;
-        total_bytes += n as u64;
-        total_ops += 1;
-        let now = std::time::Instant::now();
-        if now.duration_since(last_report).as_secs() >= 5 {
-            let elapsed = now.duration_since(start).as_secs_f64();
-            let mb = total_bytes as f64 / 1048576.0;
-            let avg_chunk = if total_ops > 0 { total_bytes / total_ops } else { 0 };
-            let avg_recv = if total_ops > 0 { recv_us / total_ops } else { 0 };
-            let avg_send = if total_ops > 0 { send_us / total_ops } else { 0 };
-            info!("relay: {:.0}MB {:.1}MB/s chunk={}B recv={}us send={}us ops={}",
-                  mb, mb / elapsed, avg_chunk, avg_recv, avg_send, total_ops);
-            last_report = now;
         }
     }
 }

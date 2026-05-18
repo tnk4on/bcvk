@@ -173,10 +173,6 @@ static int nbd_connect_netlink_multi(int nl, int family_id, int dev_index,
 static int vsock_connect_and_handshake(unsigned int port, uint64_t *out_size, uint16_t *out_flags) {
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) { perror("vsock socket"); return -1; }
-    /* Maximize ring buffer size (hints for VMBus, up to 256KB on V5+ hosts) */
-    int bufsize = 262144;
-    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     struct sockaddr_vm sa = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port };
     if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         perror("vsock connect"); close(sock); return -1;
