@@ -429,13 +429,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // Run DHCP server + VM boot + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        // Start DHCP server (TFTP not needed with VHDX boot)
-        let dummy_boot_files = crate::dhcp_server::BootFiles {
-            grub_efi: vec![], kernel: vec![], initramfs: vec![],
-            grub_cfg: String::new(),
-        };
-        let pxe = DhcpServer::new(host_ip, client_ip, dummy_boot_files)?;
-        let (dhcp_handle, _tftp_handle) = pxe.start_background();
+        let dhcp = DhcpServer::new(host_ip, client_ip)?;
+        let dhcp_handle = dhcp.start_background();
 
         // Start VM from VHDX
         hyperv::start_vm(&vm_name)?;
@@ -535,7 +530,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root").map(|_| ())?;
         }
 
-        pxe.stop();
+        dhcp.stop();
         dhcp_handle.abort();
         Ok::<(), color_eyre::Report>(())
     })?;
