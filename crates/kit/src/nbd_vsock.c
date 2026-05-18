@@ -63,10 +63,16 @@ static int writeall(int fd, const void *buf, size_t n) {
 
 static void proxy_loop(int vsock_fd, int tcp_fd) {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);
     pid_t pid = fork();
     if (pid < 0) { _exit(1); }
     if (pid == 0) {
         /* child: tcp → vsock */
+        signal(SIGTERM, SIG_IGN);
+        signal(SIGQUIT, SIG_IGN);
+        signal(SIGHUP, SIG_IGN);
         char *buf = malloc(PROXY_BUF_SIZE);
         for (;;) {
             ssize_t n = read(tcp_fd, buf, PROXY_BUF_SIZE);
