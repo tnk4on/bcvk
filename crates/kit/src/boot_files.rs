@@ -345,7 +345,8 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   sleep 2\n\
 done\n\
 sleep 1\n\
-blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
+echo 65536 > /sys/block/nbd0/queue/read_ahead_kb 2>/dev/null\n",
         vsock_port = vsock_port
     );
     let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
