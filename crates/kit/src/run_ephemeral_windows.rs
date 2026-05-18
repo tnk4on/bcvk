@@ -1,10 +1,10 @@
-//! Ephemeral VM launch flow for Windows using Hyper-V VHDX + NBD EROFS.
+//! Ephemeral VM launch flow for Windows using Hyper-V VHDX + NBD over vsock.
 //!
 //! Architecture:
-//! 1. nbdkit erofs plugin serves EROFS rootfs via NBD (podman run -p)
-//! 2. bcvk extracts boot files (kernel, initramfs, GRUB) to memory
-//! 3. bcvk runs DHCP server on Internal Switch
-//! 4. Hyper-V Gen2 VM VHDX boots → GRUB → kernel → dracut NBD → EROFS rootfs
+//! 1. nbdkit erofs plugin serves EROFS rootfs (--network=host container)
+//! 2. vsock-nbd-bridge bridges AF_VSOCK → TCP localhost:10809 in podman machine
+//! 3. vsock relay on host bridges ephemeral VM ↔ podman machine via AF_HYPERV
+//! 4. Hyper-V Gen2 VM boots → nbd-vsock (AF_VSOCK) → EROFS rootfs
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::{bail, eyre}, Result};
@@ -53,7 +53,7 @@ pub struct EphemeralVmMetadata {
     pub ssh_port: u16,
     pub ssh_key: String,
     pub nbd_container: Option<String>,
-    pub nbd_port: Option<u16>,
+    pub vsock_port: Option<u32>,
     pub created: String,
 }
 
@@ -111,6 +111,7 @@ struct VmCleanup {
     image: String,
     vhdx_path: Option<String>,
     ssh_forward: Option<SshForward>,
+    vsock_port: Option<u32>,
 }
 
 #[cfg(target_os = "windows")]
@@ -127,11 +128,16 @@ impl Drop for VmCleanup {
         if let Some(ref vhdx) = self.vhdx_path {
             let _ = std::fs::remove_file(vhdx);
         }
-        // Release container image overlay mount
         if let Ok(machine) = detect_machine_name() {
             let _ = Command::new("podman")
                 .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
                 .stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let _ = Command::new("podman")
+                .args(["machine", "ssh", &machine, "--", "pkill", "-f", "vsock-nbd-bridge"])
+                .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
+        if let Some(port) = self.vsock_port {
+            let _ = hyperv::unregister_vsock_service(port);
         }
         EphemeralVmMetadata::remove(&self.name);
     }
@@ -163,6 +169,13 @@ fn spawn_cleanup(c: &VmCleanup) {
             .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image])
             .stdout(Stdio::null()).stderr(Stdio::null())
             .spawn();
+        let _ = Command::new("podman")
+            .args(["machine", "ssh", &machine, "--", "pkill", "-f", "vsock-nbd-bridge"])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn();
+    }
+    if let Some(port) = c.vsock_port {
+        let _ = hyperv::unregister_vsock_service(port);
     }
     EphemeralVmMetadata::remove(&c.name);
 }
@@ -288,16 +301,22 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // Ensure image exists and get digest for caching
     let digest_short = boot_files::ensure_image_and_get_digest(&opts.image)?;
 
-    // 1. Start nbdkit
-    let nbd_port = find_available_nbd_port();
+    let vsock_port: u32 = 1030;
     let nbd_container_name = format!("bcvk-nbd-{}", name);
+
+    // Register vsock service GUID in Windows registry
+    hyperv::register_vsock_service(vsock_port)?;
+
+    // Get podman machine VM GUID for vsock relay
+    let pm_vm_name = format!("podman-machine-{}", machine);
+    let podman_vm_guid = hyperv::get_vm_guid(&pm_vm_name)?;
+    info!("podman machine VM GUID: {}", podman_vm_guid);
 
     // 既存コンテナを削除
     let _ = Command::new("podman")
         .args(["rm", "-f", &nbd_container_name])
         .stdout(Stdio::null()).stderr(Stdio::null()).status();
 
-    // nbdkit: Podman Machine に直接 SSH して起動 (podman machine ssh ではなく ssh コマンド)
     // podman machine inspect から SSH ポートとキーを取得
     let inspect_out = Command::new("podman")
         .args(["machine", "inspect", &machine])
@@ -305,12 +324,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .output()?;
     let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
 
-    // SSH port を抽出
     let pm_ssh_port = inspect_json.lines()
         .find(|l| l.contains("\"Port\""))
         .and_then(|l| l.trim().trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
         .unwrap_or(22);
-    // SSH identity path を抽出
     let pm_identity = inspect_json.lines()
         .find(|l| l.contains("\"IdentityPath\""))
         .map(|l| l.split('"').nth(3).unwrap_or("").to_string())
@@ -324,7 +341,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         rootful,
     };
 
-    // image mount + nbdkit start を 1 コマンドで実行
+    // SSH param for nbdkit plugin
     let mut ssh_param_str = String::new();
     if !ssh_pubkey.is_empty() {
         let param = format!("ssh_pubkey={}", ssh_pubkey);
@@ -332,69 +349,92 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             .map_err(|e| color_eyre::eyre::eyre!("shell escape failed: {}", e))?;
         ssh_param_str = format!(" {}", escaped);
     }
+
+    // Step 1: Mount image (needed before parallel tasks)
     let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
-    let podman_run = if rootful { "sudo podman" } else { "podman" };
-    let remote_script = format!(
+    let mount_script = format!(
         "{pfx} pull -q {image}; \
          MERGED=$({pfx} image mount {image}); \
-         echo MERGED=$MERGED; \
-         {run} rm -f {name} 2>/dev/null; \
-         {run} run -d --name {name} --security-opt label=disable \
-         -p {port}:10809 \
-         -v $MERGED:$MERGED:ro \
-         -v /var/tmp/bcvk:/bcvk:z,exec \
-         quay.io/fedora/fedora:latest \
-         sh -c \"dnf install -y nbdkit >/dev/null 2>&1; \
-         exec nbdkit -fv -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
-         dir=$MERGED \
-         'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}\"",
-        pfx = podman_prefix,
-        run = podman_run,
-        image = opts.image,
-        name = nbd_container_name,
-        port = nbd_port,
-        ssh = ssh_param_str,
+         echo MERGED=$MERGED",
+        pfx = podman_prefix, image = opts.image,
     );
-
-    let output = Command::new("ssh")
-        .args([
-            "-o", "ConnectTimeout=10",
-            "-o", "ServerAliveInterval=5",
-            "-o", "ServerAliveCountMax=3",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-i", &pm_identity,
-            "-p", &pm_ssh_port.to_string(),
-            "core@127.0.0.1",
-            &remote_script,
-        ])
-        .stdout(Stdio::piped()).stderr(Stdio::piped())
-        .output()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to start nbdkit: {} {}", stderr.trim(), stdout.trim());
-    }
-    // Extract MERGED path from nbdkit output
-    let merged_path = stdout.lines()
+    let mount_output = podman_ssh.ssh_cmd(&mount_script)?;
+    let mount_stdout = String::from_utf8_lossy(&mount_output);
+    let merged_path = mount_stdout.lines()
         .find(|l| l.starts_with("MERGED="))
         .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
         .unwrap_or_default();
     if merged_path.is_empty() {
-        bail!("failed to get MERGED path from nbdkit output");
+        bail!("failed to get MERGED path");
     }
     info!("image mounted at: {}", merged_path);
-    let nbd_container = nbd_container_name.clone();
-    info!("nbdkit container started on port {}", nbd_port);
 
-    // Parallel setup: switch + VM + firewall while waiting for nbdkit
+    // Step 2: Parallel tasks
     let switch_name = "bcvk";
     let host_ip = "10.0.0.1";
     let client_ip = "10.0.0.100";
 
-    // Start parallel tasks
+    // 2a. nbdkit container (--network=host, auto-build image on first run)
+    let nbdkit_handle = {
+        let ps = podman_ssh.clone();
+        let podman_run = if rootful { "sudo podman" } else { "podman" };
+        let nbdkit_script = format!(
+            "if ! {run} image exists localhost/bcvk-nbdkit:latest 2>/dev/null; then \
+               echo BUILDING_NBDKIT_IMAGE; \
+               printf 'FROM quay.io/fedora/fedora:latest\\nRUN dnf install -y nbdkit && dnf clean all\\n' | \
+               {run} build -t localhost/bcvk-nbdkit:latest -f - /tmp; \
+             fi; \
+             {run} rm -f {name} 2>/dev/null; \
+             {run} run -d --name {name} --security-opt label=disable \
+             --network=host \
+             -v {merged}:{merged}:ro \
+             -v /var/tmp/bcvk:/bcvk:z,exec \
+             localhost/bcvk-nbdkit:latest \
+             nbdkit -fv -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
+             dir={merged} \
+             'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}",
+            run = podman_run,
+            name = nbd_container_name,
+            merged = merged_path,
+            ssh = ssh_param_str,
+        );
+        std::thread::spawn(move || ps.ssh_cmd(&nbdkit_script))
+    };
+
+    // 2b. Deploy vsock-nbd-bridge binary
+    let bridge_handle = {
+        let ps = podman_ssh.clone();
+        std::thread::spawn(move || -> Result<()> {
+            let bridge_path = "/var/tmp/bcvk/vsock-nbd-bridge";
+            let bridge_exists = ps.ssh_cmd(&format!("test -x {} && echo EXISTS", bridge_path));
+            if bridge_exists.map(|o| String::from_utf8_lossy(&o).contains("EXISTS")).unwrap_or(false) {
+                debug!("vsock-nbd-bridge already deployed");
+                return Ok(());
+            }
+            let tmp_path = std::env::temp_dir().join("vsock-nbd-bridge.bin");
+            std::fs::write(&tmp_path, boot_files::vsock_nbd_bridge_binary())?;
+            let status = Command::new("scp")
+                .args([
+                    "-P", &ps.port.to_string(),
+                    "-i", &ps.key,
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null",
+                    "-o", "LogLevel=ERROR",
+                ])
+                .arg(tmp_path.to_string_lossy().as_ref())
+                .arg(&format!("{}:{}", ps.user_host(), bridge_path))
+                .stdout(Stdio::null()).stderr(Stdio::null())
+                .status()?;
+            if !status.success() {
+                bail!("SCP vsock-nbd-bridge failed");
+            }
+            ps.ssh_cmd(&format!("chmod +x {}", bridge_path))?;
+            info!("vsock-nbd-bridge deployed");
+            Ok(())
+        })
+    };
+
+    // 2c. Switch + VM + VHDX (parallel)
     let switch_handle = {
         let sn = switch_name.to_string();
         let hi = host_ip.to_string();
@@ -409,40 +449,34 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         })
     };
     let firewall_handle = {
-        std::thread::spawn(move || hyperv::add_firewall_rules(nbd_port))
+        std::thread::spawn(move || hyperv::add_firewall_rules(0))
     };
     let vhdx_handle = {
         let ds = digest_short.clone();
         let mp = merged_path.clone();
         let spk = ssh_pubkey.clone();
-        let hi = host_ip.to_string();
         let ps = podman_ssh.clone();
         std::thread::spawn(move || {
-            boot_files::create_boot_vhdx(&ds, &mp, &ps, &spk, &hi, nbd_port)
+            boot_files::create_boot_vhdx(&ds, &mp, &ps, &spk, vsock_port)
         })
     };
 
-    // Wait for nbdkit ready (concurrent with all parallel tasks)
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if std::time::Instant::now() > deadline {
-            bail!("nbdkit did not become ready in 30s");
-        }
-        if std::net::TcpStream::connect(format!("127.0.0.1:{}", nbd_port)).is_ok() {
-            break;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-    info!("nbdkit ready on port {}", nbd_port);
+    // Step 3: Wait for all parallel tasks
+    nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))??;
+    let nbd_container = nbd_container_name.clone();
+    info!("nbdkit container started (--network=host)");
 
-    // Collect parallel results
-    let switch = switch_handle.join().map_err(|_| color_eyre::eyre::eyre!("switch thread panicked"))??;
+    bridge_handle.join().map_err(|_| eyre!("bridge deploy thread panicked"))??;
+
+    // Start vsock-nbd-bridge in podman machine
+    podman_ssh.ssh_cmd("nohup /var/tmp/bcvk/vsock-nbd-bridge 1030 127.0.0.1 10809 </dev/null >/dev/null 2>&1 &")?;
+    info!("vsock-nbd-bridge started (port 1030 → localhost:10809)");
+
+    let switch = switch_handle.join().map_err(|_| eyre!("switch thread panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
-
-    vm_handle.join().map_err(|_| color_eyre::eyre::eyre!("VM thread panicked"))??;
-    firewall_handle.join().map_err(|_| color_eyre::eyre::eyre!("firewall thread panicked"))??;
-
-    let vhdx_path = vhdx_handle.join().map_err(|_| color_eyre::eyre::eyre!("VHDX thread panicked"))??;
+    vm_handle.join().map_err(|_| eyre!("VM thread panicked"))??;
+    firewall_handle.join().map_err(|_| eyre!("firewall thread panicked"))??;
+    let vhdx_path = vhdx_handle.join().map_err(|_| eyre!("VHDX thread panicked"))??;
 
     // Attach VHDX and set boot device
     hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
@@ -454,6 +488,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         image: opts.image.clone(),
         vhdx_path: Some(vhdx_path),
         ssh_forward: None,
+        vsock_port: Some(vsock_port),
     };
 
     // Run DHCP server + VM boot + SSH in async runtime
@@ -540,7 +575,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             ssh_port,
             ssh_key: ssh_key_path.to_string_lossy().to_string(),
             nbd_container: Some(nbd_container.clone()),
-            nbd_port: Some(nbd_port),
+            vsock_port: Some(vsock_port),
             created: chrono::Utc::now().to_rfc3339(),
         };
         metadata.save()?;
@@ -615,18 +650,6 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     info!("log: {}", log_path.display());
     println!("{}", vm_name);
     Ok(())
-}
-
-// --- nbdkit helpers ---
-
-#[cfg(target_os = "windows")]
-fn find_available_nbd_port() -> u16 {
-    for port in 10800..10900 {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    10800
 }
 
 #[cfg(target_os = "windows")]

@@ -28,6 +28,9 @@ pub mod hyperv;
 pub mod ssh_forward;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
+pub mod vsock_relay;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
 pub mod dhcp_server;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
