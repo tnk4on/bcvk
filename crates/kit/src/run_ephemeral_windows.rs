@@ -297,7 +297,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // image mount + nbdkit start を 1 コマンドで実行
     let mut ssh_param_str = String::new();
     if !ssh_pubkey.is_empty() {
-        let escaped = shlex::try_quote(&format!("ssh_pubkey={}", ssh_pubkey))
+        let param = format!("ssh_pubkey={}", ssh_pubkey);
+        let escaped = shlex::try_quote(&param)
             .map_err(|e| color_eyre::eyre::eyre!("shell escape failed: {}", e))?;
         ssh_param_str = format!(" {}", escaped);
     }

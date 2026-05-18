@@ -3,7 +3,7 @@
 #[cfg(target_os = "windows")]
 use clap::Subcommand;
 #[cfg(target_os = "windows")]
-use color_eyre::{eyre::bail, Result};
+use color_eyre::Result;
 #[cfg(target_os = "windows")]
 use std::io::Write;
 
