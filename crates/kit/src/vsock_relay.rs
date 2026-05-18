@@ -26,7 +26,7 @@ const AF_HYPERV: i32 = 34;
 #[cfg(target_os = "windows")]
 const HV_PROTOCOL_RAW: i32 = 1;
 #[cfg(target_os = "windows")]
-const RELAY_BUF_SIZE: usize = 256 * 1024;
+const RELAY_BUF_SIZE: usize = 1024 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -164,8 +164,20 @@ impl Drop for VsockRelay {
 }
 
 #[cfg(target_os = "windows")]
+fn set_socket_buffers(sock: RawSocket) {
+    let buf_size: i32 = 1024 * 1024;
+    unsafe {
+        setsockopt(sock, 0xFFFF /* SOL_SOCKET */, 0x1001 /* SO_SNDBUF */,
+                   &buf_size as *const i32 as *const u8, 4);
+        setsockopt(sock, 0xFFFF /* SOL_SOCKET */, 0x1002 /* SO_RCVBUF */,
+                   &buf_size as *const i32 as *const u8, 4);
+    }
+}
+
 fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32) -> Result<()> {
     let dial_sock = unsafe { hvsock_connect(target_guid, port)? };
+    set_socket_buffers(client_sock);
+    set_socket_buffers(dial_sock);
     info!("vsock relay: connected to podman machine");
 
     let cs = client_sock;
@@ -218,6 +230,7 @@ extern "system" {
     fn closesocket(s: RawSocket) -> i32;
     fn recv(s: RawSocket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn send(s: RawSocket, buf: *const u8, len: i32, flags: i32) -> i32;
+    fn setsockopt(s: RawSocket, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
     fn WSAGetLastError() -> i32;
     fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
 }
