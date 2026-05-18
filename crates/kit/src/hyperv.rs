@@ -253,3 +253,33 @@ pub fn is_hyper_v_enabled() -> bool {
         .map(|s| s.contains("Enabled"))
         .unwrap_or(false)
 }
+
+#[cfg(target_os = "windows")]
+pub fn get_vm_guid(vm_name: &str) -> Result<String> {
+    powershell(&format!(
+        "Write-Host (Get-VM -Name '{}').VMId.Guid", vm_name
+    ))
+}
+
+#[cfg(target_os = "windows")]
+pub fn register_vsock_service(port: u32) -> Result<()> {
+    let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
+    powershell_ignore_error(&format!(
+        "New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\{}' -Force | \
+         Set-ItemProperty -Name 'ElementName' -Value 'bcvk-nbd'",
+        guid
+    ));
+    debug!("registered vsock service GUID: {}", guid);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn unregister_vsock_service(port: u32) -> Result<()> {
+    let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
+    powershell_ignore_error(&format!(
+        "Remove-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\{}' -Force -ErrorAction SilentlyContinue",
+        guid
+    ));
+    debug!("unregistered vsock service GUID: {}", guid);
+    Ok(())
+}
