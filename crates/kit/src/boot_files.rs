@@ -13,7 +13,10 @@ use std::process::{Command, Stdio};
 use tracing::info;
 
 #[cfg(target_os = "windows")]
-const NBD_TCP_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
+const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
+
+#[cfg(target_os = "windows")]
+const VSOCK_NBD_BRIDGE_BIN: &[u8] = include_bytes!("vsock-nbd-bridge.bin");
 
 #[cfg(target_os = "windows")]
 const PASSWORD_HASH: &str =
@@ -188,8 +191,7 @@ pub fn create_boot_vhdx(
     merged_path: &str,
     ssh: &PodmanSsh,
     ssh_pubkey: &str,
-    nbd_host: &str,
-    nbd_port: u16,
+    vsock_port: u32,
 ) -> Result<String> {
     info!("creating boot VHDX from {}", merged_path);
 
@@ -206,7 +208,7 @@ pub fn create_boot_vhdx(
     let base_initramfs = std::fs::read(cache_dir.join("initramfs.img"))?;
     let mut initramfs = base_initramfs;
 
-    let nbd_cpio = create_nbd_tcp_cpio(nbd_host, nbd_port)?;
+    let nbd_cpio = create_nbd_vsock_cpio(vsock_port)?;
     append_cpio(&mut initramfs, &nbd_cpio);
 
     let overlay_cpio = crate::cpio::create_initramfs_units_cpio()?;
@@ -226,7 +228,6 @@ pub fn create_boot_vhdx(
     let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
          linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
-         rd.neednet=1 \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}";
     let grub_cfg_path = cache_dir.join("grub.cfg");
@@ -280,9 +281,9 @@ pub fn create_boot_vhdx(
     Ok(vhdx_str)
 }
 
-/// Create CPIO with nbd-tcp binary + NM profile (DHCP) + systemd service.
+/// Create CPIO with nbd-vsock binary + systemd service for vsock NBD.
 #[cfg(target_os = "windows")]
-fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
+fn create_nbd_vsock_cpio(vsock_port: u32) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
     use std::io::Write;
@@ -293,55 +294,29 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
         "usr", "usr/bin", "usr/lib", "usr/lib/bcvk",
         "usr/lib/systemd", "usr/lib/systemd/system",
         "usr/lib/systemd/system/initrd-root-device.target.d",
-        "etc", "etc/NetworkManager", "etc/NetworkManager/system-connections",
     ];
     for dir in &dirs {
         let b = NewcBuilder::new(dir).mode(0o755).set_mode_file_type(ModeFileType::Directory);
         b.write(&mut buf, 0).finish()?;
     }
 
-    let b = NewcBuilder::new("usr/bin/nbd-tcp").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, NBD_TCP_BIN.len() as u32);
-    w.write_all(NBD_TCP_BIN)?;
-    w.finish()?;
-
-    // NM connection: DHCP for multi-VM support
-    let nm_conn =
-        "[connection]\n\
-         id=bcvk-nbd\n\
-         type=ethernet\n\
-         interface-name=eth0\n\
-         autoconnect=true\n\
-         \n\
-         [ipv4]\n\
-         method=auto\n\
-         \n\
-         [ipv6]\n\
-         method=disabled\n";
-    let b = NewcBuilder::new("etc/NetworkManager/system-connections/bcvk-nbd.nmconnection")
-        .mode(0o600).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, nm_conn.len() as u32);
-    w.write_all(nm_conn.as_bytes())?;
+    let b = NewcBuilder::new("usr/bin/nbd-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, NBD_VSOCK_BIN.len() as u32);
+    w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
     let setup = format!(
         "#!/bin/bash\n\
 modprobe nbd max_part=16 2>/dev/null\n\
-systemctl start nm-initrd.service 2>/dev/null\n\
-\n\
-# Wait for network interface to get an IP\n\
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n\
-  ip -4 addr show eth0 2>/dev/null | grep -q 'inet ' && break\n\
-  sleep 1\n\
-done\n\
+modprobe hv_sock 2>/dev/null\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
-  /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
+  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
   sleep 2\n\
 done\n\
 sleep 1\n\
 blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
-        host = host, port = port
+        vsock_port = vsock_port
     );
     let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup.len() as u32);
@@ -350,7 +325,7 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
 
     let service =
         "[Unit]\n\
-         Description=Setup NBD TCP connection\n\
+         Description=Setup NBD vsock connection\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
          Before=sysroot.mount initrd-root-device.target\n\
@@ -373,6 +348,12 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
     w.finish()?;
 
     Ok(cpio::newc::trailer(buf)?)
+}
+
+/// Vsock NBD bridge binary for deployment to podman machine.
+#[cfg(target_os = "windows")]
+pub fn vsock_nbd_bridge_binary() -> &'static [u8] {
+    VSOCK_NBD_BRIDGE_BIN
 }
 
 #[cfg(target_os = "windows")]
