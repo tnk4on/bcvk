@@ -171,11 +171,17 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     ssh.scp_to_local(&initramfs_remote, &cache_dir.join("initramfs.img"))?;
     info!("initramfs: SCP complete");
 
-    // Fetch vsock kernel modules for initramfs injection
-    let vsock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/vsock.ko.xz", merged_path, kver);
-    let hv_sock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/hv_sock.ko.xz", merged_path, kver);
-    let _ = ssh.scp_to_local(&vsock_ko, &cache_dir.join("vsock.ko.xz"));
-    let _ = ssh.scp_to_local(&hv_sock_ko, &cache_dir.join("hv_sock.ko.xz"));
+    // Fetch vsock kernel modules for initramfs injection (decompress on remote before SCP)
+    let _ = ssh.ssh_cmd(&format!(
+        "xz -dk {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz 2>/dev/null; \
+         xz -dk {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz 2>/dev/null; \
+         echo DECOMPRESSED",
+        m = merged_path, k = kver,
+    ));
+    let vsock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/vsock.ko", merged_path, kver);
+    let hv_sock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/hv_sock.ko", merged_path, kver);
+    let _ = ssh.scp_to_local(&vsock_ko, &cache_dir.join("vsock.ko"));
+    let _ = ssh.scp_to_local(&hv_sock_ko, &cache_dir.join("hv_sock.ko"));
     info!("vsock modules: SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
@@ -312,8 +318,8 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // Include vsock kernel modules in initramfs
-    for module_name in &["vsock.ko.xz", "hv_sock.ko.xz"] {
+    // Include decompressed vsock kernel modules in initramfs
+    for module_name in &["vsock.ko", "hv_sock.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
@@ -330,14 +336,8 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         "#!/bin/bash\n\
 modprobe nbd max_part=16 2>/dev/null\n\
 # Load vsock modules from CPIO (not in default initramfs)\n\
-if [ -f /usr/lib/bcvk/vsock.ko.xz ]; then\n\
-  xz -d /usr/lib/bcvk/vsock.ko.xz 2>/dev/null\n\
-  insmod /usr/lib/bcvk/vsock.ko 2>/dev/null\n\
-fi\n\
-if [ -f /usr/lib/bcvk/hv_sock.ko.xz ]; then\n\
-  xz -d /usr/lib/bcvk/hv_sock.ko.xz 2>/dev/null\n\
-  insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null\n\
-fi\n\
+insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
+insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/kmsg\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
