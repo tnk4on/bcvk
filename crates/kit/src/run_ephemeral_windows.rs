@@ -428,7 +428,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     // Run DHCP server + VM boot + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    rt.block_on(async move {
         let dhcp = DhcpServer::new(host_ip, client_ip)?;
         let dhcp_handle = dhcp.start_background();
 
