@@ -332,6 +332,9 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
 
     let setup = format!(
         "#!/bin/bash\n\
+# Maximize vsock ring buffer (hints for VMBus, up to 256KB)\n\
+echo 262144 > /proc/sys/net/core/rmem_max 2>/dev/null\n\
+echo 262144 > /proc/sys/net/core/wmem_max 2>/dev/null\n\
 # Load patched nbd.ko (AF_VSOCK support)\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
