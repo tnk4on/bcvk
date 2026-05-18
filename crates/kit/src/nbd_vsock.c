@@ -3,8 +3,9 @@
  *
  * Usage: nbd-vsock /dev/nbdN vsock_port
  *
- * Connects to the host (CID=2) on the given vsock port, performs NBD
- * handshake, then hands the socket to the kernel via netlink NBD_CMD_CONNECT.
+ * Since the kernel NBD driver only accepts AF_INET/AF_INET6 sockets,
+ * we create a local TCP socketpair: connect vsock, do NBD handshake,
+ * then proxy vsock <-> TCP and hand the TCP socket to the kernel.
  */
 
 #include <stdio.h>
@@ -13,16 +14,19 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <linux/vm_sockets.h>
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <stdint.h>
 #include <endian.h>
 
-/* NBD netlink constants (from linux/nbd-netlink.h, inlined for portability) */
 #define NBD_GENL_FAMILY_NAME "nbd"
 #define NBD_GENL_VERSION     0x1
+#define PROXY_BUF_SIZE       (256 * 1024)
 
 enum { NBD_CMD_UNSPEC, NBD_CMD_CONNECT, NBD_CMD_DISCONNECT, NBD_CMD_RECONFIGURE,
        NBD_CMD_LINK_DEAD, NBD_CMD_STATUS };
@@ -52,6 +56,26 @@ static int writeall(int fd, const void *buf, size_t n) {
         done += r;
     }
     return 0;
+}
+
+/* ---- proxy thread ---- */
+
+struct proxy_args {
+    int from_fd;
+    int to_fd;
+};
+
+static void *proxy_thread(void *arg) {
+    struct proxy_args *pa = (struct proxy_args *)arg;
+    char *buf = malloc(PROXY_BUF_SIZE);
+    if (!buf) return NULL;
+    for (;;) {
+        ssize_t n = read(pa->from_fd, buf, PROXY_BUF_SIZE);
+        if (n <= 0) break;
+        if (writeall(pa->to_fd, buf, n) < 0) break;
+    }
+    free(buf);
+    return NULL;
 }
 
 /* ---- NLA builder ---- */
@@ -213,23 +237,23 @@ int main(int argc, char **argv) {
     int dev_index = atoi(dev + strlen("/dev/nbd"));
 
     /* vsock connect to host (CID=2) */
-    int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (sock < 0) { perror("vsock socket"); return 1; }
-    struct sockaddr_vm sa = {0};
-    sa.svm_family = AF_VSOCK;
-    sa.svm_cid = VMADDR_CID_HOST;
-    sa.svm_port = port;
+    int vsock = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (vsock < 0) { perror("vsock socket"); return 1; }
+    struct sockaddr_vm vsa = {0};
+    vsa.svm_family = AF_VSOCK;
+    vsa.svm_cid = VMADDR_CID_HOST;
+    vsa.svm_port = port;
     fprintf(stderr, "nbd-vsock: connecting vsock port %u (CID=2)\n", port);
-    if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+    if (connect(vsock, (struct sockaddr *)&vsa, sizeof(vsa)) < 0) {
         perror("vsock connect"); return 1;
     }
     fprintf(stderr, "nbd-vsock: connected\n");
 
-    /* NBD newstyle-fixed handshake */
+    /* NBD newstyle-fixed handshake (over vsock) */
     uint64_t magic, ihaveopt;
     uint16_t hflags;
-    if (readall(sock, &magic, 8) < 0 || readall(sock, &ihaveopt, 8) < 0 ||
-        readall(sock, &hflags, 2) < 0) {
+    if (readall(vsock, &magic, 8) < 0 || readall(vsock, &ihaveopt, 8) < 0 ||
+        readall(vsock, &hflags, 2) < 0) {
         fprintf(stderr, "nbd-vsock: handshake read failed\n"); return 1;
     }
     magic = be64toh(magic); ihaveopt = be64toh(ihaveopt); hflags = be16toh(hflags);
@@ -237,20 +261,20 @@ int main(int argc, char **argv) {
             (unsigned long long)ihaveopt, hflags);
 
     uint32_t cflags = htobe32(1);
-    writeall(sock, &cflags, 4);
+    writeall(vsock, &cflags, 4);
 
     uint64_t opt_magic = htobe64(0x49484156454F5054ULL);
     uint32_t opt_id = htobe32(1);
     uint32_t opt_len = htobe32(0);
-    writeall(sock, &opt_magic, 8);
-    writeall(sock, &opt_id, 4);
-    writeall(sock, &opt_len, 4);
+    writeall(vsock, &opt_magic, 8);
+    writeall(vsock, &opt_id, 4);
+    writeall(vsock, &opt_len, 4);
 
     uint64_t export_size;
     uint16_t tflags;
     char pad[124];
-    if (readall(sock, &export_size, 8) < 0 || readall(sock, &tflags, 2) < 0 ||
-        readall(sock, pad, 124) < 0) {
+    if (readall(vsock, &export_size, 8) < 0 || readall(vsock, &tflags, 2) < 0 ||
+        readall(vsock, pad, 124) < 0) {
         fprintf(stderr, "nbd-vsock: export info read failed\n"); return 1;
     }
     export_size = be64toh(export_size);
@@ -258,7 +282,20 @@ int main(int argc, char **argv) {
     fprintf(stderr, "nbd-vsock: export size=%llu bytes, flags=%x\n",
             (unsigned long long)export_size, tflags);
 
-    /* netlink: connect NBD device */
+    /* Create local TCP socketpair for kernel NBD (kernel rejects AF_VSOCK) */
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        perror("socketpair"); return 1;
+    }
+
+    /* Start proxy threads: vsock <-> sv[1], kernel uses sv[0] */
+    struct proxy_args vsock_to_tcp = { .from_fd = vsock, .to_fd = sv[1] };
+    struct proxy_args tcp_to_vsock = { .from_fd = sv[1], .to_fd = vsock };
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, proxy_thread, &vsock_to_tcp);
+    pthread_create(&t2, NULL, proxy_thread, &tcp_to_vsock);
+
+    /* netlink: connect NBD device using sv[0] (AF_UNIX is accepted) */
     int nl = nl_open();
     if (nl < 0) { perror("netlink socket"); return 1; }
 
@@ -270,13 +307,17 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "nbd-vsock: nbd genl family_id=%d\n", family_id);
 
-    if (nbd_connect_netlink(nl, family_id, dev_index, sock,
+    if (nbd_connect_netlink(nl, family_id, dev_index, sv[0],
                             export_size, 512, tflags) < 0) {
         fprintf(stderr, "nbd-vsock: netlink NBD_CMD_CONNECT failed\n");
         return 1;
     }
 
-    fprintf(stderr, "nbd-vsock: kernel I/O threads started, exiting\n");
+    fprintf(stderr, "nbd-vsock: kernel I/O threads started, proxy running\n");
     close(nl);
+
+    /* Keep proxy threads alive (kernel I/O uses sv[0], proxy relays via sv[1] <-> vsock) */
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
     return 0;
 }
