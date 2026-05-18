@@ -21,7 +21,7 @@ use std::mem;
 #[cfg(target_os = "windows")]
 use std::net::TcpStream;
 #[cfg(target_os = "windows")]
-use std::os::windows::io::{FromRawSocket, IntoRawSocket, RawSocket};
+use std::os::windows::io::{FromRawSocket, RawSocket};
 
 #[cfg(target_os = "windows")]
 const AF_HYPERV: i32 = 34;
