@@ -1,10 +1,9 @@
 //! Ephemeral VM launch flow for Windows using Hyper-V VHDX + NBD over vsock.
 //!
 //! Architecture:
-//! 1. nbdkit erofs plugin serves EROFS rootfs (--network=host container)
-//! 2. vsock-nbd-bridge bridges AF_VSOCK → TCP localhost:10809 in podman machine
-//! 3. vsock relay on host bridges ephemeral VM ↔ podman machine via AF_HYPERV
-//! 4. Hyper-V Gen2 VM boots → nbd-vsock (AF_VSOCK) → EROFS rootfs
+//! 1. nbdkit --vsock listens directly on vsock port 1030 in podman machine
+//! 2. vsock relay on host bridges ephemeral VM ↔ podman machine via AF_HYPERV
+//! 3. Hyper-V Gen2 VM boots → patched nbd.ko + nbd-vsock (AF_VSOCK) → EROFS rootfs
 
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::{bail, eyre}, Result};
@@ -132,9 +131,6 @@ impl Drop for VmCleanup {
             let _ = Command::new("podman")
                 .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
                 .stdout(Stdio::null()).stderr(Stdio::null()).status();
-            let _ = Command::new("podman")
-                .args(["machine", "ssh", &machine, "--", "pkill", "-f", "vsock-nbd-bridge"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
         if let Some(port) = self.vsock_port {
             let _ = hyperv::unregister_vsock_service(port);
@@ -167,10 +163,6 @@ fn spawn_cleanup(c: &VmCleanup) {
     if let Ok(machine) = detect_machine_name() {
         let _ = Command::new("podman")
             .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn();
-        let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "pkill", "-f", "vsock-nbd-bridge"])
             .stdout(Stdio::null()).stderr(Stdio::null())
             .spawn();
     }
@@ -380,7 +372,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let host_ip = "10.0.0.1";
     let client_ip = "10.0.0.100";
 
-    // 2a. nbdkit container (--network=host, auto-build image on first run)
+    // 2a. nbdkit container (--vsock --privileged, direct vsock listen, no bridge)
     let nbdkit_handle = {
         let ps = podman_ssh.clone();
         let podman_run = if rootful { "sudo podman" } else { "podman" };
@@ -391,12 +383,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
                {run} build -t localhost/bcvk-nbdkit:latest -f - /tmp; \
              fi; \
              {run} rm -f {name} 2>/dev/null; \
-             {run} run -d --name {name} --security-opt label=disable \
-             --network=host \
+             {run} run -d --name {name} --privileged \
+             --network=host --device /dev/vsock \
              -v {merged}:{merged}:ro \
              -v /var/tmp/bcvk:/bcvk:z,exec \
              localhost/bcvk-nbdkit:latest \
-             nbdkit -fv -p 10809 -r /bcvk/libnbdkit_erofs_plugin.so \
+             nbdkit -fv --vsock -p 1030 -r /bcvk/libnbdkit_erofs_plugin.so \
              dir={merged} \
              'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}",
             run = podman_run,
@@ -407,40 +399,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         std::thread::spawn(move || ps.ssh_cmd(&nbdkit_script))
     };
 
-    // 2b. Deploy vsock-nbd-bridge binary
-    let bridge_handle = {
-        let ps = podman_ssh.clone();
-        std::thread::spawn(move || -> Result<()> {
-            let bridge_path = "/var/tmp/bcvk/vsock-nbd-bridge";
-            let bridge_exists = ps.ssh_cmd(&format!("test -x {} && echo EXISTS", bridge_path));
-            if bridge_exists.map(|o| String::from_utf8_lossy(&o).contains("EXISTS")).unwrap_or(false) {
-                debug!("vsock-nbd-bridge already deployed");
-                return Ok(());
-            }
-            let tmp_path = std::env::temp_dir().join("vsock-nbd-bridge.bin");
-            std::fs::write(&tmp_path, boot_files::vsock_nbd_bridge_binary())?;
-            let status = Command::new("scp")
-                .args([
-                    "-P", &ps.port.to_string(),
-                    "-i", &ps.key,
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "LogLevel=ERROR",
-                ])
-                .arg(tmp_path.to_string_lossy().as_ref())
-                .arg(&format!("{}:{}", ps.user_host(), bridge_path))
-                .stdout(Stdio::null()).stderr(Stdio::null())
-                .status()?;
-            if !status.success() {
-                bail!("SCP vsock-nbd-bridge failed");
-            }
-            ps.ssh_cmd(&format!("chmod +x {}", bridge_path))?;
-            info!("vsock-nbd-bridge deployed");
-            Ok(())
-        })
-    };
-
-    // 2c. Build patched nbd.ko (first run only, cached by kver)
+    // 2b. Build patched nbd.ko (first run only, cached by kver)
     let nbd_ko_handle = {
         let ps = podman_ssh.clone();
         let kv = kver.clone();
@@ -512,35 +471,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // Step 3: Wait for parallel tasks that VHDX depends on
     nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))??;
     let nbd_container = nbd_container_name.clone();
-    info!("nbdkit container started (--network=host)");
+    info!("nbdkit started (--vsock port 1030)");
 
-    bridge_handle.join().map_err(|_| eyre!("bridge deploy thread panicked"))??;
     nbd_ko_handle.join().map_err(|_| eyre!("nbd.ko build thread panicked"))??;
 
     // VHDX must be created AFTER nbd.ko build (CPIO includes patched nbd.ko)
     let vhdx_path = boot_files::create_boot_vhdx(
         &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
     )?;
-
-    // Start vsock-nbd-bridge in podman machine (use ssh -f for reliable background)
-    let bridge_status = Command::new("ssh")
-        .args([
-            "-f",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-i", &podman_ssh.key,
-            "-p", &podman_ssh.port.to_string(),
-            &format!("core@127.0.0.1"),
-            "nohup /var/tmp/bcvk/vsock-nbd-bridge 1030 127.0.0.1 10809 </dev/null >/dev/null 2>&1 &",
-        ])
-        .stdout(Stdio::null()).stderr(Stdio::null())
-        .status()?;
-    if !bridge_status.success() {
-        bail!("failed to start vsock-nbd-bridge");
-    }
-    std::thread::sleep(Duration::from_millis(500));
-    info!("vsock-nbd-bridge started (port 1030 → localhost:10809)");
 
     let switch = switch_handle.join().map_err(|_| eyre!("switch thread panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
