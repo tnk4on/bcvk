@@ -94,7 +94,16 @@ impl VsockRelay {
         let target_guid = parse_vm_guid(podman_vm_guid)?;
         let stop = Arc::new(Notify::new());
 
-        let listen_sock = unsafe { hvsock_listen(vsock_port)? };
+        let listen_sock = {
+            let mut sock = unsafe { hvsock_listen(vsock_port) };
+            for attempt in 0..5 {
+                if sock.is_ok() { break; }
+                debug!("vsock relay bind retry {} (port {} busy)", attempt + 1, vsock_port);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                sock = unsafe { hvsock_listen(vsock_port) };
+            }
+            sock?
+        };
         info!("vsock relay listening on port {}", vsock_port);
 
         let stop_clone = stop.clone();
