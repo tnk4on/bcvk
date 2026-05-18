@@ -341,7 +341,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do\n\
 done\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
-  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
+  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 4 2>/dev/kmsg && break\n\
   sleep 2\n\
 done\n\
 sleep 1\n\

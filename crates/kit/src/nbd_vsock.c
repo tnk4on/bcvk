@@ -1,12 +1,12 @@
 /*
  * nbd-vsock: connect NBD device to server via AF_VSOCK using netlink API.
  *
- * Usage: nbd-vsock /dev/nbdN vsock_port
+ * Usage: nbd-vsock /dev/nbdN vsock_port [num_connections]
  *
- * Connects to the host (CID=2) via AF_VSOCK, performs NBD handshake,
- * then hands the vsock socket to the kernel via netlink NBD_CMD_CONNECT.
+ * Connects to the host (CID=2) via AF_VSOCK, performs NBD handshake on
+ * each connection, then hands all sockets to the kernel via netlink
+ * NBD_CMD_CONNECT for parallel I/O.
  * Requires patched nbd.ko that accepts AF_VSOCK sockets.
- * The process exits after handoff — kernel I/O threads take over.
  */
 
 #include <stdio.h>
@@ -24,6 +24,7 @@
 
 #define NBD_GENL_FAMILY_NAME "nbd"
 #define NBD_GENL_VERSION     0x1
+#define MAX_CONNECTIONS      16
 
 enum { NBD_CMD_UNSPEC, NBD_CMD_CONNECT, NBD_CMD_DISCONNECT, NBD_CMD_RECONFIGURE,
        NBD_CMD_LINK_DEAD, NBD_CMD_STATUS };
@@ -131,9 +132,10 @@ static int genl_resolve_family(int nl, const char *name) {
     errno = ENOENT; return -1;
 }
 
-static int nbd_connect_netlink(int nl, int family_id, int dev_index,
-                               int sock_fd, uint64_t size, uint64_t blksize,
-                               uint64_t server_flags) {
+static int nbd_connect_netlink_multi(int nl, int family_id, int dev_index,
+                                     int *sock_fds, int num_socks,
+                                     uint64_t size, uint64_t blksize,
+                                     uint64_t server_flags) {
     char buf[4096]; int pos = 0;
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     pos = sizeof(struct nlmsghdr);
@@ -144,9 +146,11 @@ static int nbd_connect_netlink(int nl, int family_id, int dev_index,
     nla_put_u64(buf, &pos, NBD_ATTR_BLOCK_SIZE_BYTES, blksize);
     nla_put_u64(buf, &pos, NBD_ATTR_SERVER_FLAGS, server_flags);
     int socks_start = nla_nest_start(buf, &pos, NBD_ATTR_SOCKETS);
-    int item_start = nla_nest_start(buf, &pos, NBD_SOCK_ITEM);
-    nla_put_u32(buf, &pos, NBD_SOCK_FD, sock_fd);
-    nla_nest_end(buf, item_start, &pos);
+    for (int i = 0; i < num_socks; i++) {
+        int item_start = nla_nest_start(buf, &pos, NBD_SOCK_ITEM);
+        nla_put_u32(buf, &pos, NBD_SOCK_FD, sock_fds[i]);
+        nla_nest_end(buf, item_start, &pos);
+    }
     nla_nest_end(buf, socks_start, &pos);
     nh->nlmsg_len = pos; nh->nlmsg_type = family_id;
     nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK; nh->nlmsg_seq = 2; nh->nlmsg_pid = getpid();
@@ -164,36 +168,23 @@ static int nbd_connect_netlink(int nl, int family_id, int dev_index,
     return 0;
 }
 
-/* ---- main ---- */
+/* ---- vsock connect + NBD handshake ---- */
 
-int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: nbd-vsock /dev/nbdX vsock_port\n");
-        return 1;
-    }
-    const char *dev = argv[1];
-    unsigned int port = atoi(argv[2]);
-    int dev_index = atoi(dev + strlen("/dev/nbd"));
-
-    /* Connect to host via AF_VSOCK */
+static int vsock_connect_and_handshake(unsigned int port, uint64_t *out_size, uint16_t *out_flags) {
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (sock < 0) { perror("vsock socket"); return 1; }
+    if (sock < 0) { perror("vsock socket"); return -1; }
     struct sockaddr_vm sa = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port };
-    fprintf(stderr, "nbd-vsock: connecting vsock port %u (CID=2)\n", port);
     if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        perror("vsock connect"); return 1;
+        perror("vsock connect"); close(sock); return -1;
     }
-    fprintf(stderr, "nbd-vsock: connected\n");
 
-    /* NBD newstyle-fixed handshake */
     uint64_t magic, ihaveopt;
     uint16_t hflags;
     if (readall(sock, &magic, 8) < 0 || readall(sock, &ihaveopt, 8) < 0 ||
         readall(sock, &hflags, 2) < 0) {
-        fprintf(stderr, "nbd-vsock: handshake read failed\n"); return 1;
+        fprintf(stderr, "nbd-vsock: handshake read failed\n"); close(sock); return -1;
     }
-    magic = be64toh(magic); ihaveopt = be64toh(ihaveopt); hflags = be16toh(hflags);
-    fprintf(stderr, "nbd-vsock: magic=%llx flags=%x\n", (unsigned long long)ihaveopt, hflags);
+    ihaveopt = be64toh(ihaveopt); hflags = be16toh(hflags);
 
     uint32_t cflags = htobe32(1);
     writeall(sock, &cflags, 4);
@@ -209,28 +200,57 @@ int main(int argc, char **argv) {
     char pad[124];
     if (readall(sock, &export_size, 8) < 0 || readall(sock, &tflags, 2) < 0 ||
         readall(sock, pad, 124) < 0) {
-        fprintf(stderr, "nbd-vsock: export info read failed\n"); return 1;
+        fprintf(stderr, "nbd-vsock: export info read failed\n"); close(sock); return -1;
     }
-    export_size = be64toh(export_size);
-    tflags = be16toh(tflags);
-    fprintf(stderr, "nbd-vsock: export size=%llu bytes, flags=%x\n",
-            (unsigned long long)export_size, tflags);
+    *out_size = be64toh(export_size);
+    *out_flags = be16toh(tflags);
+    return sock;
+}
 
-    /* Hand vsock socket directly to kernel via netlink */
+/* ---- main ---- */
+
+int main(int argc, char **argv) {
+    if (argc < 3 || argc > 4) {
+        fprintf(stderr, "Usage: nbd-vsock /dev/nbdX vsock_port [num_connections]\n");
+        return 1;
+    }
+    const char *dev = argv[1];
+    unsigned int port = atoi(argv[2]);
+    int num_conns = (argc >= 4) ? atoi(argv[3]) : 1;
+    if (num_conns < 1) num_conns = 1;
+    if (num_conns > MAX_CONNECTIONS) num_conns = MAX_CONNECTIONS;
+    int dev_index = atoi(dev + strlen("/dev/nbd"));
+
+    fprintf(stderr, "nbd-vsock: connecting %d socket(s) to vsock port %u\n", num_conns, port);
+
+    int sock_fds[MAX_CONNECTIONS];
+    uint64_t export_size = 0;
+    uint16_t tflags = 0;
+
+    for (int i = 0; i < num_conns; i++) {
+        sock_fds[i] = vsock_connect_and_handshake(port, &export_size, &tflags);
+        if (sock_fds[i] < 0) {
+            fprintf(stderr, "nbd-vsock: connection %d failed\n", i);
+            return 1;
+        }
+    }
+
+    fprintf(stderr, "nbd-vsock: %d connection(s) established, export size=%llu bytes\n",
+            num_conns, (unsigned long long)export_size);
+
     int nl = nl_open();
     if (nl < 0) { perror("netlink socket"); return 1; }
     int family_id = genl_resolve_family(nl, NBD_GENL_FAMILY_NAME);
     if (family_id < 0) {
         fprintf(stderr, "nbd-vsock: nbd genl family: %s\n", strerror(errno)); return 1;
     }
-    fprintf(stderr, "nbd-vsock: nbd genl family_id=%d\n", family_id);
 
-    if (nbd_connect_netlink(nl, family_id, dev_index, sock,
-                            export_size, 512, tflags) < 0) {
+    if (nbd_connect_netlink_multi(nl, family_id, dev_index, sock_fds, num_conns,
+                                  export_size, 512, tflags) < 0) {
         fprintf(stderr, "nbd-vsock: NBD_CMD_CONNECT failed\n"); return 1;
     }
 
-    fprintf(stderr, "nbd-vsock: kernel I/O threads started, exiting\n");
+    fprintf(stderr, "nbd-vsock: kernel I/O threads started (%d connections), exiting\n", num_conns);
     close(nl);
     return 0;
 }
