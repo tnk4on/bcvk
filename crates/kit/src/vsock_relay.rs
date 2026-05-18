@@ -30,6 +30,13 @@ const RELAY_BUF_SIZE: usize = 1024 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
+struct WsaBuf {
+    len: u32,
+    buf: *mut u8,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
 struct HvSockGuid {
     data1: u32,
     data2: u16,
@@ -165,12 +172,13 @@ impl Drop for VsockRelay {
 
 #[cfg(target_os = "windows")]
 fn set_socket_buffers(sock: RawSocket) {
-    let buf_size: i32 = 1024 * 1024;
     unsafe {
-        setsockopt(sock, 0xFFFF /* SOL_SOCKET */, 0x1001 /* SO_SNDBUF */,
-                   &buf_size as *const i32 as *const u8, 4);
-        setsockopt(sock, 0xFFFF /* SOL_SOCKET */, 0x1002 /* SO_RCVBUF */,
-                   &buf_size as *const i32 as *const u8, 4);
+        // Disable Winsock internal send buffer — use our overlapped buffers directly
+        let zero: i32 = 0;
+        setsockopt(sock, 0xFFFF, 0x1001 /* SO_SNDBUF */, &zero as *const i32 as *const u8, 4);
+        // Large receive buffer
+        let rcv_size: i32 = 1024 * 1024;
+        setsockopt(sock, 0xFFFF, 0x1002 /* SO_RCVBUF */, &rcv_size as *const i32 as *const u8, 4);
     }
 }
 
@@ -203,17 +211,23 @@ fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32)
 fn relay_data(from: RawSocket, to: RawSocket) {
     let mut buf = vec![0u8; RELAY_BUF_SIZE];
     loop {
-        let n = unsafe {
-            recv(from, buf.as_mut_ptr(), buf.len() as i32, 0)
+        let mut bytes_recv: u32 = 0;
+        let mut flags: u32 = 0;
+        let mut wsa_buf = WsaBuf { len: buf.len() as u32, buf: buf.as_mut_ptr() };
+        let rc = unsafe {
+            WSARecv(from, &mut wsa_buf, 1, &mut bytes_recv, &mut flags, std::ptr::null_mut(), std::ptr::null_mut())
         };
-        if n <= 0 { break; }
-        let mut sent = 0i32;
+        if rc != 0 || bytes_recv == 0 { break; }
+        let n = bytes_recv as usize;
+        let mut sent: usize = 0;
         while sent < n {
-            let w = unsafe {
-                send(to, buf.as_ptr().add(sent as usize), n - sent, 0)
+            let mut bytes_sent: u32 = 0;
+            let mut send_buf = WsaBuf { len: (n - sent) as u32, buf: buf.as_mut_ptr().wrapping_add(sent) };
+            let rc = unsafe {
+                WSASend(to, &mut send_buf, 1, &mut bytes_sent, 0, std::ptr::null_mut(), std::ptr::null_mut())
             };
-            if w <= 0 { return; }
-            sent += w;
+            if rc != 0 || bytes_sent == 0 { return; }
+            sent += bytes_sent as usize;
         }
     }
 }
@@ -231,6 +245,8 @@ extern "system" {
     fn recv(s: RawSocket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn send(s: RawSocket, buf: *const u8, len: i32, flags: i32) -> i32;
     fn setsockopt(s: RawSocket, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+    fn WSARecv(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_recv: *mut u32, flags: *mut u32, overlapped: *mut u8, completion: *mut u8) -> i32;
+    fn WSASend(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_sent: *mut u32, flags: u32, overlapped: *mut u8, completion: *mut u8) -> i32;
     fn WSAGetLastError() -> i32;
     fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
 }
