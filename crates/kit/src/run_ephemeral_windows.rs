@@ -509,23 +509,18 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let firewall_handle = {
         std::thread::spawn(move || hyperv::add_firewall_rules(0))
     };
-    let vhdx_handle = {
-        let ds = digest_short.clone();
-        let mp = merged_path.clone();
-        let spk = ssh_pubkey.clone();
-        let ps = podman_ssh.clone();
-        std::thread::spawn(move || {
-            boot_files::create_boot_vhdx(&ds, &mp, &ps, &spk, vsock_port)
-        })
-    };
-
-    // Step 3: Wait for all parallel tasks
+    // Step 3: Wait for parallel tasks that VHDX depends on
     nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))??;
     let nbd_container = nbd_container_name.clone();
     info!("nbdkit container started (--network=host)");
 
     bridge_handle.join().map_err(|_| eyre!("bridge deploy thread panicked"))??;
     nbd_ko_handle.join().map_err(|_| eyre!("nbd.ko build thread panicked"))??;
+
+    // VHDX must be created AFTER nbd.ko build (CPIO includes patched nbd.ko)
+    let vhdx_path = boot_files::create_boot_vhdx(
+        &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
+    )?;
 
     // Start vsock-nbd-bridge in podman machine (use ssh -f for reliable background)
     let bridge_status = Command::new("ssh")
@@ -551,7 +546,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
     vm_handle.join().map_err(|_| eyre!("VM thread panicked"))??;
     firewall_handle.join().map_err(|_| eyre!("firewall thread panicked"))??;
-    let vhdx_path = vhdx_handle.join().map_err(|_| eyre!("VHDX thread panicked"))??;
 
     // Attach VHDX and set boot device
     hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
