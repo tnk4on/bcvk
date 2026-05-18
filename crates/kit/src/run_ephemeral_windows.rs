@@ -368,6 +368,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     info!("image mounted at: {}", merged_path);
 
+    // Get kernel version for nbd.ko patch build
+    let kver_output = podman_ssh.ssh_cmd(&format!(
+        "ls {}/usr/lib/modules/ | head -1", merged_path
+    ))?;
+    let kver = String::from_utf8_lossy(&kver_output).trim().to_string();
+    info!("kernel version: {}", kver);
+
     // Step 2: Parallel tasks
     let switch_name = "bcvk";
     let host_ip = "10.0.0.1";
@@ -433,7 +440,59 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         })
     };
 
-    // 2c. Switch + VM + VHDX (parallel)
+    // 2c. Build patched nbd.ko (first run only, cached by kver)
+    let nbd_ko_handle = {
+        let ps = podman_ssh.clone();
+        let kv = kver.clone();
+        let img = opts.image.clone();
+        let run = if rootful { "sudo podman" } else { "podman" };
+        std::thread::spawn(move || -> Result<()> {
+            let cached = format!("/var/tmp/bcvk/nbd-patched-{}.ko", kv);
+            let check = ps.ssh_cmd(&format!("test -f {} && echo CACHED", cached));
+            if check.map(|o| String::from_utf8_lossy(&o).contains("CACHED")).unwrap_or(false) {
+                info!("nbd.ko: cached for {}", kv);
+                return Ok(());
+            }
+            info!("nbd.ko: building patched module for {} (first run)...", kv);
+            let build_script = format!(
+                "{run} run --rm --security-opt label=disable \
+                 -v /var/tmp/bcvk:/output:z \
+                 {img} bash -c '\
+                 dnf install -y kernel-devel gcc make >/dev/null 2>&1; \
+                 KVER=$(ls /usr/lib/modules/ | head -1); \
+                 mkdir -p /tmp/nbd-patch && cd /tmp/nbd-patch; \
+                 dnf download --source kernel >/dev/null 2>&1; \
+                 if ls kernel-*.src.rpm 1>/dev/null 2>&1; then \
+                   rpm2cpio kernel-*.src.rpm | cpio -id \"*.tar.*\" 2>/dev/null; \
+                   tar xf linux-*.tar.* --wildcards \"*/drivers/block/nbd.c\" --strip-components=1 2>/dev/null; \
+                   cp drivers/block/nbd.c . 2>/dev/null; \
+                 fi; \
+                 if [ ! -f nbd.c ]; then \
+                   KVER_SHORT=$(echo $KVER | sed \"s/-.*//\"); \
+                   KVER_MAJOR=${{KVER_SHORT%%.*}}; \
+                   curl -sfL https://cdn.kernel.org/pub/linux/kernel/v${{KVER_MAJOR}}.x/linux-${{KVER_SHORT}}.tar.xz \
+                     | tar xJ --strip-components=3 linux-${{KVER_SHORT}}/drivers/block/nbd.c; \
+                 fi; \
+                 sed -i \"s/!sk_is_stream_unix(sock->sk))/!sk_is_stream_unix(sock->sk) \\&\\& sock->sk->sk_family != AF_VSOCK)/\" nbd.c 2>/dev/null; \
+                 sed -i \"s/sock->ops->family != PF_INET6)/sock->ops->family != PF_INET6 \\&\\& sock->ops->family != AF_VSOCK)/\" nbd.c 2>/dev/null; \
+                 echo \"obj-m += nbd.o\" > Makefile; \
+                 make -C /lib/modules/$KVER/build M=$(pwd) modules 2>&1 | tail -3; \
+                 cp nbd.ko /output/nbd-patched-$KVER.ko && echo NBD_BUILD_OK'",
+                run = run, img = img,
+            );
+            let output = ps.ssh_cmd(&build_script)?;
+            let stdout = String::from_utf8_lossy(&output);
+            if stdout.contains("NBD_BUILD_OK") {
+                info!("nbd.ko: build complete");
+            } else {
+                info!("nbd.ko: build output: {}", stdout.trim());
+                bail!("nbd.ko patch build failed");
+            }
+            Ok(())
+        })
+    };
+
+    // 2d. Switch + VM + VHDX (parallel)
     let switch_handle = {
         let sn = switch_name.to_string();
         let hi = host_ip.to_string();
@@ -466,6 +525,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("nbdkit container started (--network=host)");
 
     bridge_handle.join().map_err(|_| eyre!("bridge deploy thread panicked"))??;
+    nbd_ko_handle.join().map_err(|_| eyre!("nbd.ko build thread panicked"))??;
 
     // Start vsock-nbd-bridge in podman machine (use ssh -f for reliable background)
     let bridge_status = Command::new("ssh")
