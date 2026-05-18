@@ -1,11 +1,13 @@
 /*
- * nbd-vsock: connect NBD device to server via AF_VSOCK using netlink API.
+ * nbd-vsock: connect NBD device via vsock with local TCP proxy.
  *
  * Usage: nbd-vsock /dev/nbdN vsock_port
  *
- * Since the kernel NBD driver only accepts AF_INET/AF_INET6 sockets,
- * we create a local TCP socketpair: connect vsock, do NBD handshake,
- * then proxy vsock <-> TCP and hand the TCP socket to the kernel.
+ * 1. Connect to host via AF_VSOCK (CID=2, port)
+ * 2. Fork a child to run TCP ↔ vsock proxy on localhost
+ * 3. Parent connects TCP to proxy, does NBD handshake, hands TCP socket
+ *    to kernel via netlink NBD_CMD_CONNECT, then exits
+ * 4. Child proxy stays alive — kernel owns the TCP socket and survives switch-root
  */
 
 #include <stdio.h>
@@ -14,8 +16,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <linux/vm_sockets.h>
@@ -35,8 +38,6 @@ enum { NBD_ATTR_UNSPEC, NBD_ATTR_INDEX, NBD_ATTR_SIZE_BYTES,
        NBD_ATTR_CLIENT_FLAGS, NBD_ATTR_SOCKETS };
 enum { NBD_SOCK_ITEM_UNSPEC, NBD_SOCK_ITEM };
 enum { NBD_SOCK_UNSPEC, NBD_SOCK_FD };
-
-/* ---- helpers ---- */
 
 static int readall(int fd, void *buf, size_t n) {
     size_t done = 0;
@@ -58,40 +59,46 @@ static int writeall(int fd, const void *buf, size_t n) {
     return 0;
 }
 
-/* ---- proxy thread ---- */
+/* ---- proxy ---- */
 
-struct proxy_args {
-    int from_fd;
-    int to_fd;
-};
-
-static void *proxy_thread(void *arg) {
-    struct proxy_args *pa = (struct proxy_args *)arg;
-    char *buf = malloc(PROXY_BUF_SIZE);
-    if (!buf) return NULL;
-    for (;;) {
-        ssize_t n = read(pa->from_fd, buf, PROXY_BUF_SIZE);
-        if (n <= 0) break;
-        if (writeall(pa->to_fd, buf, n) < 0) break;
+static void proxy_loop(int vsock_fd, int tcp_fd) {
+    signal(SIGPIPE, SIG_IGN);
+    pid_t pid = fork();
+    if (pid < 0) { _exit(1); }
+    if (pid == 0) {
+        /* child: tcp → vsock */
+        char *buf = malloc(PROXY_BUF_SIZE);
+        for (;;) {
+            ssize_t n = read(tcp_fd, buf, PROXY_BUF_SIZE);
+            if (n <= 0) break;
+            if (writeall(vsock_fd, buf, n) < 0) break;
+        }
+        _exit(0);
     }
-    free(buf);
-    return NULL;
+    /* parent: vsock → tcp */
+    char *buf = malloc(PROXY_BUF_SIZE);
+    for (;;) {
+        ssize_t n = read(vsock_fd, buf, PROXY_BUF_SIZE);
+        if (n <= 0) break;
+        if (writeall(tcp_fd, buf, n) < 0) break;
+    }
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    _exit(0);
 }
 
 /* ---- NLA builder ---- */
 
 static void nla_put_u32(char *buf, int *pos, uint16_t type, uint32_t val) {
     struct nlattr { uint16_t nla_len; uint16_t nla_type; } hdr;
-    hdr.nla_len = 4 + 4;
-    hdr.nla_type = type;
+    hdr.nla_len = 4 + 4; hdr.nla_type = type;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     memcpy(buf + *pos, &val, 4); *pos += 4;
 }
 
 static void nla_put_u64(char *buf, int *pos, uint16_t type, uint64_t val) {
     struct nlattr { uint16_t nla_len; uint16_t nla_type; } hdr;
-    hdr.nla_len = 4 + 8;
-    hdr.nla_type = type;
+    hdr.nla_len = 4 + 8; hdr.nla_type = type;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     memcpy(buf + *pos, &val, 8); *pos += 8;
 }
@@ -99,8 +106,7 @@ static void nla_put_u64(char *buf, int *pos, uint16_t type, uint64_t val) {
 static void nla_put_string(char *buf, int *pos, uint16_t type, const char *s) {
     struct nlattr { uint16_t nla_len; uint16_t nla_type; } hdr;
     int slen = strlen(s) + 1;
-    hdr.nla_len = 4 + slen;
-    hdr.nla_type = type;
+    hdr.nla_len = 4 + slen; hdr.nla_type = type;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     memcpy(buf + *pos, s, slen);
     *pos += NLA_ALIGN(slen);
@@ -109,8 +115,7 @@ static void nla_put_string(char *buf, int *pos, uint16_t type, const char *s) {
 static int nla_nest_start(char *buf, int *pos, uint16_t type) {
     struct nlattr { uint16_t nla_len; uint16_t nla_type; } hdr;
     int start = *pos;
-    hdr.nla_len = 0;
-    hdr.nla_type = type | NLA_F_NESTED;
+    hdr.nla_len = 0; hdr.nla_type = type | NLA_F_NESTED;
     memcpy(buf + *pos, &hdr, 4); *pos += 4;
     return start;
 }
@@ -126,93 +131,62 @@ static int nl_open(void) {
     int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_GENERIC);
     if (fd < 0) return -1;
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK, .nl_pid = getpid() };
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(fd);
-        return -1;
-    }
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
     return fd;
 }
 
 static int genl_resolve_family(int nl, const char *name) {
-    char buf[4096];
-    int pos = 0;
-
+    char buf[4096]; int pos = 0;
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     pos = sizeof(struct nlmsghdr);
-
     struct genlmsghdr gh = { .cmd = CTRL_CMD_GETFAMILY, .version = 1 };
     memcpy(buf + pos, &gh, sizeof(gh)); pos += sizeof(gh);
-
     nla_put_string(buf, &pos, CTRL_ATTR_FAMILY_NAME, name);
-
-    nh->nlmsg_len = pos;
-    nh->nlmsg_type = GENL_ID_CTRL;
-    nh->nlmsg_flags = NLM_F_REQUEST;
-    nh->nlmsg_seq = 1;
-    nh->nlmsg_pid = getpid();
-
+    nh->nlmsg_len = pos; nh->nlmsg_type = GENL_ID_CTRL;
+    nh->nlmsg_flags = NLM_F_REQUEST; nh->nlmsg_seq = 1; nh->nlmsg_pid = getpid();
     if (send(nl, buf, pos, 0) < 0) return -1;
-
     int n = recv(nl, buf, sizeof(buf), 0);
     if (n < 0) return -1;
-
     nh = (struct nlmsghdr *)buf;
     if (nh->nlmsg_type == NLMSG_ERROR) {
         int *err = (int *)(buf + sizeof(struct nlmsghdr));
         if (*err) { errno = -*err; return -1; }
     }
-
     int off = sizeof(struct nlmsghdr) + sizeof(struct genlmsghdr);
     while (off + 4 <= n) {
         uint16_t alen, atype;
-        memcpy(&alen, buf + off, 2);
-        memcpy(&atype, buf + off + 2, 2);
+        memcpy(&alen, buf + off, 2); memcpy(&atype, buf + off + 2, 2);
         if (alen < 4) break;
         if (atype == CTRL_ATTR_FAMILY_ID && alen >= 6) {
-            uint16_t fid;
-            memcpy(&fid, buf + off + 4, 2);
-            return fid;
+            uint16_t fid; memcpy(&fid, buf + off + 4, 2); return fid;
         }
         off += NLA_ALIGN(alen);
     }
-    errno = ENOENT;
-    return -1;
+    errno = ENOENT; return -1;
 }
 
 static int nbd_connect_netlink(int nl, int family_id, int dev_index,
                                int sock_fd, uint64_t size, uint64_t blksize,
                                uint64_t server_flags) {
-    char buf[4096];
-    int pos = 0;
-
+    char buf[4096]; int pos = 0;
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     pos = sizeof(struct nlmsghdr);
-
     struct genlmsghdr gh = { .cmd = NBD_CMD_CONNECT, .version = NBD_GENL_VERSION };
     memcpy(buf + pos, &gh, sizeof(gh)); pos += sizeof(gh);
-
     nla_put_u32(buf, &pos, NBD_ATTR_INDEX, dev_index);
     nla_put_u64(buf, &pos, NBD_ATTR_SIZE_BYTES, size);
     nla_put_u64(buf, &pos, NBD_ATTR_BLOCK_SIZE_BYTES, blksize);
     nla_put_u64(buf, &pos, NBD_ATTR_SERVER_FLAGS, server_flags);
-
     int socks_start = nla_nest_start(buf, &pos, NBD_ATTR_SOCKETS);
     int item_start = nla_nest_start(buf, &pos, NBD_SOCK_ITEM);
     nla_put_u32(buf, &pos, NBD_SOCK_FD, sock_fd);
     nla_nest_end(buf, item_start, &pos);
     nla_nest_end(buf, socks_start, &pos);
-
-    nh->nlmsg_len = pos;
-    nh->nlmsg_type = family_id;
-    nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    nh->nlmsg_seq = 2;
-    nh->nlmsg_pid = getpid();
-
+    nh->nlmsg_len = pos; nh->nlmsg_type = family_id;
+    nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK; nh->nlmsg_seq = 2; nh->nlmsg_pid = getpid();
     if (send(nl, buf, pos, 0) < 0) return -1;
-
     int n = recv(nl, buf, sizeof(buf), 0);
     if (n < 0) return -1;
-
     nh = (struct nlmsghdr *)buf;
     if (nh->nlmsg_type == NLMSG_ERROR) {
         int *err = (int *)(buf + sizeof(struct nlmsghdr));
@@ -232,49 +206,79 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *dev = argv[1];
-    unsigned int port = atoi(argv[2]);
-
+    unsigned int vsock_port = atoi(argv[2]);
     int dev_index = atoi(dev + strlen("/dev/nbd"));
 
-    /* vsock connect to host (CID=2) */
+    /* 1. Connect to host via AF_VSOCK */
     int vsock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (vsock < 0) { perror("vsock socket"); return 1; }
-    struct sockaddr_vm vsa = {0};
-    vsa.svm_family = AF_VSOCK;
-    vsa.svm_cid = VMADDR_CID_HOST;
-    vsa.svm_port = port;
-    fprintf(stderr, "nbd-vsock: connecting vsock port %u (CID=2)\n", port);
+    struct sockaddr_vm vsa = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = vsock_port };
+    fprintf(stderr, "nbd-vsock: connecting vsock port %u (CID=2)\n", vsock_port);
     if (connect(vsock, (struct sockaddr *)&vsa, sizeof(vsa)) < 0) {
         perror("vsock connect"); return 1;
     }
     fprintf(stderr, "nbd-vsock: connected\n");
 
-    /* NBD newstyle-fixed handshake (over vsock) */
+    /* 2. Create local TCP listener */
+    int lsock = socket(AF_INET, SOCK_STREAM, 0);
+    if (lsock < 0) { perror("tcp listen socket"); return 1; }
+    int one = 1;
+    setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in laddr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = 0 };
+    if (bind(lsock, (struct sockaddr *)&laddr, sizeof(laddr)) < 0) { perror("tcp bind"); return 1; }
+    socklen_t laddrlen = sizeof(laddr);
+    getsockname(lsock, (struct sockaddr *)&laddr, &laddrlen);
+    int tcp_port = ntohs(laddr.sin_port);
+    if (listen(lsock, 1) < 0) { perror("tcp listen"); return 1; }
+
+    /* 3. Fork proxy daemon: vsock ↔ TCP */
+    pid_t proxy_pid = fork();
+    if (proxy_pid < 0) { perror("fork"); return 1; }
+    if (proxy_pid == 0) {
+        /* Child: accept TCP connection, proxy to vsock */
+        setsid();
+        int tcp_fd = accept(lsock, NULL, NULL);
+        close(lsock);
+        if (tcp_fd < 0) _exit(1);
+        setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        proxy_loop(vsock, tcp_fd);
+        /* proxy_loop never returns */
+        _exit(0);
+    }
+
+    /* 4. Parent: connect TCP to proxy */
+    close(lsock);
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in paddr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(tcp_port) };
+    if (connect(tcp_sock, (struct sockaddr *)&paddr, sizeof(paddr)) < 0) {
+        perror("tcp connect to proxy"); return 1;
+    }
+    setsockopt(tcp_sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    /* 5. NBD handshake (over TCP → proxy → vsock → relay → bridge → nbdkit) */
     uint64_t magic, ihaveopt;
     uint16_t hflags;
-    if (readall(vsock, &magic, 8) < 0 || readall(vsock, &ihaveopt, 8) < 0 ||
-        readall(vsock, &hflags, 2) < 0) {
+    if (readall(tcp_sock, &magic, 8) < 0 || readall(tcp_sock, &ihaveopt, 8) < 0 ||
+        readall(tcp_sock, &hflags, 2) < 0) {
         fprintf(stderr, "nbd-vsock: handshake read failed\n"); return 1;
     }
     magic = be64toh(magic); ihaveopt = be64toh(ihaveopt); hflags = be16toh(hflags);
-    fprintf(stderr, "nbd-vsock: magic=%llx flags=%x\n",
-            (unsigned long long)ihaveopt, hflags);
+    fprintf(stderr, "nbd-vsock: magic=%llx flags=%x\n", (unsigned long long)ihaveopt, hflags);
 
     uint32_t cflags = htobe32(1);
-    writeall(vsock, &cflags, 4);
-
+    writeall(tcp_sock, &cflags, 4);
     uint64_t opt_magic = htobe64(0x49484156454F5054ULL);
     uint32_t opt_id = htobe32(1);
     uint32_t opt_len = htobe32(0);
-    writeall(vsock, &opt_magic, 8);
-    writeall(vsock, &opt_id, 4);
-    writeall(vsock, &opt_len, 4);
+    writeall(tcp_sock, &opt_magic, 8);
+    writeall(tcp_sock, &opt_id, 4);
+    writeall(tcp_sock, &opt_len, 4);
 
     uint64_t export_size;
     uint16_t tflags;
     char pad[124];
-    if (readall(vsock, &export_size, 8) < 0 || readall(vsock, &tflags, 2) < 0 ||
-        readall(vsock, pad, 124) < 0) {
+    if (readall(tcp_sock, &export_size, 8) < 0 || readall(tcp_sock, &tflags, 2) < 0 ||
+        readall(tcp_sock, pad, 124) < 0) {
         fprintf(stderr, "nbd-vsock: export info read failed\n"); return 1;
     }
     export_size = be64toh(export_size);
@@ -282,42 +286,22 @@ int main(int argc, char **argv) {
     fprintf(stderr, "nbd-vsock: export size=%llu bytes, flags=%x\n",
             (unsigned long long)export_size, tflags);
 
-    /* Create local TCP socketpair for kernel NBD (kernel rejects AF_VSOCK) */
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
-        perror("socketpair"); return 1;
-    }
-
-    /* Start proxy threads: vsock <-> sv[1], kernel uses sv[0] */
-    struct proxy_args vsock_to_tcp = { .from_fd = vsock, .to_fd = sv[1] };
-    struct proxy_args tcp_to_vsock = { .from_fd = sv[1], .to_fd = vsock };
-    pthread_t t1, t2;
-    pthread_create(&t1, NULL, proxy_thread, &vsock_to_tcp);
-    pthread_create(&t2, NULL, proxy_thread, &tcp_to_vsock);
-
-    /* netlink: connect NBD device using sv[0] (AF_UNIX is accepted) */
+    /* 6. Hand TCP socket to kernel via netlink */
     int nl = nl_open();
     if (nl < 0) { perror("netlink socket"); return 1; }
-
     int family_id = genl_resolve_family(nl, NBD_GENL_FAMILY_NAME);
     if (family_id < 0) {
-        fprintf(stderr, "nbd-vsock: failed to resolve nbd genl family: %s\n",
-                strerror(errno));
-        return 1;
+        fprintf(stderr, "nbd-vsock: nbd genl family: %s\n", strerror(errno)); return 1;
     }
     fprintf(stderr, "nbd-vsock: nbd genl family_id=%d\n", family_id);
 
-    if (nbd_connect_netlink(nl, family_id, dev_index, sv[0],
+    if (nbd_connect_netlink(nl, family_id, dev_index, tcp_sock,
                             export_size, 512, tflags) < 0) {
-        fprintf(stderr, "nbd-vsock: netlink NBD_CMD_CONNECT failed\n");
-        return 1;
+        fprintf(stderr, "nbd-vsock: NBD_CMD_CONNECT failed\n"); return 1;
     }
 
-    fprintf(stderr, "nbd-vsock: kernel I/O threads started, proxy running\n");
+    fprintf(stderr, "nbd-vsock: kernel I/O started, proxy daemon pid=%d\n", proxy_pid);
     close(nl);
-
-    /* Keep proxy threads alive (kernel I/O uses sv[0], proxy relays via sv[1] <-> vsock) */
-    pthread_join(t1, NULL);
-    pthread_join(t2, NULL);
+    /* Parent exits. Kernel owns tcp_sock. Proxy child stays alive with setsid(). */
     return 0;
 }
