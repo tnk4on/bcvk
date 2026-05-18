@@ -171,17 +171,14 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     ssh.scp_to_local(&initramfs_remote, &cache_dir.join("initramfs.img"))?;
     info!("initramfs: SCP complete");
 
-    // Fetch vsock kernel modules for initramfs injection (decompress on remote before SCP)
+    // Fetch vsock kernel modules (decompress to /tmp since overlay is read-only)
     let _ = ssh.ssh_cmd(&format!(
-        "xz -dk {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz 2>/dev/null; \
-         xz -dk {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz 2>/dev/null; \
-         echo DECOMPRESSED",
+        "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko",
         m = merged_path, k = kver,
     ));
-    let vsock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/vsock.ko", merged_path, kver);
-    let hv_sock_ko = format!("{}/usr/lib/modules/{}/kernel/net/vmw_vsock/hv_sock.ko", merged_path, kver);
-    let _ = ssh.scp_to_local(&vsock_ko, &cache_dir.join("vsock.ko"));
-    let _ = ssh.scp_to_local(&hv_sock_ko, &cache_dir.join("hv_sock.ko"));
+    let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
+    let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     info!("vsock modules: SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
