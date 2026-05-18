@@ -92,21 +92,39 @@ impl PodmanSsh {
 
 }
 
-/// Cache directory for boot files, keyed by image digest.
+/// Ensure image exists locally (pull if needed) and return short digest.
 #[cfg(target_os = "windows")]
-fn cache_dir(image: &str) -> Result<Option<PathBuf>> {
+pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
+    let exists = Command::new("podman")
+        .args(["image", "exists", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !exists.success() {
+        info!("pulling image {}...", image);
+        let pull = Command::new("podman")
+            .args(["pull", image])
+            .status()?;
+        if !pull.success() {
+            bail!("failed to pull image: {}", image);
+        }
+    }
     let output = Command::new("podman")
         .args(["image", "inspect", "--format", "{{.Digest}}", image])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()?;
     let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if digest.is_empty() { return Ok(None); }
-    let short = digest.trim_start_matches("sha256:").chars().take(16).collect::<String>();
-    let base = dirs::data_local_dir()
+    if digest.is_empty() { bail!("failed to get image digest: {}", image); }
+    Ok(digest.trim_start_matches("sha256:").chars().take(16).collect())
+}
+
+/// Cache directory for boot files, keyed by short digest.
+#[cfg(target_os = "windows")]
+fn cache_dir_from_digest(digest_short: &str) -> PathBuf {
+    dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk").join("cache").join(format!("boot-{}", short));
-    Ok(Some(base))
+        .join("bcvk").join("cache").join(format!("boot-{}", digest_short))
 }
 
 /// Fetch boot files via SCP (fast, ~50MB/s) and cache locally.
@@ -166,7 +184,7 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
 /// Returns the path to the VHDX file.
 #[cfg(target_os = "windows")]
 pub fn create_boot_vhdx(
-    image: &str,
+    digest_short: &str,
     merged_path: &str,
     ssh: &PodmanSsh,
     ssh_pubkey: &str,
@@ -175,9 +193,7 @@ pub fn create_boot_vhdx(
 ) -> Result<String> {
     info!("creating boot VHDX from {}", merged_path);
 
-    // Check/fetch boot files (cached)
-    let cache = cache_dir(image)?;
-    let cache_dir = cache.ok_or_else(|| color_eyre::eyre::eyre!("cannot determine cache dir"))?;
+    let cache_dir = cache_dir_from_digest(digest_short);
 
     if !(cache_dir.join("vmlinuz").exists() && cache_dir.join("initramfs.img").exists()) {
         info!("boot files cache miss, fetching via SCP...");

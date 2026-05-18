@@ -255,7 +255,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         String::new()
     };
 
-    // 1. Start nbdkit (Windows: podman リモートクライアント経由、podman machine ssh 不使用)
+    // Ensure image exists and get digest for caching
+    let digest_short = boot_files::ensure_image_and_get_digest(&opts.image)?;
+
+    // 1. Start nbdkit
     let nbd_port = find_available_nbd_port();
     let nbd_container_name = format!("bcvk-nbd-{}", name);
 
@@ -378,13 +381,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         std::thread::spawn(move || hyperv::add_firewall_rules(nbd_port))
     };
     let vhdx_handle = {
-        let img = opts.image.clone();
+        let ds = digest_short.clone();
         let mp = merged_path.clone();
         let spk = ssh_pubkey.clone();
         let hi = host_ip.to_string();
         let ps = podman_ssh.clone();
         std::thread::spawn(move || {
-            boot_files::create_boot_vhdx(&img, &mp, &ps, &spk, &hi, nbd_port)
+            boot_files::create_boot_vhdx(&ds, &mp, &ps, &spk, &hi, nbd_port)
         })
     };
 
@@ -666,4 +669,50 @@ pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std
     cmd.args(["-t", &user_host]);
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
         .status().map_err(|e| eyre!("ssh failed: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_memory_to_mb() {
+        assert_eq!(parse_memory_to_mb("4G").unwrap(), 4096);
+        assert_eq!(parse_memory_to_mb("4g").unwrap(), 4096);
+        assert_eq!(parse_memory_to_mb("2048M").unwrap(), 2048);
+        assert_eq!(parse_memory_to_mb("2048m").unwrap(), 2048);
+        assert_eq!(parse_memory_to_mb("1024").unwrap(), 1024);
+        assert_eq!(parse_memory_to_mb("  8G  ").unwrap(), 8192);
+    }
+
+    #[test]
+    fn test_parse_memory_to_mb_errors() {
+        assert!(parse_memory_to_mb("abc").is_err());
+        assert!(parse_memory_to_mb("").is_err());
+    }
+
+    #[test]
+    fn test_default_vcpus() {
+        let vcpus = default_vcpus();
+        assert!(vcpus >= 1 && vcpus <= 4);
+    }
+
+    #[test]
+    fn test_ephemeral_vm_metadata_roundtrip() {
+        let meta = EphemeralVmMetadata {
+            name: "test-vm".to_string(),
+            image: "quay.io/test:latest".to_string(),
+            vm_name: "bcvk-ephemeral-test".to_string(),
+            ssh_port: 2222,
+            ssh_key: "/tmp/test-key".to_string(),
+            nbd_container: Some("bcvk-nbd-test".to_string()),
+            nbd_port: Some(10800),
+            created: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: EphemeralVmMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test-vm");
+        assert_eq!(parsed.ssh_port, 2222);
+        assert_eq!(parsed.nbd_container, Some("bcvk-nbd-test".to_string()));
+    }
 }
