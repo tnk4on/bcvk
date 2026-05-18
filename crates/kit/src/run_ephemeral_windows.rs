@@ -308,8 +308,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     hyperv::register_vsock_service(vsock_port)?;
 
     // Get podman machine VM GUID for vsock relay
-    let pm_vm_name = format!("podman-machine-{}", machine);
-    let podman_vm_guid = hyperv::get_vm_guid(&pm_vm_name)?;
+    let podman_vm_guid = hyperv::get_vm_guid(&machine)?;
     info!("podman machine VM GUID: {}", podman_vm_guid);
 
     // 既存コンテナを削除
@@ -491,9 +490,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vsock_port: Some(vsock_port),
     };
 
-    // Run DHCP server + VM boot + SSH in async runtime
+    // Run vsock relay + DHCP server + VM boot + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        // Start vsock relay (bridges ephemeral VM ↔ podman machine via AF_HYPERV)
+        let _vsock_relay = crate::vsock_relay::VsockRelay::start(vsock_port, &podman_vm_guid).await?;
+        info!("vsock relay started (port {})", vsock_port);
+
         let dhcp = DhcpServer::new(host_ip, client_ip)?;
         let dhcp_handle = dhcp.start_background();
 
