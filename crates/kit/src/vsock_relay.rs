@@ -210,6 +210,10 @@ fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32)
 #[cfg(target_os = "windows")]
 fn relay_data(from: RawSocket, to: RawSocket) {
     let mut buf = vec![0u8; RELAY_BUF_SIZE];
+    let start = std::time::Instant::now();
+    let mut total_bytes: u64 = 0;
+    let mut total_ops: u64 = 0;
+    let mut last_report = start;
     loop {
         let mut bytes_recv: u32 = 0;
         let mut flags: u32 = 0;
@@ -229,6 +233,24 @@ fn relay_data(from: RawSocket, to: RawSocket) {
             if rc != 0 || bytes_sent == 0 { return; }
             sent += bytes_sent as usize;
         }
+        total_bytes += n as u64;
+        total_ops += 1;
+        let now = std::time::Instant::now();
+        if now.duration_since(last_report).as_secs() >= 5 {
+            let elapsed = now.duration_since(start).as_secs_f64();
+            let mb = total_bytes as f64 / 1048576.0;
+            let avg_chunk = if total_ops > 0 { total_bytes / total_ops } else { 0 };
+            info!("relay stats: {:.0} MB in {:.1}s = {:.1} MB/s, avg_chunk={}B, ops={}",
+                  mb, elapsed, mb / elapsed, avg_chunk, total_ops);
+            last_report = now;
+        }
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    if elapsed > 0.0 {
+        let mb = total_bytes as f64 / 1048576.0;
+        let avg_chunk = if total_ops > 0 { total_bytes / total_ops } else { 0 };
+        info!("relay final: {:.0} MB in {:.1}s = {:.1} MB/s, avg_chunk={}B, ops={}",
+              mb, elapsed, mb / elapsed, avg_chunk, total_ops);
     }
 }
 
