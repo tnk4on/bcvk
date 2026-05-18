@@ -162,6 +162,12 @@ pub struct RunEphemeralOpts {
     /// Additional kernel command line arguments
     #[clap(long = "karg")]
     pub kernel_args: Vec<String>,
+    /// Display VM console in Hyper-V Manager
+    #[clap(long)]
+    pub gui: bool,
+    /// Run in background
+    #[clap(long, short = 'd')]
+    pub detach: bool,
     /// Enable debug mode
     #[clap(long)]
     pub debug: bool,
@@ -191,6 +197,14 @@ fn default_vcpus() -> u32 {
 
 #[cfg(target_os = "windows")]
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
+    if opts.gui && opts.detach {
+        bail!("--gui and --detach cannot be used together");
+    }
+
+    if opts.detach {
+        return run_detached(&opts);
+    }
+
     // Preflight checks
     if !hyperv::is_hyper_v_enabled() {
         bail!("Hyper-V is not enabled. Run: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All");
@@ -423,6 +437,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         hyperv::start_vm(&vm_name)?;
         info!("VM {} started, VHDX booting...", vm_name);
 
+        // Open Hyper-V console window if --gui
+        if opts.gui {
+            let _ = Command::new("vmconnect.exe")
+                .args(["localhost", &vm_name])
+                .spawn();
+        }
+
         // Serial console log: read named pipe → log file (background)
         let serial_log_path = base_dir.join(format!("serial-{}.log", name));
         let pipe_path = format!("\\\\.\\pipe\\bcvk-serial-{}", vm_name);
@@ -515,6 +536,48 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         Ok::<(), color_eyre::Report>(())
     })?;
 
+    Ok(())
+}
+
+// --- Detached mode ---
+
+#[cfg(target_os = "windows")]
+fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
+    let base = ephemeral_base_dir();
+    std::fs::create_dir_all(&base)?;
+
+    let vm_name = opts.name.clone().unwrap_or_else(|| {
+        format!("{:08x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32)
+    });
+    let log_path = base.join(format!("bcvk-{}.log", vm_name));
+    let log_file = std::fs::File::create(&log_path)?;
+
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--detach" && a != "-d")
+        .collect();
+    if !args.contains(&"-K".to_string()) && !args.contains(&"--ssh-keygen".to_string()) {
+        args.insert(args.len() - 1, "-K".to_string());
+    }
+    if opts.name.is_none() {
+        args.insert(args.len() - 1, "--name".to_string());
+        args.insert(args.len() - 1, vm_name.clone());
+    }
+
+    let _child = Command::new(exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    info!("started in background: {}", vm_name);
+    info!("log: {}", log_path.display());
+    println!("{}", vm_name);
     Ok(())
 }
 
