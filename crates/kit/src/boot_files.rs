@@ -47,13 +47,13 @@ impl PodmanSsh {
         ]
     }
 
-    fn user_host(&self) -> String {
+    pub fn user_host(&self) -> String {
         format!("{}@127.0.0.1", self.user())
     }
 
     /// Run a command that needs root access to container storage.
     /// Rootful: runs directly. Rootless: wraps with sudo.
-    fn ssh_cmd(&self, cmd: &str) -> Result<Vec<u8>> {
+    pub fn ssh_cmd(&self, cmd: &str) -> Result<Vec<u8>> {
         let full_cmd = if self.rootful {
             cmd.to_string()
         } else {

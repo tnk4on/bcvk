@@ -151,14 +151,10 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
 }
 
 #[cfg(target_os = "windows")]
-pub fn add_firewall_rules(nbd_port: u16) -> Result<()> {
+pub fn add_firewall_rules(_unused: u16) -> Result<()> {
     powershell_ignore_error(
         "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
     );
-    powershell_ignore_error(&format!(
-        "New-NetFirewallRule -DisplayName 'bcvk-nbd' -Direction Inbound -Protocol TCP -LocalPort {} -Action Allow -ErrorAction SilentlyContinue",
-        nbd_port
-    ));
     powershell_ignore_error(
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
     );
