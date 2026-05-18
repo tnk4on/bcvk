@@ -179,7 +179,10 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     ));
     let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
-    info!("vsock modules: SCP complete");
+    // Fetch patched nbd.ko (built by run_ephemeral_windows in parallel)
+    let nbd_patched = format!("/var/tmp/bcvk/nbd-patched-{}.ko", kver);
+    let _ = ssh.scp_to_local(&nbd_patched, &cache_dir.join("nbd.ko"));
+    info!("vsock + nbd modules: SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
@@ -315,8 +318,8 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // Include decompressed vsock kernel modules in initramfs
-    for module_name in &["vsock.ko", "hv_sock.ko"] {
+    // Include kernel modules in initramfs (nbd.ko is patched for AF_VSOCK)
+    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
@@ -331,26 +334,19 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
 
     let setup = format!(
         "#!/bin/bash\n\
-modprobe nbd max_part=16 2>/dev/null\n\
-# Load vsock modules (hv_sock depends on hv_vmbus which loads late)\n\
+# Load patched nbd.ko (AF_VSOCK support)\n\
+insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
 for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
   sleep 1\n\
 done\n\
 \n\
-# Copy nbd-vsock to /run so it survives switch-root\n\
-cp /usr/bin/nbd-vsock /run/nbd-vsock\n\
-\n\
-# Move to root cgroup so switch-root cleanup won't kill the proxy\n\
-echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null\n\
-/run/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg &\n\
-\n\
-# Wait for NBD device\n\
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n\
-  [ -b /dev/nbd0p2 ] && break\n\
-  sleep 1\n\
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
+  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
+  sleep 2\n\
 done\n\
+sleep 1\n\
 blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
         vsock_port = vsock_port
     );
