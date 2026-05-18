@@ -49,7 +49,7 @@ fn powershell_ignore_error(script: &str) {
 #[cfg(target_os = "windows")]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
     let check = powershell(&format!(
-        "try {{ (Get-VMSwitch -Name '{}' -ErrorAction Stop).Name }} catch {{}}",
+        "try {{ (Get-VMSwitch -Name '{}' -ErrorAction Stop).Name }} catch {{}}; exit 0",
         name
     ))?;
 
@@ -211,7 +211,7 @@ pub fn remove_vm(name: &str) -> Result<()> {
 #[cfg(target_os = "windows")]
 pub fn get_vm_state(name: &str) -> Result<String> {
     powershell(&format!(
-        "Write-Host (Get-VM -Name '{}' -ErrorAction SilentlyContinue).State",
+        "$v = Get-VM -Name '{}' -ErrorAction SilentlyContinue; if ($v) {{ Write-Host $v.State }}; exit 0",
         name
     ))
 }
@@ -232,7 +232,7 @@ pub fn get_vm_ip(name: &str) -> Result<Option<String>> {
 #[cfg(target_os = "windows")]
 pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
     let output = powershell(&format!(
-        "Get-VM -Name '{}*' -ErrorAction SilentlyContinue | ForEach-Object {{ \"$($_.Name)|$($_.State)\" }}",
+        "$vms = Get-VM -Name '{}*' -ErrorAction SilentlyContinue; if ($vms) {{ $vms | ForEach-Object {{ \"$($_.Name)|$($_.State)\" }} }}; exit 0",
         prefix
     ))?;
     let mut vms = Vec::new();
