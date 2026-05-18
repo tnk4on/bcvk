@@ -1,7 +1,7 @@
 //! Hyper-V vsock relay: bridge hv_sock connections between two VMs.
 //!
 //! Accepts AF_VSOCK from ephemeral VM, dials AF_VSOCK to podman machine VM,
-//! then relays data bidirectionally. Runs on the Windows host using AF_HYPERV.
+//! then relays data bidirectionally using blocking I/O threads.
 
 #[cfg(target_os = "windows")]
 use color_eyre::Result;
@@ -19,14 +19,14 @@ use std::io;
 #[cfg(target_os = "windows")]
 use std::mem;
 #[cfg(target_os = "windows")]
-use std::net::TcpStream;
-#[cfg(target_os = "windows")]
-use std::os::windows::io::{FromRawSocket, RawSocket};
+use std::os::windows::io::RawSocket;
 
 #[cfg(target_os = "windows")]
 const AF_HYPERV: i32 = 34;
 #[cfg(target_os = "windows")]
 const HV_PROTOCOL_RAW: i32 = 1;
+#[cfg(target_os = "windows")]
+const RELAY_BUF_SIZE: usize = 256 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -102,9 +102,34 @@ impl VsockRelay {
             loop {
                 tokio::select! {
                     _ = stop_clone.notified() => break,
-                    result = accept_and_relay(listen_sock, vsock_port, &target_guid) => {
-                        if let Err(e) = result {
-                            warn!("vsock relay error: {}", e);
+                    result = tokio::task::spawn_blocking({
+                        let ls = listen_sock;
+                        move || unsafe { hvsock_accept(ls) }
+                    }) => {
+                        match result {
+                            Ok(Ok(client_sock)) => {
+                                info!("vsock relay: accepted connection from ephemeral VM");
+                                let tg = HvSockGuid {
+                                    data1: target_guid.data1,
+                                    data2: target_guid.data2,
+                                    data3: target_guid.data3,
+                                    data4: target_guid.data4,
+                                };
+                                let port = vsock_port;
+                                std::thread::spawn(move || {
+                                    if let Err(e) = relay_connection(client_sock, &tg, port) {
+                                        warn!("vsock relay error: {}", e);
+                                    }
+                                });
+                            }
+                            Ok(Err(e)) => {
+                                warn!("vsock relay accept error: {}", e);
+                                break;
+                            }
+                            Err(e) => {
+                                warn!("vsock relay task error: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -130,46 +155,46 @@ impl Drop for VsockRelay {
 }
 
 #[cfg(target_os = "windows")]
-async fn accept_and_relay(
-    listen_sock: RawSocket,
-    vsock_port: u32,
-    target_guid: &HvSockGuid,
-) -> Result<()> {
-    let client_sock = tokio::task::spawn_blocking({
-        let ls = listen_sock;
-        move || unsafe { hvsock_accept(ls) }
-    }).await??;
-
-    info!("vsock relay: accepted connection from ephemeral VM");
-
-    let dial_sock = tokio::task::spawn_blocking({
-        let tg = HvSockGuid {
-            data1: target_guid.data1,
-            data2: target_guid.data2,
-            data3: target_guid.data3,
-            data4: target_guid.data4,
-        };
-        let port = vsock_port;
-        move || unsafe { hvsock_connect(&tg, port) }
-    }).await??;
-
+fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32) -> Result<()> {
+    let dial_sock = unsafe { hvsock_connect(target_guid, port)? };
     info!("vsock relay: connected to podman machine");
 
-    let mut client_stream = unsafe {
-        let std_stream = TcpStream::from_raw_socket(client_sock);
-        std_stream.set_nonblocking(true)?;
-        tokio::net::TcpStream::from_std(std_stream)?
-    };
-    let mut target_stream = unsafe {
-        let std_stream = TcpStream::from_raw_socket(dial_sock);
-        std_stream.set_nonblocking(true)?;
-        tokio::net::TcpStream::from_std(std_stream)?
-    };
+    let cs = client_sock;
+    let ds = dial_sock;
+    let t1 = std::thread::spawn(move || relay_data(cs, ds));
 
-    let result = tokio::io::copy_bidirectional(&mut client_stream, &mut target_stream).await;
-    debug!("vsock relay: connection closed ({:?})", result);
+    let cs2 = client_sock;
+    let ds2 = dial_sock;
+    let t2 = std::thread::spawn(move || relay_data(ds2, cs2));
 
+    let _ = t1.join();
+    let _ = t2.join();
+
+    unsafe {
+        closesocket(client_sock);
+        closesocket(dial_sock);
+    }
+    debug!("vsock relay: connection closed");
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn relay_data(from: RawSocket, to: RawSocket) {
+    let mut buf = vec![0u8; RELAY_BUF_SIZE];
+    loop {
+        let n = unsafe {
+            recv(from, buf.as_mut_ptr(), buf.len() as i32, 0)
+        };
+        if n <= 0 { break; }
+        let mut sent = 0i32;
+        while sent < n {
+            let w = unsafe {
+                send(to, buf.as_ptr().add(sent as usize), n - sent, 0)
+            };
+            if w <= 0 { return; }
+            sent += w;
+        }
+    }
 }
 
 // --- Raw Windows socket operations ---
@@ -182,6 +207,8 @@ extern "system" {
     fn accept(s: RawSocket, addr: *mut u8, addrlen: *mut i32) -> RawSocket;
     fn connect(s: RawSocket, name: *const u8, namelen: i32) -> i32;
     fn closesocket(s: RawSocket) -> i32;
+    fn recv(s: RawSocket, buf: *mut u8, len: i32, flags: i32) -> i32;
+    fn send(s: RawSocket, buf: *const u8, len: i32, flags: i32) -> i32;
     fn WSAGetLastError() -> i32;
     fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
 }
@@ -200,7 +227,7 @@ fn ensure_wsa() {
 #[cfg(target_os = "windows")]
 unsafe fn hvsock_listen(port: u32) -> Result<RawSocket> {
     ensure_wsa();
-    let sock = socket(AF_HYPERV, 1 /* SOCK_STREAM */, HV_PROTOCOL_RAW);
+    let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
     if sock == u64::MAX as RawSocket {
         return Err(io::Error::from_raw_os_error(WSAGetLastError()).into());
     }
@@ -242,7 +269,7 @@ unsafe fn hvsock_accept(listen_sock: RawSocket) -> Result<RawSocket> {
 #[cfg(target_os = "windows")]
 unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
     ensure_wsa();
-    let sock = socket(AF_HYPERV, 1 /* SOCK_STREAM */, HV_PROTOCOL_RAW);
+    let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
     if sock == u64::MAX as RawSocket {
         return Err(io::Error::from_raw_os_error(WSAGetLastError()).into());
     }
