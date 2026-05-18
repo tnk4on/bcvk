@@ -49,7 +49,7 @@ fn powershell_ignore_error(script: &str) {
 #[cfg(target_os = "windows")]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
     let check = powershell(&format!(
-        "Get-VMSwitch -Name '{}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
+        "$s = Get-VMSwitch -Name '{}' -ErrorAction SilentlyContinue; if ($s) {{ $s.Name }}",
         name
     ))?;
 
