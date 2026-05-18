@@ -84,6 +84,9 @@ mod dhcp_server;
 #[cfg(target_os = "windows")]
 mod boot_files;
 #[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod vsock_relay;
+#[cfg(target_os = "windows")]
 mod run_ephemeral_windows;
 
 /// Default state directory for bcvk container data
