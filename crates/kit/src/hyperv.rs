@@ -190,7 +190,7 @@ pub fn start_vm(name: &str) -> Result<()> {
 #[cfg(target_os = "windows")]
 pub fn stop_vm(name: &str) -> Result<()> {
     powershell_ignore_error(&format!(
-        "Stop-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
+        "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue",
         name
     ));
     debug!("stopped VM: {}", name);
