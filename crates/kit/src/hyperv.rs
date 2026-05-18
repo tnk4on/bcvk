@@ -88,8 +88,6 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     powershell_ignore_error(&format!(
         "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
     ));
-    powershell_ignore_error(
-    );
     // Disable firewall for the Internal Switch profile
     powershell_ignore_error(
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
