@@ -15,8 +15,6 @@ use tracing::info;
 #[cfg(target_os = "windows")]
 const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 
-#[cfg(target_os = "windows")]
-const VSOCK_NBD_BRIDGE_BIN: &[u8] = include_bytes!("vsock-nbd-bridge.bin");
 
 #[cfg(target_os = "windows")]
 const PASSWORD_HASH: &str =
@@ -382,11 +380,6 @@ blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
     Ok(cpio::newc::trailer(buf)?)
 }
 
-/// Vsock NBD bridge binary for deployment to podman machine.
-#[cfg(target_os = "windows")]
-pub fn vsock_nbd_bridge_binary() -> &'static [u8] {
-    VSOCK_NBD_BRIDGE_BIN
-}
 
 #[cfg(target_os = "windows")]
 fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
