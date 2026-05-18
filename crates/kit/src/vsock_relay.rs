@@ -115,6 +115,7 @@ impl VsockRelay {
         Ok(Self { stop, handle })
     }
 
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.stop.notify_waiters();
     }
