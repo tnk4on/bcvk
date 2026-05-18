@@ -137,6 +137,36 @@ impl Drop for VmCleanup {
     }
 }
 
+/// Spawn cleanup as a detached process so bcvk can exit immediately.
+#[cfg(target_os = "windows")]
+fn spawn_cleanup(c: &VmCleanup) {
+    let script = format!(
+        "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue; \
+         Remove-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
+        c.vm_name, c.vm_name
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn();
+    if let Some(ref name) = c.nbd_container {
+        let _ = Command::new("podman")
+            .args(["rm", "-f", name])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn();
+    }
+    if let Some(ref vhdx) = c.vhdx_path {
+        let _ = std::fs::remove_file(vhdx);
+    }
+    if let Ok(machine) = detect_machine_name() {
+        let _ = Command::new("podman")
+            .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn();
+    }
+    EphemeralVmMetadata::remove(&c.name);
+}
+
 // --- Options ---
 
 #[cfg(target_os = "windows")]
@@ -531,7 +561,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             let exit_code = status.code().unwrap_or(1);
             dhcp.stop();
             dhcp_handle.abort();
-            drop(cleanup);
+            // Fire-and-forget cleanup to avoid blocking on PowerShell
+            spawn_cleanup(&cleanup);
+            std::mem::forget(cleanup);
             std::process::exit(exit_code);
         }
 
