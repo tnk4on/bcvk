@@ -229,7 +229,6 @@ extern "system" {
     fn accept(s: RawSocket, addr: *mut u8, addrlen: *mut i32) -> RawSocket;
     fn connect(s: RawSocket, name: *const u8, namelen: i32) -> i32;
     fn closesocket(s: RawSocket) -> i32;
-    fn setsockopt(s: RawSocket, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
     fn WSARecv(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_recv: *mut u32, flags: *mut u32, overlapped: *mut u8, completion: *mut u8) -> i32;
     fn WSASend(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_sent: *mut u32, flags: u32, overlapped: *mut u8, completion: *mut u8) -> i32;
     fn WSAGetLastError() -> i32;
