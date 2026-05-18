@@ -339,11 +339,11 @@ for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   sleep 1\n\
 done\n\
 \n\
-/usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg &\n\
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n\
-  [ -b /dev/nbd0p2 ] && break\n\
-  sleep 1\n\
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
+  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
+  sleep 2\n\
 done\n\
+sleep 1\n\
 blockdev --rereadpt /dev/nbd0 2>/dev/null\n",
         vsock_port = vsock_port
     );
