@@ -332,9 +332,12 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     let setup = format!(
         "#!/bin/bash\n\
 modprobe nbd max_part=16 2>/dev/null\n\
-# Load vsock modules from CPIO (not in default initramfs)\n\
+# Load vsock modules (hv_sock depends on hv_vmbus which loads late)\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
-insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/kmsg\n\
+for i in 1 2 3 4 5 6 7 8 9 10; do\n\
+  insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
+  sleep 1\n\
+done\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 2>/dev/kmsg && break\n\
