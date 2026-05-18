@@ -27,7 +27,7 @@ pub mod hyperv;
 #[allow(missing_docs)]
 pub mod ssh_forward;
 #[cfg(target_os = "windows")]
-#[allow(missing_docs)]
+#[allow(missing_docs, unsafe_code)]
 pub mod vsock_relay;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
