@@ -527,7 +527,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         } else if ssh_pubkey.is_empty() {
             info!("VM running. Use: bcvk ephemeral ssh {}", name);
         } else {
-            crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root").map(|_| ())?;
+            let status = crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
+            let exit_code = status.code().unwrap_or(1);
+            dhcp.stop();
+            dhcp_handle.abort();
+            drop(cleanup);
+            std::process::exit(exit_code);
         }
 
         dhcp.stop();
