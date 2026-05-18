@@ -213,17 +213,22 @@ fn relay_data(from: RawSocket, to: RawSocket) {
     let start = std::time::Instant::now();
     let mut total_bytes: u64 = 0;
     let mut total_ops: u64 = 0;
+    let mut recv_us: u64 = 0;
+    let mut send_us: u64 = 0;
     let mut last_report = start;
     loop {
         let mut bytes_recv: u32 = 0;
         let mut flags: u32 = 0;
         let mut wsa_buf = WsaBuf { len: buf.len() as u32, buf: buf.as_mut_ptr() };
+        let t0 = std::time::Instant::now();
         let rc = unsafe {
             WSARecv(from, &mut wsa_buf, 1, &mut bytes_recv, &mut flags, std::ptr::null_mut(), std::ptr::null_mut())
         };
+        recv_us += t0.elapsed().as_micros() as u64;
         if rc != 0 || bytes_recv == 0 { break; }
         let n = bytes_recv as usize;
         let mut sent: usize = 0;
+        let t1 = std::time::Instant::now();
         while sent < n {
             let mut bytes_sent: u32 = 0;
             let mut send_buf = WsaBuf { len: (n - sent) as u32, buf: buf.as_mut_ptr().wrapping_add(sent) };
@@ -233,6 +238,7 @@ fn relay_data(from: RawSocket, to: RawSocket) {
             if rc != 0 || bytes_sent == 0 { return; }
             sent += bytes_sent as usize;
         }
+        send_us += t1.elapsed().as_micros() as u64;
         total_bytes += n as u64;
         total_ops += 1;
         let now = std::time::Instant::now();
@@ -240,17 +246,12 @@ fn relay_data(from: RawSocket, to: RawSocket) {
             let elapsed = now.duration_since(start).as_secs_f64();
             let mb = total_bytes as f64 / 1048576.0;
             let avg_chunk = if total_ops > 0 { total_bytes / total_ops } else { 0 };
-            info!("relay stats: {:.0} MB in {:.1}s = {:.1} MB/s, avg_chunk={}B, ops={}",
-                  mb, elapsed, mb / elapsed, avg_chunk, total_ops);
+            let avg_recv = if total_ops > 0 { recv_us / total_ops } else { 0 };
+            let avg_send = if total_ops > 0 { send_us / total_ops } else { 0 };
+            info!("relay: {:.0}MB {:.1}MB/s chunk={}B recv={}us send={}us ops={}",
+                  mb, mb / elapsed, avg_chunk, avg_recv, avg_send, total_ops);
             last_report = now;
         }
-    }
-    let elapsed = start.elapsed().as_secs_f64();
-    if elapsed > 0.0 {
-        let mb = total_bytes as f64 / 1048576.0;
-        let avg_chunk = if total_ops > 0 { total_bytes / total_ops } else { 0 };
-        info!("relay final: {:.0} MB in {:.1}s = {:.1} MB/s, avg_chunk={}B, ops={}",
-              mb, elapsed, mb / elapsed, avg_chunk, total_ops);
     }
 }
 
