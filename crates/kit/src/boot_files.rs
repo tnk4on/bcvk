@@ -329,6 +329,12 @@ fn create_nbd_tcp_cpio(host: &str, port: u16) -> Result<Vec<u8>> {
 modprobe nbd max_part=16 2>/dev/null\n\
 systemctl start nm-initrd.service 2>/dev/null\n\
 \n\
+# Wait for network interface to get an IP\n\
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n\
+  ip -4 addr show eth0 2>/dev/null | grep -q 'inet ' && break\n\
+  sleep 1\n\
+done\n\
+\n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
   /usr/bin/nbd-tcp /dev/nbd0 {host} {port} 2>/dev/kmsg && break\n\
   sleep 2\n\
