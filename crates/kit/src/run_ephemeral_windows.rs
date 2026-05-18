@@ -467,8 +467,24 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     bridge_handle.join().map_err(|_| eyre!("bridge deploy thread panicked"))??;
 
-    // Start vsock-nbd-bridge in podman machine
-    podman_ssh.ssh_cmd("nohup /var/tmp/bcvk/vsock-nbd-bridge 1030 127.0.0.1 10809 </dev/null >/dev/null 2>&1 &")?;
+    // Start vsock-nbd-bridge in podman machine (use ssh -f for reliable background)
+    let bridge_status = Command::new("ssh")
+        .args([
+            "-f",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-i", &podman_ssh.key,
+            "-p", &podman_ssh.port.to_string(),
+            &format!("core@127.0.0.1"),
+            "nohup /var/tmp/bcvk/vsock-nbd-bridge 1030 127.0.0.1 10809 </dev/null >/dev/null 2>&1 &",
+        ])
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .status()?;
+    if !bridge_status.success() {
+        bail!("failed to start vsock-nbd-bridge");
+    }
+    std::thread::sleep(Duration::from_millis(500));
     info!("vsock-nbd-bridge started (port 1030 → localhost:10809)");
 
     let switch = switch_handle.join().map_err(|_| eyre!("switch thread panicked"))??;
