@@ -2,3 +2,4 @@ target/
 .flox
 .serena/
 *.core
+vsock-nbd-bridge.x86_64
