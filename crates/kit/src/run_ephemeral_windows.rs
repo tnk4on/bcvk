@@ -382,7 +382,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
                printf 'FROM quay.io/fedora/fedora:latest\\nRUN dnf install -y nbdkit && dnf clean all\\n' | \
                {run} build -t localhost/bcvk-nbdkit:latest -f - /tmp; \
              fi; \
-             {run} rm -f {name} 2>/dev/null; \
+             for c in $({run} ps -a --filter name=bcvk-nbd- --format '{{{{.Names}}}}' 2>/dev/null); do {run} rm -f -t 0 $c 2>/dev/null; done; \
+             {run} rm -f -t 0 {name} 2>/dev/null; \
              {run} run -d --name {name} --privileged \
              --network=host --device /dev/vsock \
              -v {merged}:{merged}:ro \

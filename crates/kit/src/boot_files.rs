@@ -62,10 +62,11 @@ impl PodmanSsh {
             .arg(&self.user_host())
             .arg(&full_cmd)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .output()?;
         if !output.status.success() {
-            bail!("ssh failed: {}", cmd);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("ssh failed: {}\nstderr: {}", cmd, stderr.trim());
         }
         Ok(output.stdout)
     }
@@ -333,6 +334,7 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     let setup = format!(
         "#!/bin/bash\n\
 # Load patched nbd.ko (AF_VSOCK support)\n\
+modprobe hv_vmbus 2>/dev/null\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
 for i in 1 2 3 4 5 6 7 8 9 10; do\n\
@@ -341,7 +343,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do\n\
 done\n\
 \n\
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
-  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 4 2>/dev/kmsg && break\n\
+  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 1 2>/dev/kmsg && break\n\
   sleep 2\n\
 done\n\
 sleep 1\n\
