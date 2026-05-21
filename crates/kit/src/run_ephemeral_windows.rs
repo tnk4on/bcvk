@@ -644,11 +644,16 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         .filter(|a| a != "--detach" && a != "-d")
         .collect();
     if !args.contains(&"-K".to_string()) && !args.contains(&"--ssh-keygen".to_string()) {
-        args.insert(args.len() - 1, "-K".to_string());
+        args.push("-K".to_string());
     }
     if opts.name.is_none() {
-        args.insert(args.len() - 1, "--name".to_string());
-        args.insert(args.len() - 1, vm_name.clone());
+        args.push("--name".to_string());
+        args.push(vm_name.clone());
+    }
+    // Keep child process alive to prevent VM cleanup
+    if opts.execute.is_empty() {
+        args.push("--execute".to_string());
+        args.push("sleep infinity".to_string());
     }
 
     let _child = Command::new(exe)
@@ -657,6 +662,19 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
         .spawn()?;
+
+    // Save metadata so bcvk ephemeral stop/ssh can find this VM
+    let metadata = EphemeralVmMetadata {
+        name: vm_name.clone(),
+        image: opts.image.clone(),
+        vm_name: format!("{}{}", VM_PREFIX, vm_name),
+        ssh_port: 0, // Will be updated by child process once SSH is ready
+        ssh_key: base.join(format!("{}-key", vm_name)).to_string_lossy().to_string(),
+        nbd_container: None, // Will be set by child process
+        vsock_port: Some(1030),
+        created: chrono::Utc::now().to_rfc3339(),
+    };
+    metadata.save()?;
 
     info!("started in background: {}", vm_name);
     info!("log: {}", log_path.display());
