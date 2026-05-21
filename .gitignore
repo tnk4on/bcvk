@@ -2,3 +2,4 @@ target/
 .flox
 .serena/
 *.core
+NUL
