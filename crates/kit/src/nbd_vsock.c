@@ -3,10 +3,12 @@
  *
  * Usage: nbd-vsock /dev/nbdN vsock_port [num_connections]
  *
- * Connects to the host (CID=2) via AF_VSOCK, performs NBD handshake on
- * each connection, then hands all sockets to the kernel via netlink
- * NBD_CMD_CONNECT for parallel I/O.
- * Requires patched nbd.ko that accepts AF_VSOCK sockets.
+ * Listens on AF_VSOCK port and waits for Host relay to connect (Host-initiated
+ * connection for better hv_sock throughput). Performs NBD handshake, creates
+ * AF_UNIX socketpairs, hands unix FDs to the kernel via netlink NBD_CMD_CONNECT,
+ * and relays data between vsock and unix sockets in userspace.
+ *
+ * This approach uses standard (unpatched) nbd.ko — no AF_VSOCK kernel patch needed.
  */
 
 #include <stdio.h>
@@ -16,15 +18,19 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <linux/vm_sockets.h>
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <stdint.h>
 #include <endian.h>
+#include <pthread.h>
+#include <signal.h>
 
 #define NBD_GENL_FAMILY_NAME "nbd"
 #define NBD_GENL_VERSION     0x1
 #define MAX_CONNECTIONS      16
+#define RELAY_BUF_SIZE       (256 * 1024)
 
 enum { NBD_CMD_UNSPEC, NBD_CMD_CONNECT, NBD_CMD_DISCONNECT, NBD_CMD_RECONFIGURE,
        NBD_CMD_LINK_DEAD, NBD_CMD_STATUS };
@@ -33,6 +39,11 @@ enum { NBD_ATTR_UNSPEC, NBD_ATTR_INDEX, NBD_ATTR_SIZE_BYTES,
        NBD_ATTR_CLIENT_FLAGS, NBD_ATTR_SOCKETS };
 enum { NBD_SOCK_ITEM_UNSPEC, NBD_SOCK_ITEM };
 enum { NBD_SOCK_UNSPEC, NBD_SOCK_FD };
+
+struct relay_args {
+    int from_fd;
+    int to_fd;
+};
 
 static int readall(int fd, void *buf, size_t n) {
     size_t done = 0;
@@ -52,6 +63,55 @@ static int writeall(int fd, const void *buf, size_t n) {
         done += r;
     }
     return 0;
+}
+
+/* ---- sd_notify (no libsystemd dependency) ---- */
+
+static void sd_notify_ready(void) {
+    const char *sock_path = getenv("NOTIFY_SOCKET");
+    if (!sock_path) return;
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return;
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    if (sock_path[0] == '@') {
+        addr.sun_path[0] = '\0';
+        strncpy(addr.sun_path + 1, sock_path + 1, sizeof(addr.sun_path) - 2);
+    } else {
+        strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    }
+    socklen_t len = offsetof(struct sockaddr_un, sun_path) + strlen(sock_path);
+    if (sock_path[0] == '@') len = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(sock_path + 1);
+    sendto(fd, "READY=1", 7, 0, (struct sockaddr *)&addr, len);
+    close(fd);
+}
+
+/* ---- relay thread ---- */
+
+static void *relay_thread(void *arg) {
+    struct relay_args *ra = (struct relay_args *)arg;
+    char *buf = malloc(RELAY_BUF_SIZE);
+    if (!buf) { free(ra); return NULL; }
+
+    while (1) {
+        ssize_t n = read(ra->from_fd, buf, RELAY_BUF_SIZE);
+        if (n <= 0) break;
+        if (writeall(ra->to_fd, buf, n) < 0) break;
+    }
+
+    shutdown(ra->from_fd, SHUT_RD);
+    shutdown(ra->to_fd, SHUT_WR);
+    free(buf);
+    free(ra);
+    return NULL;
+}
+
+static void start_relay(int fd_a, int fd_b, pthread_t *t1, pthread_t *t2) {
+    struct relay_args *a2b = malloc(sizeof(*a2b));
+    struct relay_args *b2a = malloc(sizeof(*b2a));
+    a2b->from_fd = fd_a; a2b->to_fd = fd_b;
+    b2a->from_fd = fd_b; b2a->to_fd = fd_a;
+    pthread_create(t1, NULL, relay_thread, a2b);
+    pthread_create(t2, NULL, relay_thread, b2a);
 }
 
 /* ---- NLA builder ---- */
@@ -144,6 +204,7 @@ static int nbd_connect_netlink_multi(int nl, int family_id, int dev_index,
     nla_put_u32(buf, &pos, NBD_ATTR_INDEX, dev_index);
     nla_put_u64(buf, &pos, NBD_ATTR_SIZE_BYTES, size);
     nla_put_u64(buf, &pos, NBD_ATTR_BLOCK_SIZE_BYTES, blksize);
+    nla_put_u64(buf, &pos, NBD_ATTR_TIMEOUT, 0);
     nla_put_u64(buf, &pos, NBD_ATTR_SERVER_FLAGS, server_flags);
     int socks_start = nla_nest_start(buf, &pos, NBD_ATTR_SOCKETS);
     for (int i = 0; i < num_socks; i++) {
@@ -168,15 +229,27 @@ static int nbd_connect_netlink_multi(int nl, int family_id, int dev_index,
     return 0;
 }
 
-/* ---- vsock connect + NBD handshake ---- */
+/* ---- vsock listen + accept + NBD handshake ---- */
 
-static int vsock_connect_and_handshake(unsigned int port, uint64_t *out_size, uint16_t *out_flags) {
-    int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (sock < 0) { perror("vsock socket"); return -1; }
-    struct sockaddr_vm sa = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_HOST, .svm_port = port };
-    if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        perror("vsock connect"); close(sock); return -1;
+static int vsock_listen(unsigned int port) {
+    int lsock = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (lsock < 0) { perror("vsock socket"); return -1; }
+    int opt = 1;
+    setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_vm sa = { .svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_ANY, .svm_port = port };
+    if (bind(lsock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        perror("vsock bind"); close(lsock); return -1;
     }
+    if (listen(lsock, MAX_CONNECTIONS) < 0) {
+        perror("vsock listen"); close(lsock); return -1;
+    }
+    fprintf(stderr, "nbd-vsock: listening on vsock port %u\n", port);
+    return lsock;
+}
+
+static int vsock_accept_and_handshake(int lsock, uint64_t *out_size, uint16_t *out_flags) {
+    int sock = accept(lsock, NULL, NULL);
+    if (sock < 0) { perror("vsock accept"); return -1; }
 
     uint64_t magic, ihaveopt;
     uint16_t hflags;
@@ -221,21 +294,48 @@ int main(int argc, char **argv) {
     if (num_conns > MAX_CONNECTIONS) num_conns = MAX_CONNECTIONS;
     int dev_index = atoi(dev + strlen("/dev/nbd"));
 
-    fprintf(stderr, "nbd-vsock: connecting %d socket(s) to vsock port %u\n", num_conns, port);
+    signal(SIGPIPE, SIG_IGN);
 
-    int sock_fds[MAX_CONNECTIONS];
+    int lsock = vsock_listen(port);
+    if (lsock < 0) return 1;
+
+    fprintf(stderr, "nbd-vsock: waiting for %d connection(s) from Host relay\n", num_conns);
+
+    int vsock_fds[MAX_CONNECTIONS];
+    int unix_fds[MAX_CONNECTIONS];
+    pthread_t relay_threads[MAX_CONNECTIONS * 2];
     uint64_t export_size = 0;
     uint16_t tflags = 0;
 
     for (int i = 0; i < num_conns; i++) {
-        sock_fds[i] = vsock_connect_and_handshake(port, &export_size, &tflags);
-        if (sock_fds[i] < 0) {
+        vsock_fds[i] = vsock_accept_and_handshake(lsock, &export_size, &tflags);
+        if (vsock_fds[i] < 0) {
             fprintf(stderr, "nbd-vsock: connection %d failed\n", i);
             return 1;
         }
-    }
 
-    fprintf(stderr, "nbd-vsock: %d connection(s) established, export size=%llu bytes\n",
+        int sockbuf = 1024 * 1024;
+        setsockopt(vsock_fds[i], SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+        setsockopt(vsock_fds[i], SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
+
+        int pair[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) {
+            perror("socketpair");
+            return 1;
+        }
+
+        int sndbuf = RELAY_BUF_SIZE;
+        setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        setsockopt(pair[0], SOL_SOCKET, SO_RCVBUF, &sndbuf, sizeof(sndbuf));
+        setsockopt(pair[1], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        setsockopt(pair[1], SOL_SOCKET, SO_RCVBUF, &sndbuf, sizeof(sndbuf));
+
+        unix_fds[i] = pair[0];
+        start_relay(vsock_fds[i], pair[1], &relay_threads[i * 2], &relay_threads[i * 2 + 1]);
+    }
+    close(lsock);
+
+    fprintf(stderr, "nbd-vsock: %d connection(s), export size=%llu bytes\n",
             num_conns, (unsigned long long)export_size);
 
     int nl = nl_open();
@@ -245,12 +345,28 @@ int main(int argc, char **argv) {
         fprintf(stderr, "nbd-vsock: nbd genl family: %s\n", strerror(errno)); return 1;
     }
 
-    if (nbd_connect_netlink_multi(nl, family_id, dev_index, sock_fds, num_conns,
+    if (nbd_connect_netlink_multi(nl, family_id, dev_index, unix_fds, num_conns,
                                   export_size, 512, tflags) < 0) {
         fprintf(stderr, "nbd-vsock: NBD_CMD_CONNECT failed\n"); return 1;
     }
 
-    fprintf(stderr, "nbd-vsock: kernel I/O threads started (%d connections), exiting\n", num_conns);
+    fprintf(stderr, "nbd-vsock: kernel I/O started, relay running\n");
     close(nl);
+    sd_notify_ready();
+
+    /* Survive initrd → rootfs switch_root:
+     * 1. Ignore SIGTERM so systemd's cleanup doesn't kill us
+     * 2. Move to root cgroup so service cgroup cleanup doesn't SIGKILL us */
+    signal(SIGTERM, SIG_IGN);
+    {
+        char pid_str[32];
+        snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
+        int cgfd = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY);
+        if (cgfd >= 0) { write(cgfd, pid_str, strlen(pid_str)); close(cgfd); }
+    }
+
+    for (int i = 0; i < num_conns * 2; i++)
+        pthread_join(relay_threads[i], NULL);
+
     return 0;
 }
