@@ -2,6 +2,7 @@
 //!
 //! Connects to both ephemeral VM and podman machine VM using Host-initiated
 //! AF_HYPERV connections (fast path: ~1 GB/s), then relays data bidirectionally.
+//! Automatically reconnects when the ephemeral VM side drops (ublk→NBD fallback).
 
 #[cfg(target_os = "windows")]
 use color_eyre::Result;
@@ -122,25 +123,12 @@ impl VsockRelay {
         info!("vsock relay: connected to ephemeral VM");
 
         let stop_clone = stop.clone();
+        let pod_guid = podman_guid.clone();
+        let eph_guid = ephemeral_guid.clone();
         let handle = tokio::spawn(async move {
-            let ps = podman_sock;
-            let vs = vm_sock;
-
-            let relay_task = tokio::task::spawn_blocking(move || {
-                relay_connection(vs, ps);
-            });
-
-            tokio::select! {
-                _ = stop_clone.notified() => {
-                    unsafe {
-                        closesocket(podman_sock);
-                        closesocket(vm_sock);
-                    }
-                }
-                _ = relay_task => {
-                    debug!("vsock relay: connection finished");
-                }
-            }
+            relay_with_reconnect(
+                podman_sock, vm_sock, &pod_guid, &eph_guid, vsock_port, stop_clone,
+            ).await;
         });
 
         Ok(Self { stop, handle })
@@ -161,7 +149,64 @@ impl Drop for VsockRelay {
 }
 
 #[cfg(target_os = "windows")]
-fn relay_connection(sock_a: RawSocket, sock_b: RawSocket) {
+async fn relay_with_reconnect(
+    initial_podman: RawSocket,
+    initial_vm: RawSocket,
+    podman_guid: &HvSockGuid,
+    ephemeral_guid: &HvSockGuid,
+    vsock_port: u32,
+    stop: Arc<Notify>,
+) {
+    let mut podman_sock = initial_podman;
+    let mut vm_sock = initial_vm;
+
+    loop {
+        let ps = podman_sock;
+        let vs = vm_sock;
+        let stop_inner = stop.clone();
+
+        let relay_task = tokio::task::spawn_blocking(move || {
+            relay_one_connection(vs, ps);
+        });
+
+        tokio::select! {
+            _ = stop_inner.notified() => {
+                debug!("vsock relay: stop requested");
+                break;
+            }
+            _ = relay_task => {
+                info!("vsock relay: connection dropped, reconnecting both sides");
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        match unsafe { hvsock_connect(podman_guid, vsock_port) } {
+            Ok(s) => {
+                podman_sock = s;
+                debug!("vsock relay: reconnected to podman machine");
+            }
+            Err(e) => {
+                info!("vsock relay: podman reconnect failed: {}, stopping", e);
+                break;
+            }
+        }
+        match unsafe { hvsock_connect_retry(ephemeral_guid, vsock_port, 30, 2) } {
+            Ok(s) => {
+                vm_sock = s;
+                info!("vsock relay: reconnected to ephemeral VM");
+            }
+            Err(e) => {
+                info!("vsock relay: ephemeral VM reconnect failed: {}, stopping", e);
+                unsafe { closesocket(podman_sock); }
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn relay_one_connection(sock_a: RawSocket, sock_b: RawSocket) {
     let sa = sock_a;
     let sb = sock_b;
     let t1 = std::thread::spawn(move || relay_data(sa, sb));
@@ -177,7 +222,7 @@ fn relay_connection(sock_a: RawSocket, sock_b: RawSocket) {
         closesocket(sock_a);
         closesocket(sock_b);
     }
-    debug!("vsock relay: connection closed");
+    debug!("vsock relay: one connection closed");
 }
 
 #[cfg(target_os = "windows")]
