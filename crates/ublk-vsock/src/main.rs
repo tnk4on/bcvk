@@ -1,0 +1,298 @@
+use libc::{
+    sockaddr_vm, socket, bind, listen, accept, setsockopt, AF_VSOCK, SOCK_STREAM, SOL_SOCKET,
+    SO_SNDBUF, SO_RCVBUF, VMADDR_CID_ANY,
+};
+use libublk::ctrl::UblkCtrlBuilder;
+use libublk::io::{BufDesc, UblkDev, UblkIOCtx, UblkQueue};
+use libublk::{sys, UblkFlags, UblkIORes};
+use log::{error, info};
+use std::io::{Read, Write};
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
+
+const NBD_REQUEST_MAGIC: u32 = 0x25609513;
+const NBD_CMD_READ: u16 = 0;
+const NBD_CMD_WRITE: u16 = 1;
+
+fn readall(fd: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = fd.read(&mut buf[done..])?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF"));
+        }
+        done += n;
+    }
+    Ok(())
+}
+
+fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
+    unsafe {
+        let fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let opt: libc::c_int = 1;
+        setsockopt(
+            fd, SOL_SOCKET, libc::SO_REUSEADDR,
+            &opt as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&opt) as u32,
+        );
+
+        let mut addr: sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = AF_VSOCK as u16;
+        addr.svm_cid = VMADDR_CID_ANY;
+        addr.svm_port = port;
+
+        if bind(fd, &addr as *const _ as *const libc::sockaddr,
+                std::mem::size_of_val(&addr) as u32) < 0 {
+            libc::close(fd);
+            return Err(std::io::Error::last_os_error());
+        }
+        if listen(fd, 1) < 0 {
+            libc::close(fd);
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(fd)
+    }
+}
+
+fn vsock_accept(lsock: RawFd) -> std::io::Result<UnixStream> {
+    unsafe {
+        let fd = accept(lsock, std::ptr::null_mut(), std::ptr::null_mut());
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let sockbuf: libc::c_int = 1024 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+                   &sockbuf as *const _ as *const libc::c_void, 4);
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+                   &sockbuf as *const _ as *const libc::c_void, 4);
+        Ok(UnixStream::from_raw_fd(fd))
+    }
+}
+
+fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
+    let mut magic = [0u8; 8];
+    let mut ihaveopt = [0u8; 8];
+    let mut hflags = [0u8; 2];
+    readall(stream, &mut magic)?;
+    readall(stream, &mut ihaveopt)?;
+    readall(stream, &mut hflags)?;
+
+    let cflags: u32 = 1u32.to_be();
+    stream.write_all(&cflags.to_ne_bytes())?;
+
+    let opt_magic: u64 = 0x49484156454F5054u64.to_be();
+    let opt_id: u32 = 1u32.to_be();
+    let opt_len: u32 = 0u32.to_be();
+    stream.write_all(&opt_magic.to_ne_bytes())?;
+    stream.write_all(&opt_id.to_ne_bytes())?;
+    stream.write_all(&opt_len.to_ne_bytes())?;
+
+    let mut reply_magic = [0u8; 8];
+    let mut opt_reply = [0u8; 4];
+    let mut reply_type = [0u8; 4];
+    let mut reply_len = [0u8; 4];
+    readall(stream, &mut reply_magic)?;
+    readall(stream, &mut opt_reply)?;
+    readall(stream, &mut reply_type)?;
+    readall(stream, &mut reply_len)?;
+
+    let rlen = u32::from_be_bytes(reply_len) as usize;
+    if rlen < 10 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short export info"));
+    }
+    let mut export_info = vec![0u8; rlen];
+    readall(stream, &mut export_info)?;
+
+    let export_size = u64::from_be_bytes(export_info[0..8].try_into().unwrap());
+    let tflags = u16::from_be_bytes(export_info[8..10].try_into().unwrap());
+
+    Ok((export_size, tflags))
+}
+
+fn nbd_read(conn: &Mutex<UnixStream>, offset: u64, buf: &mut [u8]) -> i32 {
+    let len = buf.len();
+    let mut req = [0u8; 28];
+    req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+    req[4..6].copy_from_slice(&0u16.to_be_bytes());
+    req[6..8].copy_from_slice(&NBD_CMD_READ.to_be_bytes());
+    req[8..16].copy_from_slice(&0u64.to_be_bytes());
+    req[16..24].copy_from_slice(&offset.to_be_bytes());
+    req[24..28].copy_from_slice(&(len as u32).to_be_bytes());
+
+    let mut stream = conn.lock().unwrap();
+    if stream.write_all(&req).is_err() {
+        return -(libc::EIO as i32);
+    }
+
+    let mut reply = [0u8; 16];
+    if readall(&mut stream, &mut reply).is_err() {
+        return -(libc::EIO as i32);
+    }
+    let error = u32::from_be_bytes(reply[4..8].try_into().unwrap());
+    if error != 0 {
+        return -(libc::EIO as i32);
+    }
+    if readall(&mut stream, buf).is_err() {
+        return -(libc::EIO as i32);
+    }
+    len as i32
+}
+
+fn nbd_write(conn: &Mutex<UnixStream>, offset: u64, buf: &[u8]) -> i32 {
+    let len = buf.len();
+    let mut req = [0u8; 28];
+    req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+    req[4..6].copy_from_slice(&0u16.to_be_bytes());
+    req[6..8].copy_from_slice(&NBD_CMD_WRITE.to_be_bytes());
+    req[8..16].copy_from_slice(&0u64.to_be_bytes());
+    req[16..24].copy_from_slice(&offset.to_be_bytes());
+    req[24..28].copy_from_slice(&(len as u32).to_be_bytes());
+
+    let mut stream = conn.lock().unwrap();
+    if stream.write_all(&req).is_err() || stream.write_all(buf).is_err() {
+        return -(libc::EIO as i32);
+    }
+
+    let mut reply = [0u8; 16];
+    if readall(&mut stream, &mut reply).is_err() {
+        return -(libc::EIO as i32);
+    }
+    let error = u32::from_be_bytes(reply[4..8].try_into().unwrap());
+    if error != 0 {
+        return -(libc::EIO as i32);
+    }
+    len as i32
+}
+
+fn sd_notify_ready() {
+    let sock_path = match std::env::var("NOTIFY_SOCKET") {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    unsafe {
+        let fd = socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0);
+        if fd < 0 { return; }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as u16;
+        let path_bytes = sock_path.as_bytes();
+        if path_bytes[0] == b'@' {
+            addr.sun_path[0] = 0;
+            for (i, &b) in path_bytes[1..].iter().enumerate() {
+                if i + 1 >= addr.sun_path.len() { break; }
+                addr.sun_path[i + 1] = b as i8;
+            }
+        } else {
+            for (i, &b) in path_bytes.iter().enumerate() {
+                if i >= addr.sun_path.len() - 1 { break; }
+                addr.sun_path[i] = b as i8;
+            }
+        }
+        let len = std::mem::size_of::<libc::sa_family_t>() + path_bytes.len();
+        let msg = b"READY=1";
+        libc::sendto(
+            fd, msg.as_ptr() as *const libc::c_void, msg.len(), 0,
+            &addr as *const _ as *const libc::sockaddr, len as u32,
+        );
+        libc::close(fd);
+    }
+}
+
+fn move_to_root_cgroup() {
+    let pid = std::process::id();
+    let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", format!("{}\n", pid));
+}
+
+fn main() {
+    env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 || args.len() > 4 {
+        eprintln!("Usage: ublk-vsock <device> <vsock_port> [num_queues]");
+        eprintln!("  e.g. ublk-vsock /dev/ublkb0 1030");
+        std::process::exit(1);
+    }
+    let vsock_port: u32 = args[2].parse().expect("invalid port");
+    let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+
+    info!("listening on vsock port {}", vsock_port);
+    let lsock = vsock_listen(vsock_port).expect("vsock listen failed");
+
+    info!("waiting for Host relay connection");
+    let mut stream = vsock_accept(lsock).expect("vsock accept failed");
+    unsafe { libc::close(lsock); }
+
+    info!("performing NBD handshake");
+    let (export_size, _tflags) = nbd_handshake(&mut stream).expect("NBD handshake failed");
+    info!("export size: {} bytes ({} MB)", export_size, export_size / (1024 * 1024));
+
+    let conn: Arc<Mutex<UnixStream>> = Arc::new(Mutex::new(stream));
+    let depth = 64u16;
+
+    let ctrl = UblkCtrlBuilder::default()
+        .name("bcvk")
+        .nr_queues(num_queues)
+        .depth(depth)
+        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+        .build()
+        .expect("ublk ctrl build failed");
+
+    let sz = export_size;
+    let tgt_init = move |dev: &mut UblkDev| {
+        dev.set_default_params(sz);
+        Ok(())
+    };
+
+    let conn_for_q = conn.clone();
+    let q_fn = move |qid: u16, dev: &UblkDev| {
+        let q = UblkQueue::new(qid, dev).unwrap();
+        let conn = conn_for_q.clone();
+        let buf_size = dev.dev_info.max_io_buf_bytes as usize;
+        let layout = std::alloc::Layout::from_size_align(buf_size, 4096).unwrap();
+        let buf_addr = unsafe { std::alloc::alloc(layout) };
+
+        q.wait_and_handle_io(move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
+            let iod = q.get_iod(tag);
+            let op = iod.op_flags & 0xff;
+            let offset = iod.start_sector * 512;
+            let len = (iod.nr_sectors as usize) * 512;
+
+            let res = match op {
+                sys::UBLK_IO_OP_READ => {
+                    let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_addr, len) };
+                    nbd_read(&conn, offset, buf_slice)
+                }
+                sys::UBLK_IO_OP_WRITE => {
+                    let buf_slice = unsafe { std::slice::from_raw_parts(buf_addr, len) };
+                    nbd_write(&conn, offset, buf_slice)
+                }
+                _ => 0,
+            };
+
+            let _ = q.complete_io_cmd_unified(
+                tag,
+                BufDesc::RawAddress(buf_addr as *const u8),
+                Ok(UblkIORes::Result(res)),
+            );
+        });
+    };
+
+    info!("starting ublk device");
+    let res = ctrl.run_target(tgt_init, q_fn, |ctrl| {
+        let dev_id = ctrl.dev_info().dev_id;
+        info!("ublk device /dev/ublkb{} ready", dev_id);
+        sd_notify_ready();
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
+        move_to_root_cgroup();
+    });
+
+    if let Err(e) = res {
+        error!("ublk target failed: {}", e);
+        std::process::exit(1);
+    }
+}
