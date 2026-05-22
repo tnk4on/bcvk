@@ -11,8 +11,6 @@ path = "src/main.rs"
 [dependencies]
 libublk = "0.4"
 libc = "0.2"
-log = "0.4"
-env_logger = "0.11"
 
 [profile.release]
 opt-level = "s"
