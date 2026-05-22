@@ -354,38 +354,16 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // ublksrv binaries (ublk + libublksrv.so + liburing.so) from well-known path
-    let bcvk_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk");
-    let ublksrv_files = [
-        ("ublk", "usr/bin/ublk", 0o755u32),
-        ("ublk.nbd", "usr/bin/ublk.nbd", 0o755),
-        ("libublksrv.so.0", "usr/lib/bcvk/libublksrv.so.0", 0o755),
-        ("liburing.so.2", "usr/lib/bcvk/liburing.so.2", 0o755),
-    ];
-    // Also include libstdc++ from cache_dir (extracted from bootc image)
-    let stdcpp_path = cache_dir.join("libstdc++.so.6");
-    if stdcpp_path.exists() {
-        let data = std::fs::read(&stdcpp_path)?;
-        let b = NewcBuilder::new("usr/lib/bcvk/libstdc++.so.6").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-        let mut w = b.write(&mut buf, data.len() as u32);
-        w.write_all(&data)?;
+    // ublk-vsock binary (included if available in cache_dir)
+    let ublk_vsock_path = cache_dir.join("ublk-vsock");
+    if ublk_vsock_path.exists() {
+        let ublk_data = std::fs::read(&ublk_vsock_path)?;
+        let b = NewcBuilder::new("usr/bin/ublk-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+        let mut w = b.write(&mut buf, ublk_data.len() as u32);
+        w.write_all(&ublk_data)?;
         w.finish()?;
-        info!("included usr/lib/bcvk/libstdc++.so.6 ({} bytes) in initramfs", data.len());
+        info!("included ublk-vsock ({} bytes) in initramfs", ublk_data.len());
     }
-    for &(name, cpio_path, mode) in &ublksrv_files {
-        let src = bcvk_dir.join(name);
-        if src.exists() {
-            let data = std::fs::read(&src)?;
-            let b = NewcBuilder::new(cpio_path).mode(mode).set_mode_file_type(ModeFileType::Regular);
-            let mut w = b.write(&mut buf, data.len() as u32);
-            w.write_all(&data)?;
-            w.finish()?;
-            info!("included {} ({} bytes) in initramfs", cpio_path, data.len());
-        }
-    }
-    let has_ublksrv = bcvk_dir.join("ublk").exists();
 
     // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko (always), ublk_drv.ko (if available)
     for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
@@ -440,26 +418,22 @@ fi\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: try ublksrv (vsock direct), fall back to NBD
+    // Block device setup script: try ublk-vsock (async), fall back to NBD
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk ] && [ -e /dev/ublk-control ]; then\n\
-    echo 'bcvk: trying ublksrv (io_uring async) block device' > /dev/kmsg\n\
-    export LD_LIBRARY_PATH=/usr/lib/bcvk:${{LD_LIBRARY_PATH:-}}\n\
-    \n\
-    # ublksrv: create NBD block device with vsock listen (host relay connects)\n\
-    ublk add -t nbd -q 1 -d 32 --vsock-port $VSOCK_PORT 2>/dev/kmsg &\n\
+if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
+    echo 'bcvk: trying ublk-vsock (async) block device' > /dev/kmsg\n\
+    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
-    sleep 15\n\
-    \n\
+    sleep 10\n\
     if [ -b /dev/ublkb0 ]; then\n\
-        echo 'bcvk: ublksrv device created successfully' > /dev/kmsg\n\
+        echo 'bcvk: ublk device created successfully' > /dev/kmsg\n\
         wait $UBLK_PID\n\
         exit $?\n\
     fi\n\
-    echo 'bcvk: ublksrv failed, falling back to NBD' > /dev/kmsg\n\
+    echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
     kill $UBLK_PID 2>/dev/null\n\
     wait $UBLK_PID 2>/dev/null\n\
 fi\n\
