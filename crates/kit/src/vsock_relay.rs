@@ -2,7 +2,7 @@
 //!
 //! Connects to both ephemeral VM and podman machine VM using Host-initiated
 //! AF_HYPERV connections (fast path: ~1 GB/s), then relays data bidirectionally.
-//! Automatically reconnects when the ephemeral VM side drops (ublk→NBD fallback).
+//! Supports multiple parallel connections for per-queue ublk optimization.
 
 #[cfg(target_os = "windows")]
 use color_eyre::Result;
@@ -27,7 +27,9 @@ const AF_HYPERV: i32 = 34;
 #[cfg(target_os = "windows")]
 const HV_PROTOCOL_RAW: i32 = 1;
 #[cfg(target_os = "windows")]
-const RELAY_BUF_SIZE: usize = 256 * 1024;
+const RELAY_BUF_SIZE: usize = 1024 * 1024;
+#[cfg(target_os = "windows")]
+const SOCKET_BUF_SIZE: i32 = 4 * 1024 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -100,38 +102,51 @@ impl HvSockGuid {
 #[derive(Debug)]
 pub struct VsockRelay {
     stop: Arc<Notify>,
-    handle: JoinHandle<()>,
+    handles: Vec<JoinHandle<()>>,
 }
 
 #[cfg(target_os = "windows")]
 impl VsockRelay {
     pub async fn start(
         vsock_port: u32,
+        num_connections: u32,
         podman_vm_guid: &str,
         ephemeral_vm_guid: &str,
     ) -> Result<Self> {
         let podman_guid = parse_vm_guid(podman_vm_guid)?;
         let ephemeral_guid = parse_vm_guid(ephemeral_vm_guid)?;
         let stop = Arc::new(Notify::new());
+        let mut handles = Vec::new();
 
-        info!("vsock relay: connecting to podman machine (port {})", vsock_port);
-        let podman_sock = unsafe { hvsock_connect(&podman_guid, vsock_port)? };
-        info!("vsock relay: connected to podman machine");
+        for i in 0..num_connections {
+            info!("vsock relay[{}]: connecting to podman machine (port {})", i, vsock_port);
+            let podman_sock = unsafe { hvsock_connect(&podman_guid, vsock_port)? };
 
-        info!("vsock relay: connecting to ephemeral VM (port {}, with retry)", vsock_port);
-        let vm_sock = unsafe { hvsock_connect_retry(&ephemeral_guid, vsock_port, 30, 2)? };
-        info!("vsock relay: connected to ephemeral VM");
+            info!("vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)", i, vsock_port);
+            let vm_sock = unsafe { hvsock_connect_retry(&ephemeral_guid, vsock_port, 30, 2)? };
 
-        let stop_clone = stop.clone();
-        let pod_guid = podman_guid.clone();
-        let eph_guid = ephemeral_guid.clone();
-        let handle = tokio::spawn(async move {
-            relay_with_reconnect(
-                podman_sock, vm_sock, &pod_guid, &eph_guid, vsock_port, stop_clone,
-            ).await;
-        });
+            info!("vsock relay[{}]: connected both sides", i);
 
-        Ok(Self { stop, handle })
+            let stop_clone = stop.clone();
+            let idx = i;
+            handles.push(tokio::spawn(async move {
+                let relay_task = tokio::task::spawn_blocking(move || {
+                    relay_one_connection(vm_sock, podman_sock);
+                });
+                tokio::select! {
+                    _ = stop_clone.notified() => {
+                        debug!("vsock relay[{}]: stop requested", idx);
+                    }
+                    _ = relay_task => {
+                        debug!("vsock relay[{}]: connection finished", idx);
+                    }
+                }
+            }));
+        }
+
+        info!("vsock relay: {} connections established", num_connections);
+
+        Ok(Self { stop, handles })
     }
 
     #[allow(dead_code)]
@@ -144,63 +159,8 @@ impl VsockRelay {
 impl Drop for VsockRelay {
     fn drop(&mut self) {
         self.stop.notify_waiters();
-        self.handle.abort();
-    }
-}
-
-#[cfg(target_os = "windows")]
-async fn relay_with_reconnect(
-    initial_podman: RawSocket,
-    initial_vm: RawSocket,
-    podman_guid: &HvSockGuid,
-    ephemeral_guid: &HvSockGuid,
-    vsock_port: u32,
-    stop: Arc<Notify>,
-) {
-    let mut podman_sock = initial_podman;
-    let mut vm_sock = initial_vm;
-
-    loop {
-        let ps = podman_sock;
-        let vs = vm_sock;
-        let stop_inner = stop.clone();
-
-        let relay_task = tokio::task::spawn_blocking(move || {
-            relay_one_connection(vs, ps);
-        });
-
-        tokio::select! {
-            _ = stop_inner.notified() => {
-                debug!("vsock relay: stop requested");
-                break;
-            }
-            _ = relay_task => {
-                info!("vsock relay: connection dropped, reconnecting both sides");
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        match unsafe { hvsock_connect(podman_guid, vsock_port) } {
-            Ok(s) => {
-                podman_sock = s;
-                debug!("vsock relay: reconnected to podman machine");
-            }
-            Err(e) => {
-                info!("vsock relay: podman reconnect failed: {}, stopping", e);
-                break;
-            }
-        }
-        match unsafe { hvsock_connect_retry(ephemeral_guid, vsock_port, 30, 2) } {
-            Ok(s) => {
-                vm_sock = s;
-                info!("vsock relay: reconnected to ephemeral VM");
-            }
-            Err(e) => {
-                info!("vsock relay: ephemeral VM reconnect failed: {}, stopping", e);
-                unsafe { closesocket(podman_sock); }
-                break;
-            }
+        for h in &self.handles {
+            h.abort();
         }
     }
 }
@@ -222,7 +182,6 @@ fn relay_one_connection(sock_a: RawSocket, sock_b: RawSocket) {
         closesocket(sock_a);
         closesocket(sock_b);
     }
-    debug!("vsock relay: one connection closed");
 }
 
 #[cfg(target_os = "windows")]
@@ -297,9 +256,9 @@ unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
         return Err(io::Error::from_raw_os_error(err).into());
     }
 
-    let sockbuf: i32 = 1024 * 1024;
-    setsockopt(sock, 0xFFFF, 0x1001, &sockbuf as *const i32 as *const u8, 4); // SO_SNDBUF
-    setsockopt(sock, 0xFFFF, 0x1002, &sockbuf as *const i32 as *const u8, 4); // SO_RCVBUF
+    let sockbuf: i32 = SOCKET_BUF_SIZE;
+    setsockopt(sock, 0xFFFF, 0x1001, &sockbuf as *const i32 as *const u8, 4);
+    setsockopt(sock, 0xFFFF, 0x1002, &sockbuf as *const i32 as *const u8, 4);
 
     Ok(sock)
 }
