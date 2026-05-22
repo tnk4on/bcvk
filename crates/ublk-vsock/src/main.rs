@@ -74,6 +74,7 @@ fn vsock_accept(lsock: RawFd) -> std::io::Result<UnixStream> {
 }
 
 fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
+    // Newstyle negotiation: server sends magic + IHAVEOPT + handshake flags
     let mut magic = [0u8; 8];
     let mut ihaveopt = [0u8; 8];
     let mut hflags = [0u8; 2];
@@ -81,9 +82,11 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     readall(stream, &mut ihaveopt)?;
     readall(stream, &mut hflags)?;
 
+    // Client flags (NBD_FLAG_C_FIXED_NEWSTYLE = 1)
     let cflags: u32 = 1u32.to_be();
     stream.write_all(&cflags.to_ne_bytes())?;
 
+    // Send NBD_OPT_EXPORT_NAME (opt=1, len=0 for default export)
     let opt_magic: u64 = 0x49484156454F5054u64.to_be();
     let opt_id: u32 = 1u32.to_be();
     let opt_len: u32 = 0u32.to_be();
@@ -91,24 +94,17 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     stream.write_all(&opt_id.to_ne_bytes())?;
     stream.write_all(&opt_len.to_ne_bytes())?;
 
-    let mut reply_magic = [0u8; 8];
-    let mut opt_reply = [0u8; 4];
-    let mut reply_type = [0u8; 4];
-    let mut reply_len = [0u8; 4];
-    readall(stream, &mut reply_magic)?;
-    readall(stream, &mut opt_reply)?;
-    readall(stream, &mut reply_type)?;
-    readall(stream, &mut reply_len)?;
+    // Server responds directly with export_size(8) + tflags(2) + pad(124)
+    // (no option reply header for NBD_OPT_EXPORT_NAME)
+    let mut export_size_buf = [0u8; 8];
+    let mut tflags_buf = [0u8; 2];
+    let mut pad = [0u8; 124];
+    readall(stream, &mut export_size_buf)?;
+    readall(stream, &mut tflags_buf)?;
+    readall(stream, &mut pad)?;
 
-    let rlen = u32::from_be_bytes(reply_len) as usize;
-    if rlen < 10 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short export info"));
-    }
-    let mut export_info = vec![0u8; rlen];
-    readall(stream, &mut export_info)?;
-
-    let export_size = u64::from_be_bytes(export_info[0..8].try_into().unwrap());
-    let tflags = u16::from_be_bytes(export_info[8..10].try_into().unwrap());
+    let export_size = u64::from_be_bytes(export_size_buf);
+    let tflags = u16::from_be_bytes(tflags_buf);
 
     Ok((export_size, tflags))
 }
