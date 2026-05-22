@@ -383,7 +383,13 @@ for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
   sleep 1\n\
 done\n\
-insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null || true\n";
+if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
+  # Create device node manually (udev may not be running yet in initramfs)\n\
+  if [ ! -e /dev/ublk-control ] && [ -f /sys/class/misc/ublk-control/dev ]; then\n\
+    DEVNUM=$(cat /sys/class/misc/ublk-control/dev)\n\
+    mknod /dev/ublk-control c ${DEVNUM%%:*} ${DEVNUM##*:}\n\
+  fi\n\
+fi\n";
     let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup_modules.len() as u32);
     w.write_all(setup_modules.as_bytes())?;
@@ -416,7 +422,7 @@ if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-c
     echo 'bcvk: trying ublk (io_uring) block device' > /dev/kmsg\n\
     /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
-    sleep 3\n\
+    sleep 10\n\
     if [ -b /dev/ublkb0 ]; then\n\
         echo 'bcvk: ublk device created successfully' > /dev/kmsg\n\
         wait $UBLK_PID\n\

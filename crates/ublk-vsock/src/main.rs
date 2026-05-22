@@ -5,7 +5,6 @@ use libc::{
 use libublk::ctrl::UblkCtrlBuilder;
 use libublk::io::{BufDesc, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{sys, UblkFlags, UblkIORes};
-use log::{error, info};
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -14,6 +13,12 @@ use std::sync::{Arc, Mutex};
 const NBD_REQUEST_MAGIC: u32 = 0x25609513;
 const NBD_CMD_READ: u16 = 0;
 const NBD_CMD_WRITE: u16 = 1;
+
+macro_rules! msg {
+    ($($arg:tt)*) => {{
+        eprintln!("ublk-vsock: {}", format!($($arg)*))
+    }};
+}
 
 fn readall(fd: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()> {
     let mut done = 0;
@@ -74,7 +79,6 @@ fn vsock_accept(lsock: RawFd) -> std::io::Result<UnixStream> {
 }
 
 fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
-    // Newstyle negotiation: server sends magic + IHAVEOPT + handshake flags
     let mut magic = [0u8; 8];
     let mut ihaveopt = [0u8; 8];
     let mut hflags = [0u8; 2];
@@ -82,11 +86,9 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     readall(stream, &mut ihaveopt)?;
     readall(stream, &mut hflags)?;
 
-    // Client flags (NBD_FLAG_C_FIXED_NEWSTYLE = 1)
     let cflags: u32 = 1u32.to_be();
     stream.write_all(&cflags.to_ne_bytes())?;
 
-    // Send NBD_OPT_EXPORT_NAME (opt=1, len=0 for default export)
     let opt_magic: u64 = 0x49484156454F5054u64.to_be();
     let opt_id: u32 = 1u32.to_be();
     let opt_len: u32 = 0u32.to_be();
@@ -94,8 +96,6 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     stream.write_all(&opt_id.to_ne_bytes())?;
     stream.write_all(&opt_len.to_ne_bytes())?;
 
-    // Server responds directly with export_size(8) + tflags(2) + pad(124)
-    // (no option reply header for NBD_OPT_EXPORT_NAME)
     let mut export_size_buf = [0u8; 8];
     let mut tflags_buf = [0u8; 2];
     let mut pad = [0u8; 124];
@@ -203,12 +203,9 @@ fn move_to_root_cgroup() {
 }
 
 fn main() {
-    env_logger::init();
-
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
         eprintln!("Usage: ublk-vsock <device> <vsock_port> [num_queues]");
-        eprintln!("  e.g. ublk-vsock /dev/ublkb0 1030");
         std::process::exit(1);
     }
     let vsock_port: u32 = args[2].parse().expect("invalid port");
@@ -216,27 +213,35 @@ fn main() {
 
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
 
-    info!("listening on vsock port {}", vsock_port);
+    msg!("listening on vsock port {}", vsock_port);
     let lsock = vsock_listen(vsock_port).expect("vsock listen failed");
 
-    info!("waiting for Host relay connection");
+    msg!("waiting for Host relay connection");
     let mut stream = vsock_accept(lsock).expect("vsock accept failed");
     unsafe { libc::close(lsock); }
 
-    info!("performing NBD handshake");
+    msg!("performing NBD handshake");
     let (export_size, _tflags) = nbd_handshake(&mut stream).expect("NBD handshake failed");
-    info!("export size: {} bytes ({} MB)", export_size, export_size / (1024 * 1024));
+    msg!("export size: {} bytes ({} MB)", export_size, export_size / (1024 * 1024));
 
     let conn: Arc<Mutex<UnixStream>> = Arc::new(Mutex::new(stream));
     let depth = 64u16;
 
-    let ctrl = UblkCtrlBuilder::default()
+    msg!("creating ublk device (nr_queues={}, depth={})", num_queues, depth);
+    let ctrl = match UblkCtrlBuilder::default()
         .name("bcvk")
         .nr_queues(num_queues)
         .depth(depth)
         .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
         .build()
-        .expect("ublk ctrl build failed");
+    {
+        Ok(c) => c,
+        Err(e) => {
+            msg!("ublk ctrl build FAILED: {}", e);
+            std::process::exit(1);
+        }
+    };
+    msg!("ublk ctrl created, dev_id={}", ctrl.dev_info().dev_id);
 
     let sz = export_size;
     let tgt_init = move |dev: &mut UblkDev| {
@@ -278,17 +283,20 @@ fn main() {
         });
     };
 
-    info!("starting ublk device");
+    msg!("starting ublk target (run_target)");
     let res = ctrl.run_target(tgt_init, q_fn, |ctrl| {
         let dev_id = ctrl.dev_info().dev_id;
-        info!("ublk device /dev/ublkb{} ready", dev_id);
+        msg!("/dev/ublkb{} ready", dev_id);
         sd_notify_ready();
         unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
         move_to_root_cgroup();
     });
 
-    if let Err(e) = res {
-        error!("ublk target failed: {}", e);
-        std::process::exit(1);
+    match res {
+        Ok(_) => msg!("ublk target exited normally"),
+        Err(e) => {
+            msg!("ublk target FAILED: {}", e);
+            std::process::exit(1);
+        }
     }
 }
