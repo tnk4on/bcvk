@@ -1,0 +1,20 @@
+[package]
+name = "ublk-vsock"
+version = "0.1.0"
+edition = "2021"
+description = "ublk block device daemon over AF_VSOCK with NBD backend"
+
+[[bin]]
+name = "ublk-vsock"
+path = "src/main.rs"
+
+[dependencies]
+libublk = "0.4"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
