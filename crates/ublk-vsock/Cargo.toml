@@ -10,11 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 libublk = "0.4"
-io-uring = "0.7"
 libc = "0.2"
-smol = "2.0"
-async-channel = "2.0"
-futures = "0.3"
 
 [profile.release]
 opt-level = "s"
