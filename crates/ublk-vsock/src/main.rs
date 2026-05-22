@@ -3,11 +3,12 @@ use libc::{
     SO_SNDBUF, SO_RCVBUF, VMADDR_CID_ANY,
 };
 use libublk::ctrl::UblkCtrlBuilder;
-use libublk::io::{BufDesc, UblkDev, UblkIOCtx, UblkQueue};
+use libublk::io::{BufDesc, BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{sys, UblkFlags, UblkIORes};
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 const NBD_REQUEST_MAGIC: u32 = 0x25609513;
@@ -44,12 +45,10 @@ fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
             &opt as *const _ as *const libc::c_void,
             std::mem::size_of_val(&opt) as u32,
         );
-
         let mut addr: sockaddr_vm = std::mem::zeroed();
         addr.svm_family = AF_VSOCK as u16;
         addr.svm_cid = VMADDR_CID_ANY;
         addr.svm_port = port;
-
         if bind(fd, &addr as *const _ as *const libc::sockaddr,
                 std::mem::size_of_val(&addr) as u32) < 0 {
             libc::close(fd);
@@ -105,7 +104,6 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
 
     let export_size = u64::from_be_bytes(export_size_buf);
     let tflags = u16::from_be_bytes(tflags_buf);
-
     Ok((export_size, tflags))
 }
 
@@ -123,7 +121,6 @@ fn nbd_read(conn: &Mutex<UnixStream>, offset: u64, buf: &mut [u8]) -> i32 {
     if stream.write_all(&req).is_err() {
         return -(libc::EIO as i32);
     }
-
     let mut reply = [0u8; 16];
     if readall(&mut stream, &mut reply).is_err() {
         return -(libc::EIO as i32);
@@ -152,7 +149,6 @@ fn nbd_write(conn: &Mutex<UnixStream>, offset: u64, buf: &[u8]) -> i32 {
     if stream.write_all(&req).is_err() || stream.write_all(buf).is_err() {
         return -(libc::EIO as i32);
     }
-
     let mut reply = [0u8; 16];
     if readall(&mut stream, &mut reply).is_err() {
         return -(libc::EIO as i32);
@@ -202,6 +198,45 @@ fn move_to_root_cgroup() {
     let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", format!("{}\n", pid));
 }
 
+fn q_handler(qid: u16, dev: &UblkDev, conn: Arc<Mutex<UnixStream>>) {
+    let bufs = Rc::new(dev.alloc_queue_io_bufs());
+    let bufs_ref = bufs.clone();
+
+    let io_handler = move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
+        let iod = q.get_iod(tag);
+        let op = iod.op_flags & 0xff;
+        let offset = iod.start_sector * 512;
+        let bytes = (iod.nr_sectors as usize) * 512;
+
+        let res = match op {
+            sys::UBLK_IO_OP_READ => {
+                let buf_ptr = bufs_ref[tag as usize].as_mut_ptr();
+                let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, bytes) };
+                nbd_read(&conn, offset, buf_slice)
+            }
+            sys::UBLK_IO_OP_WRITE => {
+                let buf_ptr = bufs_ref[tag as usize].as_mut_ptr();
+                let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes) };
+                nbd_write(&conn, offset, buf_slice)
+            }
+            _ => bytes as i32,
+        };
+
+        let _ = q.complete_io_cmd_unified(
+            tag,
+            BufDesc::Slice(bufs_ref[tag as usize].as_slice()),
+            Ok(UblkIORes::Result(res)),
+        );
+    };
+
+    let queue = UblkQueue::new(qid, dev)
+        .unwrap()
+        .submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs)))
+        .unwrap();
+
+    queue.wait_and_handle_io(io_handler);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
@@ -225,13 +260,12 @@ fn main() {
     msg!("export size: {} bytes ({} MB)", export_size, export_size / (1024 * 1024));
 
     let conn: Arc<Mutex<UnixStream>> = Arc::new(Mutex::new(stream));
-    let depth = 64u16;
 
-    msg!("creating ublk device (nr_queues={}, depth={})", num_queues, depth);
+    msg!("creating ublk device (nr_queues={}, depth=64)", num_queues);
     let ctrl = match UblkCtrlBuilder::default()
         .name("bcvk")
         .nr_queues(num_queues)
-        .depth(depth)
+        .depth(64u16)
         .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
         .build()
     {
@@ -249,41 +283,12 @@ fn main() {
         Ok(())
     };
 
-    let conn_for_q = conn.clone();
+    let conn_clone = conn.clone();
     let q_fn = move |qid: u16, dev: &UblkDev| {
-        let q = UblkQueue::new(qid, dev).unwrap();
-        let conn = conn_for_q.clone();
-        let buf_size = dev.dev_info.max_io_buf_bytes as usize;
-        let layout = std::alloc::Layout::from_size_align(buf_size, 4096).unwrap();
-        let buf_addr = unsafe { std::alloc::alloc(layout) };
-
-        q.wait_and_handle_io(move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
-            let iod = q.get_iod(tag);
-            let op = iod.op_flags & 0xff;
-            let offset = iod.start_sector * 512;
-            let len = (iod.nr_sectors as usize) * 512;
-
-            let res = match op {
-                sys::UBLK_IO_OP_READ => {
-                    let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_addr, len) };
-                    nbd_read(&conn, offset, buf_slice)
-                }
-                sys::UBLK_IO_OP_WRITE => {
-                    let buf_slice = unsafe { std::slice::from_raw_parts(buf_addr, len) };
-                    nbd_write(&conn, offset, buf_slice)
-                }
-                _ => 0,
-            };
-
-            let _ = q.complete_io_cmd_unified(
-                tag,
-                BufDesc::RawAddress(buf_addr as *const u8),
-                Ok(UblkIORes::Result(res)),
-            );
-        });
+        q_handler(qid, dev, conn_clone.clone());
     };
 
-    msg!("starting ublk target (run_target)");
+    msg!("starting ublk target");
     let res = ctrl.run_target(tgt_init, q_fn, |ctrl| {
         let dev_id = ctrl.dev_info().dev_id;
         msg!("/dev/ublkb{} ready", dev_id);
@@ -293,9 +298,9 @@ fn main() {
     });
 
     match res {
-        Ok(_) => msg!("ublk target exited normally"),
+        Ok(_) => msg!("exited normally"),
         Err(e) => {
-            msg!("ublk target FAILED: {}", e);
+            msg!("FAILED: {}", e);
             std::process::exit(1);
         }
     }
