@@ -473,7 +473,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
         // Relay connects to both VMs (Host-initiated, with retry for ephemeral VM)
         let _vsock_relay = crate::vsock_relay::VsockRelay::start(
-            vsock_port, &podman_vm_guid, &ephemeral_vm_guid
+            vsock_port, 1, &podman_vm_guid, &ephemeral_vm_guid
         ).await?;
         info!("vsock relay connected (port {})", vsock_port);
 
