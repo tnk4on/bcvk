@@ -425,7 +425,7 @@ VSOCK_PORT={vsock_port}\n\
 \n\
 if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
     echo 'bcvk: trying ublk-vsock (async) block device' > /dev/kmsg\n\
-    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
+    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 4 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
     sleep 10\n\
     if [ -b /dev/ublkb0 ]; then\n\
