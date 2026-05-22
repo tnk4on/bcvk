@@ -243,7 +243,7 @@ fn main() {
         std::process::exit(1);
     }
     let vsock_port: u32 = args[2].parse().expect("invalid port");
-    let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
 
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
 
