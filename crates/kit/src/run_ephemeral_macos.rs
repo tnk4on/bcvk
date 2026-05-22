@@ -280,7 +280,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 
     let mut cmdline_parts: Vec<&str> = vec![
-        "root=/dev/vda2",
+        "root=PARTLABEL=bcvk-root",
         "ro",
         "rootfstype=erofs",
         "console=tty0",

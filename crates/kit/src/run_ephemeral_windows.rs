@@ -391,7 +391,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
              localhost/bcvk-nbdkit:latest \
              nbdkit -fv --threads 4 --vsock -p 1030 -r /bcvk/libnbdkit_erofs_plugin.so \
              dir={merged} \
-             'cmdline=root=/dev/vda2 ro rootfstype=erofs'{ssh}",
+             'cmdline=root=PARTLABEL=bcvk-root ro rootfstype=erofs'{ssh}",
             run = podman_run,
             name = nbd_container_name,
             merged = merged_path,

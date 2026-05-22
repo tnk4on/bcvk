@@ -255,7 +255,7 @@ pub fn create_boot_vhdx(
 
     // grub.cfg
     let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
-         linux /boot/vmlinuz root=/dev/nbd0p2 rootfstype=erofs ro \
+         linux /boot/vmlinuz root=PARTLABEL=bcvk-root rootfstype=erofs ro \
          console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
          systemd.journald.storage=volatile\n  \
          initrd /boot/initramfs.img\n}";
