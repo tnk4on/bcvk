@@ -450,7 +450,7 @@ if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk ] && [ -e /dev/ublk-control
     export LD_LIBRARY_PATH=/usr/lib/bcvk:${{LD_LIBRARY_PATH:-}}\n\
     \n\
     # ublksrv: create NBD block device with vsock listen (host relay connects)\n\
-    ublk add -t nbd -q 1 --vsock-port $VSOCK_PORT 2>/dev/kmsg &\n\
+    ublk add -t nbd -q 1 -d 32 --vsock-port $VSOCK_PORT 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
     sleep 15\n\
     \n\
