@@ -407,19 +407,28 @@ insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null || true\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: ublk if available, NBD fallback
+    // Block device setup script: try ublk, fall back to NBD on failure
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ]; then\n\
-    echo 'bcvk: using ublk (io_uring) block device' > /dev/kmsg\n\
-    exec /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 2>/dev/kmsg\n\
-else\n\
-    echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
-    insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
-    exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n\
-fi\n",
+if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
+    echo 'bcvk: trying ublk (io_uring) block device' > /dev/kmsg\n\
+    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 2>/dev/kmsg &\n\
+    UBLK_PID=$!\n\
+    sleep 3\n\
+    if [ -b /dev/ublkb0 ]; then\n\
+        echo 'bcvk: ublk device created successfully' > /dev/kmsg\n\
+        wait $UBLK_PID\n\
+        exit $?\n\
+    fi\n\
+    echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
+    kill $UBLK_PID 2>/dev/null\n\
+    wait $UBLK_PID 2>/dev/null\n\
+fi\n\
+echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
+insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
+exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
         vsock_port = vsock_port
     );
     let b = NewcBuilder::new("usr/lib/bcvk/block-device-setup.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
