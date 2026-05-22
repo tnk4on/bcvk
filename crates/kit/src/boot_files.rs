@@ -201,7 +201,13 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
     let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
-    info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
+    // Also fetch libstdc++ for ublksrv (C++ binary)
+    let _ = ssh.ssh_cmd(&format!(
+        "cp {m}/usr/lib64/libstdc++.so.6.* /tmp/libstdcpp.so 2>/dev/null || true",
+        m = merged_path,
+    ));
+    let _ = ssh.scp_to_local("/tmp/libstdcpp.so", &cache_dir.join("libstdc++.so.6"));
+    info!("kernel modules + libstdc++: SCP complete");
 
     // Copy ublk-vsock binary from well-known location if available
     let ublk_vsock_src = dirs::data_local_dir()
@@ -354,9 +360,20 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         .join("bcvk");
     let ublksrv_files = [
         ("ublk", "usr/bin/ublk", 0o755u32),
+        ("ublk.nbd", "usr/bin/ublk.nbd", 0o755),
         ("libublksrv.so.0", "usr/lib/bcvk/libublksrv.so.0", 0o755),
         ("liburing.so.2", "usr/lib/bcvk/liburing.so.2", 0o755),
     ];
+    // Also include libstdc++ from cache_dir (extracted from bootc image)
+    let stdcpp_path = cache_dir.join("libstdc++.so.6");
+    if stdcpp_path.exists() {
+        let data = std::fs::read(&stdcpp_path)?;
+        let b = NewcBuilder::new("usr/lib/bcvk/libstdc++.so.6").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+        let mut w = b.write(&mut buf, data.len() as u32);
+        w.write_all(&data)?;
+        w.finish()?;
+        info!("included usr/lib/bcvk/libstdc++.so.6 ({} bytes) in initramfs", data.len());
+    }
     for &(name, cpio_path, mode) in &ublksrv_files {
         let src = bcvk_dir.join(name);
         if src.exists() {
@@ -423,37 +440,28 @@ fi\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: try ublksrv+socat, fall back to NBD
+    // Block device setup script: try ublksrv (vsock direct), fall back to NBD
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk ] && [ -e /dev/ublk-control ] && command -v socat >/dev/null 2>&1; then\n\
+if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk ] && [ -e /dev/ublk-control ]; then\n\
     echo 'bcvk: trying ublksrv (io_uring async) block device' > /dev/kmsg\n\
     export LD_LIBRARY_PATH=/usr/lib/bcvk:${{LD_LIBRARY_PATH:-}}\n\
     \n\
-    # socat: accept vsock from host relay, expose as unix socket\n\
-    SOCK=/tmp/nbd-vsock.sock\n\
-    rm -f $SOCK\n\
-    socat VSOCK-LISTEN:$VSOCK_PORT,reuseaddr,fork UNIX-LISTEN:$SOCK,reuseaddr,fork &\n\
-    SOCAT_PID=$!\n\
-    \n\
-    # Wait for socat to start listening and relay to connect\n\
-    sleep 5\n\
-    \n\
-    if [ -S $SOCK ] || true; then\n\
-        # ublksrv: create NBD block device over unix socket\n\
-        ublk add -t nbd -q 4 --unix $SOCK 2>/dev/kmsg\n\
-        sleep 3\n\
-    fi\n\
+    # ublksrv: create NBD block device with vsock listen (host relay connects)\n\
+    ublk add -t nbd -q 1 --vsock-port $VSOCK_PORT 2>/dev/kmsg &\n\
+    UBLK_PID=$!\n\
+    sleep 15\n\
     \n\
     if [ -b /dev/ublkb0 ]; then\n\
         echo 'bcvk: ublksrv device created successfully' > /dev/kmsg\n\
-        wait $SOCAT_PID\n\
+        wait $UBLK_PID\n\
         exit $?\n\
     fi\n\
     echo 'bcvk: ublksrv failed, falling back to NBD' > /dev/kmsg\n\
-    kill $SOCAT_PID 2>/dev/null\n\
+    kill $UBLK_PID 2>/dev/null\n\
+    wait $UBLK_PID 2>/dev/null\n\
 fi\n\
 echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
