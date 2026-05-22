@@ -203,6 +203,16 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
     info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
 
+    // Copy ublk-vsock binary from well-known location if available
+    let ublk_vsock_src = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
+        .join("bcvk").join("ublk-vsock");
+    if ublk_vsock_src.exists() {
+        let dest = cache_dir.join("ublk-vsock");
+        std::fs::copy(&ublk_vsock_src, &dest)?;
+        info!("copied ublk-vsock from {}", ublk_vsock_src.display());
+    }
+
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
     let initramfs = std::fs::read(cache_dir.join("initramfs.img"))?;
