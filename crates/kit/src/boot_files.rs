@@ -201,13 +201,7 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
     let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
-    // Also fetch libstdc++ for ublksrv (C++ binary)
-    let _ = ssh.ssh_cmd(&format!(
-        "cp {m}/usr/lib64/libstdc++.so.6.* /tmp/libstdcpp.so 2>/dev/null || true",
-        m = merged_path,
-    ));
-    let _ = ssh.scp_to_local("/tmp/libstdcpp.so", &cache_dir.join("libstdc++.so.6"));
-    info!("kernel modules + libstdc++: SCP complete");
+    info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
 
     // Copy ublk-vsock binary from well-known location if available
     let ublk_vsock_src = dirs::data_local_dir()
@@ -418,13 +412,13 @@ fi\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: try ublk-vsock (async), fall back to NBD
+    // Block device setup script: try ublk-vsock, fall back to NBD
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
 if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    echo 'bcvk: trying ublk-vsock (async) block device' > /dev/kmsg\n\
+    echo 'bcvk: trying ublk (io_uring) block device' > /dev/kmsg\n\
     /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 4 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
     sleep 10\n\
