@@ -57,18 +57,36 @@ impl PodmanSsh {
         } else {
             format!("sudo {}", cmd)
         };
-        let output = Command::new("ssh")
+        // Use temp files for stdout/stderr instead of pipes.
+        // Rust Command::output() with Stdio::piped() can hang on Windows because
+        // ssh.exe inherits pipe handles to background threads/helpers, so the
+        // parent-side pipe read never sees EOF after remote command exits.
+        let tmp_dir = std::env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let stdout_path = tmp_dir.join(format!("bcvk-ssh-{}.out", stamp));
+        let stderr_path = tmp_dir.join(format!("bcvk-ssh-{}.err", stamp));
+        let stdout_file = std::fs::File::create(&stdout_path)?;
+        let stderr_file = std::fs::File::create(&stderr_path)?;
+        let status = Command::new("ssh")
             .args(self.ssh_args())
             .arg(&self.user_host())
             .arg(&full_cmd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("ssh failed: {}\nstderr: {}", cmd, stderr.trim());
+            .stdin(Stdio::null())
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .status()?;
+        let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+        let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&stdout_path);
+        let _ = std::fs::remove_file(&stderr_path);
+        if !status.success() {
+            let stderr_str = String::from_utf8_lossy(&stderr);
+            bail!("ssh failed: {}\nstderr: {}", cmd, stderr_str.trim());
         }
-        Ok(output.stdout)
+        Ok(stdout)
     }
 
     fn scp_to_local(&self, remote_path: &str, local_path: &std::path::Path) -> Result<()> {
@@ -170,18 +188,17 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     ssh.scp_to_local(&initramfs_remote, &cache_dir.join("initramfs.img"))?;
     info!("initramfs: SCP complete");
 
-    // Fetch vsock kernel modules (decompress to /tmp since overlay is read-only)
+    // Fetch kernel modules (decompress to /tmp since overlay is read-only)
     let _ = ssh.ssh_cmd(&format!(
         "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko",
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko; \
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko",
         m = merged_path, k = kver,
     ));
     let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
-    // Fetch patched nbd.ko (built by run_ephemeral_windows in parallel)
-    let nbd_patched = format!("/var/tmp/bcvk/nbd-patched-{}.ko", kver);
-    let _ = ssh.scp_to_local(&nbd_patched, &cache_dir.join("nbd.ko"));
-    info!("vsock + nbd modules: SCP complete");
+    let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
+    info!("kernel modules (vsock, hv_sock, nbd): SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
@@ -317,7 +334,7 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // Include kernel modules in initramfs (nbd.ko is patched for AF_VSOCK)
+    // Include kernel modules in initramfs (standard nbd.ko, socketpair relay in nbd-vsock)
     for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
@@ -331,50 +348,64 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         }
     }
 
-    let setup = format!(
-        "#!/bin/bash\n\
-# Load patched nbd.ko (AF_VSOCK support)\n\
+    // Service 1: load kernel modules (oneshot, runs first)
+    let setup_modules = "\
+#!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
 for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
   sleep 1\n\
-done\n\
-\n\
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do\n\
-  /usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 1 2>/dev/kmsg && break\n\
-  sleep 2\n\
-done\n\
-sleep 1\n\
-blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
-echo 65536 > /sys/block/nbd0/queue/read_ahead_kb 2>/dev/null\n",
-        vsock_port = vsock_port
-    );
-    let b = NewcBuilder::new("usr/lib/bcvk/setup-nbd.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, setup.len() as u32);
-    w.write_all(setup.as_bytes())?;
+done\n";
+    let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, setup_modules.len() as u32);
+    w.write_all(setup_modules.as_bytes())?;
     w.finish()?;
 
-    let service =
+    let svc_modules =
         "[Unit]\n\
-         Description=Setup NBD vsock connection\n\
+         Description=Load bcvk kernel modules\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
-         Before=sysroot.mount initrd-root-device.target\n\
+         Before=bcvk-nbd-vsock.service\n\
          After=systemd-udevd.service systemd-modules-load.service\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
          RemainAfterExit=yes\n\
-         TimeoutStartSec=120\n\
-         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-nbd.sh\n";
-    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-nbd.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, service.len() as u32);
-    w.write_all(service.as_bytes())?;
+         TimeoutStartSec=30\n\
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-modules.sh\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-modules.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, svc_modules.len() as u32);
+    w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    let dropin = b"[Unit]\nWants=bcvk-setup-nbd.service\n";
+    // Service 2: nbd-vsock relay (notify, stays running)
+    let svc_nbd = format!(
+        "[Unit]\n\
+         Description=NBD vsock relay\n\
+         DefaultDependencies=no\n\
+         ConditionPathExists=/etc/initrd-release\n\
+         Before=sysroot.mount initrd-root-device.target\n\
+         After=bcvk-setup-modules.service\n\
+         Requires=bcvk-setup-modules.service\n\
+         \n\
+         [Service]\n\
+         Type=notify\n\
+         NotifyAccess=all\n\
+         KillMode=none\n\
+         TimeoutStartSec=120\n\
+         ExecStart=/bin/sh -c '/usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 1 2>/dev/kmsg'\n\
+         ExecStartPost=/usr/bin/bash -c 'sleep 1; blockdev --rereadpt /dev/nbd0 2>/dev/null; echo 65536 > /sys/block/nbd0/queue/read_ahead_kb 2>/dev/null'\n",
+        vsock_port = vsock_port
+    );
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-nbd-vsock.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, svc_nbd.len() as u32);
+    w.write_all(svc_nbd.as_bytes())?;
+    w.finish()?;
+
+    let dropin = b"[Unit]\nWants=bcvk-nbd-vsock.service\n";
     let b = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf").mode(0o644).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, dropin.len() as u32);
     w.write_all(dropin)?;

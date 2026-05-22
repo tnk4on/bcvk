@@ -145,7 +145,9 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk);
+    let erofs_regions = regions::consolidate_regions(
+        erofs::build_erofs_regions(&erofs_layout, &walk),
+    );
 
     // Discover boot files from dir
     let (kernel_path, initrd_path) = match find_kernel_dir(&state.dir) {

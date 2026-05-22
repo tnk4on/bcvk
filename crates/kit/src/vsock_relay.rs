@@ -1,7 +1,7 @@
 //! Hyper-V vsock relay: bridge hv_sock connections between two VMs.
 //!
-//! Accepts AF_VSOCK from ephemeral VM, dials AF_VSOCK to podman machine VM,
-//! then relays data bidirectionally using blocking I/O threads.
+//! Connects to both ephemeral VM and podman machine VM using Host-initiated
+//! AF_HYPERV connections (fast path: ~1 GB/s), then relays data bidirectionally.
 
 #[cfg(target_os = "windows")]
 use color_eyre::Result;
@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 #[cfg(target_os = "windows")]
 use tokio::task::JoinHandle;
 #[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[cfg(target_os = "windows")]
 use std::io;
@@ -64,11 +64,6 @@ fn vsock_service_id(port: u32) -> HvSockGuid {
 }
 
 #[cfg(target_os = "windows")]
-fn wildcard_vm_id() -> HvSockGuid {
-    HvSockGuid { data1: 0, data2: 0, data3: 0, data4: [0; 8] }
-}
-
-#[cfg(target_os = "windows")]
 fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 {
@@ -89,6 +84,18 @@ fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
 }
 
 #[cfg(target_os = "windows")]
+impl HvSockGuid {
+    fn clone(&self) -> Self {
+        HvSockGuid {
+            data1: self.data1,
+            data2: self.data2,
+            data3: self.data3,
+            data4: self.data4,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct VsockRelay {
     stop: Arc<Notify>,
@@ -97,60 +104,43 @@ pub struct VsockRelay {
 
 #[cfg(target_os = "windows")]
 impl VsockRelay {
-    pub async fn start(vsock_port: u32, podman_vm_guid: &str) -> Result<Self> {
-        let target_guid = parse_vm_guid(podman_vm_guid)?;
+    pub async fn start(
+        vsock_port: u32,
+        podman_vm_guid: &str,
+        ephemeral_vm_guid: &str,
+    ) -> Result<Self> {
+        let podman_guid = parse_vm_guid(podman_vm_guid)?;
+        let ephemeral_guid = parse_vm_guid(ephemeral_vm_guid)?;
         let stop = Arc::new(Notify::new());
 
-        let listen_sock = {
-            let mut sock = unsafe { hvsock_listen(vsock_port) };
-            for attempt in 0..5 {
-                if sock.is_ok() { break; }
-                debug!("vsock relay bind retry {} (port {} busy)", attempt + 1, vsock_port);
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                sock = unsafe { hvsock_listen(vsock_port) };
-            }
-            sock?
-        };
-        info!("vsock relay listening on port {}", vsock_port);
+        info!("vsock relay: connecting to podman machine (port {})", vsock_port);
+        let podman_sock = unsafe { hvsock_connect(&podman_guid, vsock_port)? };
+        info!("vsock relay: connected to podman machine");
+
+        info!("vsock relay: connecting to ephemeral VM (port {}, with retry)", vsock_port);
+        let vm_sock = unsafe { hvsock_connect_retry(&ephemeral_guid, vsock_port, 30, 2)? };
+        info!("vsock relay: connected to ephemeral VM");
 
         let stop_clone = stop.clone();
         let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = stop_clone.notified() => break,
-                    result = tokio::task::spawn_blocking({
-                        let ls = listen_sock;
-                        move || unsafe { hvsock_accept(ls) }
-                    }) => {
-                        match result {
-                            Ok(Ok(client_sock)) => {
-                                info!("vsock relay: accepted connection from ephemeral VM");
-                                let tg = HvSockGuid {
-                                    data1: target_guid.data1,
-                                    data2: target_guid.data2,
-                                    data3: target_guid.data3,
-                                    data4: target_guid.data4,
-                                };
-                                let port = vsock_port;
-                                std::thread::spawn(move || {
-                                    if let Err(e) = relay_connection(client_sock, &tg, port) {
-                                        warn!("vsock relay error: {}", e);
-                                    }
-                                });
-                            }
-                            Ok(Err(e)) => {
-                                warn!("vsock relay accept error: {}", e);
-                                break;
-                            }
-                            Err(e) => {
-                                warn!("vsock relay task error: {}", e);
-                                break;
-                            }
-                        }
+            let ps = podman_sock;
+            let vs = vm_sock;
+
+            let relay_task = tokio::task::spawn_blocking(move || {
+                relay_connection(vs, ps);
+            });
+
+            tokio::select! {
+                _ = stop_clone.notified() => {
+                    unsafe {
+                        closesocket(podman_sock);
+                        closesocket(vm_sock);
                     }
                 }
+                _ = relay_task => {
+                    debug!("vsock relay: connection finished");
+                }
             }
-            unsafe { closesocket(listen_sock); }
         });
 
         Ok(Self { stop, handle })
@@ -171,27 +161,23 @@ impl Drop for VsockRelay {
 }
 
 #[cfg(target_os = "windows")]
-fn relay_connection(client_sock: RawSocket, target_guid: &HvSockGuid, port: u32) -> Result<()> {
-    let dial_sock = unsafe { hvsock_connect(target_guid, port)? };
-    info!("vsock relay: connected to podman machine");
+fn relay_connection(sock_a: RawSocket, sock_b: RawSocket) {
+    let sa = sock_a;
+    let sb = sock_b;
+    let t1 = std::thread::spawn(move || relay_data(sa, sb));
 
-    let cs = client_sock;
-    let ds = dial_sock;
-    let t1 = std::thread::spawn(move || relay_data(cs, ds));
-
-    let cs2 = client_sock;
-    let ds2 = dial_sock;
-    let t2 = std::thread::spawn(move || relay_data(ds2, cs2));
+    let sa2 = sock_a;
+    let sb2 = sock_b;
+    let t2 = std::thread::spawn(move || relay_data(sb2, sa2));
 
     let _ = t1.join();
     let _ = t2.join();
 
     unsafe {
-        closesocket(client_sock);
-        closesocket(dial_sock);
+        closesocket(sock_a);
+        closesocket(sock_b);
     }
     debug!("vsock relay: connection closed");
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -224,10 +210,8 @@ fn relay_data(from: RawSocket, to: RawSocket) {
 #[cfg(target_os = "windows")]
 extern "system" {
     fn socket(af: i32, sock_type: i32, protocol: i32) -> RawSocket;
-    fn bind(s: RawSocket, name: *const u8, namelen: i32) -> i32;
-    fn listen(s: RawSocket, backlog: i32) -> i32;
-    fn accept(s: RawSocket, addr: *mut u8, addrlen: *mut i32) -> RawSocket;
     fn connect(s: RawSocket, name: *const u8, namelen: i32) -> i32;
+    fn setsockopt(s: RawSocket, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
     fn closesocket(s: RawSocket) -> i32;
     fn WSARecv(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_recv: *mut u32, flags: *mut u32, overlapped: *mut u8, completion: *mut u8) -> i32;
     fn WSASend(s: RawSocket, bufs: *mut WsaBuf, buf_count: u32, bytes_sent: *mut u32, flags: u32, overlapped: *mut u8, completion: *mut u8) -> i32;
@@ -247,48 +231,6 @@ fn ensure_wsa() {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn hvsock_listen(port: u32) -> Result<RawSocket> {
-    ensure_wsa();
-    let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
-    if sock == u64::MAX as RawSocket {
-        return Err(io::Error::from_raw_os_error(WSAGetLastError()).into());
-    }
-
-    let addr = SockaddrHv {
-        family: AF_HYPERV as u16,
-        reserved: 0,
-        vm_id: wildcard_vm_id(),
-        service_id: vsock_service_id(port),
-    };
-
-    if bind(sock, &addr as *const SockaddrHv as *const u8,
-            mem::size_of::<SockaddrHv>() as i32) != 0 {
-        let err = WSAGetLastError();
-        closesocket(sock);
-        return Err(io::Error::from_raw_os_error(err).into());
-    }
-
-    if listen(sock, 16) != 0 {
-        let err = WSAGetLastError();
-        closesocket(sock);
-        return Err(io::Error::from_raw_os_error(err).into());
-    }
-
-    Ok(sock)
-}
-
-#[cfg(target_os = "windows")]
-unsafe fn hvsock_accept(listen_sock: RawSocket) -> Result<RawSocket> {
-    let mut addrlen = mem::size_of::<SockaddrHv>() as i32;
-    let mut addr = mem::zeroed::<SockaddrHv>();
-    let sock = accept(listen_sock, &mut addr as *mut SockaddrHv as *mut u8, &mut addrlen);
-    if sock == u64::MAX as RawSocket {
-        return Err(io::Error::from_raw_os_error(WSAGetLastError()).into());
-    }
-    Ok(sock)
-}
-
-#[cfg(target_os = "windows")]
 unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
     ensure_wsa();
     let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
@@ -299,12 +241,7 @@ unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
     let addr = SockaddrHv {
         family: AF_HYPERV as u16,
         reserved: 0,
-        vm_id: HvSockGuid {
-            data1: vm_guid.data1,
-            data2: vm_guid.data2,
-            data3: vm_guid.data3,
-            data4: vm_guid.data4,
-        },
+        vm_id: vm_guid.clone(),
         service_id: vsock_service_id(port),
     };
 
@@ -315,5 +252,35 @@ unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
         return Err(io::Error::from_raw_os_error(err).into());
     }
 
+    let sockbuf: i32 = 1024 * 1024;
+    setsockopt(sock, 0xFFFF, 0x1001, &sockbuf as *const i32 as *const u8, 4); // SO_SNDBUF
+    setsockopt(sock, 0xFFFF, 0x1002, &sockbuf as *const i32 as *const u8, 4); // SO_RCVBUF
+
     Ok(sock)
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn hvsock_connect_retry(
+    vm_guid: &HvSockGuid,
+    port: u32,
+    max_attempts: u32,
+    interval_secs: u64,
+) -> Result<RawSocket> {
+    for attempt in 1..=max_attempts {
+        match hvsock_connect(vm_guid, port) {
+            Ok(sock) => return Ok(sock),
+            Err(e) => {
+                if attempt == max_attempts {
+                    return Err(color_eyre::eyre::eyre!(
+                        "vsock relay: failed to connect to ephemeral VM after {} attempts: {}",
+                        max_attempts, e
+                    ));
+                }
+                debug!("vsock relay: connect attempt {}/{} failed ({}), retrying in {}s",
+                    attempt, max_attempts, e, interval_secs);
+                std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+            }
+        }
+    }
+    unreachable!()
 }

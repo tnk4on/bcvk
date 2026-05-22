@@ -258,6 +258,28 @@ pub fn get_vm_guid(vm_name: &str) -> Result<String> {
 }
 
 #[cfg(target_os = "windows")]
+pub fn get_wsl_vm_guid(_machine_name: &str) -> Result<String> {
+    // WSL2 VMs are HCS utility VMs, invisible to Get-VM.
+    // Use hcsdiag to find the WSL VM GUID.
+    let output = Command::new("hcsdiag")
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.contains("WSL") && i > 0 {
+            let guid = lines[i - 1].trim().to_string();
+            if guid.len() == 36 && guid.contains('-') {
+                return Ok(guid);
+            }
+        }
+    }
+    bail!("could not find WSL2 VM via hcsdiag. Ensure podman machine (WSL2) is running.");
+}
+
+#[cfg(target_os = "windows")]
 pub fn register_vsock_service(port: u32) -> Result<()> {
     let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
     powershell_ignore_error(&format!(
@@ -270,12 +292,9 @@ pub fn register_vsock_service(port: u32) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn unregister_vsock_service(port: u32) -> Result<()> {
-    let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
-    powershell_ignore_error(&format!(
-        "Remove-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\{}' -Force -ErrorAction SilentlyContinue",
-        guid
-    ));
-    debug!("unregistered vsock service GUID: {}", guid);
+pub fn unregister_vsock_service(_port: u32) -> Result<()> {
+    // GUID is kept permanently. Deleting it caused re-registration failures
+    // because powershell_ignore_error silently swallowed HKLM write errors.
+    // The key only permits vsock on one port — no cleanup needed.
     Ok(())
 }
