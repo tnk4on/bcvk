@@ -3,13 +3,16 @@ use libc::{
     SO_SNDBUF, SO_RCVBUF, VMADDR_CID_ANY,
 };
 use libublk::ctrl::UblkCtrlBuilder;
-use libublk::io::{UblkDev, UblkQueue};
-use libublk::{sys, BufDesc, UblkFlags, UblkIORes};
+use libublk::io::{BufDesc, BufDescList, UblkDev, UblkIOCtx, UblkQueue};
+use libublk::{sys, UblkError, UblkFlags, UblkIORes};
+use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 
 const NBD_REQUEST_MAGIC: u32 = 0x25609513;
 const NBD_CMD_READ: u16 = 0;
@@ -76,10 +79,8 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     readall(stream, &mut magic)?;
     readall(stream, &mut ihaveopt)?;
     readall(stream, &mut hflags)?;
-    let cflags: u32 = 1u32.to_be();
-    stream.write_all(&cflags.to_ne_bytes())?;
-    let opt_magic: u64 = 0x49484156454F5054u64.to_be();
-    stream.write_all(&opt_magic.to_ne_bytes())?;
+    stream.write_all(&1u32.to_be().to_ne_bytes())?;
+    stream.write_all(&0x49484156454F5054u64.to_be().to_ne_bytes())?;
     stream.write_all(&1u32.to_be().to_ne_bytes())?;
     stream.write_all(&0u32.to_be().to_ne_bytes())?;
     let mut sz = [0u8; 8];
@@ -91,7 +92,8 @@ fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
     Ok((u64::from_be_bytes(sz), u16::from_be_bytes(tf)))
 }
 
-fn nbd_read(stream: &mut UnixStream, offset: u64, buf: &mut [u8]) -> i32 {
+// Synchronous per-queue NBD read/write (same as before, for fallback/comparison)
+fn nbd_read_sync(stream: &mut UnixStream, offset: u64, buf: &mut [u8]) -> i32 {
     let len = buf.len();
     let mut req = [0u8; 28];
     req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
@@ -106,7 +108,7 @@ fn nbd_read(stream: &mut UnixStream, offset: u64, buf: &mut [u8]) -> i32 {
     len as i32
 }
 
-fn nbd_write(stream: &mut UnixStream, offset: u64, buf: &[u8]) -> i32 {
+fn nbd_write_sync(stream: &mut UnixStream, offset: u64, buf: &[u8]) -> i32 {
     let len = buf.len();
     let mut req = [0u8; 28];
     req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
@@ -156,11 +158,12 @@ fn move_to_root_cgroup() {
     let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", format!("{}\n", std::process::id()));
 }
 
-fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
+// Synchronous handler (current working implementation)
+fn q_handler_sync(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
     let bufs = Rc::new(dev.alloc_queue_io_bufs());
     let bufs_ref = bufs.clone();
 
-    let io_handler = move |q: &UblkQueue, tag: u16, _io: &libublk::io::UblkIOCtx| {
+    let io_handler = move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
         let iod = q.get_iod(tag);
         let op = iod.op_flags & 0xff;
         let offset = iod.start_sector * 512;
@@ -170,12 +173,12 @@ fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
             sys::UBLK_IO_OP_READ => {
                 let buf_ptr = bufs_ref[tag as usize].as_mut_ptr();
                 let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, bytes) };
-                nbd_read(&mut stream, offset, buf_slice)
+                nbd_read_sync(&mut stream, offset, buf_slice)
             }
             sys::UBLK_IO_OP_WRITE => {
                 let buf_ptr = bufs_ref[tag as usize].as_mut_ptr();
                 let buf_slice = unsafe { std::slice::from_raw_parts(buf_ptr, bytes) };
-                nbd_write(&mut stream, offset, buf_slice)
+                nbd_write_sync(&mut stream, offset, buf_slice)
             }
             _ => bytes as i32,
         };
@@ -187,7 +190,7 @@ fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
 
     let queue = UblkQueue::new(qid, dev)
         .unwrap()
-        .submit_fetch_commands_unified(libublk::io::BufDescList::Slices(Some(&bufs)))
+        .submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs)))
         .unwrap();
 
     queue.wait_and_handle_io(io_handler);
@@ -237,7 +240,7 @@ fn main() {
     let conns = connections.clone();
     let q_fn = move |qid: u16, dev: &UblkDev| {
         let (stream, _) = conns.lock().unwrap().remove(0);
-        q_handler(qid, dev, stream);
+        q_handler_sync(qid, dev, stream);
     };
 
     let nq = num_queues;
