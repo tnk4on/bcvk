@@ -118,33 +118,56 @@ impl VsockRelay {
         let stop = Arc::new(Notify::new());
         let mut handles = Vec::new();
 
+        // Connect all relay pairs in parallel (each in its own blocking thread)
+        let mut connect_handles = Vec::new();
         for i in 0..num_connections {
-            info!("vsock relay[{}]: connecting to podman machine (port {})", i, vsock_port);
-            let podman_sock = unsafe { hvsock_connect(&podman_guid, vsock_port)? };
-
-            info!("vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)", i, vsock_port);
-            let vm_sock = unsafe { hvsock_connect_retry(&ephemeral_guid, vsock_port, 30, 2)? };
-
-            info!("vsock relay[{}]: connected both sides", i);
-
+            let pod_g = podman_guid.clone();
+            let eph_g = ephemeral_guid.clone();
             let stop_clone = stop.clone();
-            let idx = i;
-            handles.push(tokio::spawn(async move {
-                let relay_task = tokio::task::spawn_blocking(move || {
-                    relay_one_connection(vm_sock, podman_sock);
-                });
-                tokio::select! {
-                    _ = stop_clone.notified() => {
-                        debug!("vsock relay[{}]: stop requested", idx);
+            connect_handles.push(tokio::task::spawn_blocking(move || -> Option<JoinHandle<()>> {
+                info!("vsock relay[{}]: connecting to podman machine (port {})", i, vsock_port);
+                let podman_sock = match unsafe { hvsock_connect(&pod_g, vsock_port) } {
+                    Ok(s) => s,
+                    Err(e) => {
+                        info!("vsock relay[{}]: podman connect failed: {}", i, e);
+                        return None;
                     }
-                    _ = relay_task => {
-                        debug!("vsock relay[{}]: connection finished", idx);
+                };
+                info!("vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)", i, vsock_port);
+                let vm_sock = match unsafe { hvsock_connect_retry(&eph_g, vsock_port, 60, 2) } {
+                    Ok(s) => s,
+                    Err(e) => {
+                        info!("vsock relay[{}]: VM connect failed: {}", i, e);
+                        unsafe { closesocket(podman_sock); }
+                        return None;
                     }
-                }
+                };
+                info!("vsock relay[{}]: connected both sides", i);
+                let idx = i;
+                let sc = stop_clone;
+                Some(tokio::spawn(async move {
+                    let relay_task = tokio::task::spawn_blocking(move || {
+                        relay_one_connection(vm_sock, podman_sock);
+                    });
+                    tokio::select! {
+                        _ = sc.notified() => {
+                            debug!("vsock relay[{}]: stop requested", idx);
+                        }
+                        _ = relay_task => {
+                            debug!("vsock relay[{}]: connection finished", idx);
+                        }
+                    }
+                }))
             }));
         }
 
-        info!("vsock relay: {} connections established", num_connections);
+        for ch in connect_handles {
+            if let Ok(Some(h)) = ch.await {
+                handles.push(h);
+            }
+        }
+
+        info!("vsock relay: {} connections established", handles.len());
 
         Ok(Self { stop, handles })
     }
