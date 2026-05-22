@@ -348,17 +348,27 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // ublk-vsock binary (included if available in cache_dir)
-    let ublk_vsock_path = cache_dir.join("ublk-vsock");
-    let has_ublk_binary = ublk_vsock_path.exists();
-    if has_ublk_binary {
-        let ublk_data = std::fs::read(&ublk_vsock_path)?;
-        let b = NewcBuilder::new("usr/bin/ublk-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-        let mut w = b.write(&mut buf, ublk_data.len() as u32);
-        w.write_all(&ublk_data)?;
-        w.finish()?;
-        info!("included ublk-vsock ({} bytes) in initramfs", ublk_data.len());
+    // ublksrv binaries (ublk + libublksrv.so + liburing.so) from well-known path
+    let bcvk_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
+        .join("bcvk");
+    let ublksrv_files = [
+        ("ublk", "usr/bin/ublk", 0o755u32),
+        ("libublksrv.so.0", "usr/lib/bcvk/libublksrv.so.0", 0o755),
+        ("liburing.so.2", "usr/lib/bcvk/liburing.so.2", 0o755),
+    ];
+    for &(name, cpio_path, mode) in &ublksrv_files {
+        let src = bcvk_dir.join(name);
+        if src.exists() {
+            let data = std::fs::read(&src)?;
+            let b = NewcBuilder::new(cpio_path).mode(mode).set_mode_file_type(ModeFileType::Regular);
+            let mut w = b.write(&mut buf, data.len() as u32);
+            w.write_all(&data)?;
+            w.finish()?;
+            info!("included {} ({} bytes) in initramfs", cpio_path, data.len());
+        }
     }
+    let has_ublksrv = bcvk_dir.join("ublk").exists();
 
     // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko (always), ublk_drv.ko (if available)
     for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
@@ -413,24 +423,37 @@ fi\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: try ublk, fall back to NBD on failure
+    // Block device setup script: try ublksrv+socat, fall back to NBD
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    echo 'bcvk: trying ublk (io_uring) block device' > /dev/kmsg\n\
-    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 4 2>/dev/kmsg &\n\
-    UBLK_PID=$!\n\
-    sleep 10\n\
+if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk ] && [ -e /dev/ublk-control ] && command -v socat >/dev/null 2>&1; then\n\
+    echo 'bcvk: trying ublksrv (io_uring async) block device' > /dev/kmsg\n\
+    export LD_LIBRARY_PATH=/usr/lib/bcvk:${{LD_LIBRARY_PATH:-}}\n\
+    \n\
+    # socat: accept vsock from host relay, expose as unix socket\n\
+    SOCK=/tmp/nbd-vsock.sock\n\
+    rm -f $SOCK\n\
+    socat VSOCK-LISTEN:$VSOCK_PORT,reuseaddr,fork UNIX-LISTEN:$SOCK,reuseaddr,fork &\n\
+    SOCAT_PID=$!\n\
+    \n\
+    # Wait for socat to start listening and relay to connect\n\
+    sleep 5\n\
+    \n\
+    if [ -S $SOCK ] || true; then\n\
+        # ublksrv: create NBD block device over unix socket\n\
+        ublk add -t nbd -q 4 --unix $SOCK 2>/dev/kmsg\n\
+        sleep 3\n\
+    fi\n\
+    \n\
     if [ -b /dev/ublkb0 ]; then\n\
-        echo 'bcvk: ublk device created successfully' > /dev/kmsg\n\
-        wait $UBLK_PID\n\
+        echo 'bcvk: ublksrv device created successfully' > /dev/kmsg\n\
+        wait $SOCAT_PID\n\
         exit $?\n\
     fi\n\
-    echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
-    kill $UBLK_PID 2>/dev/null\n\
-    wait $UBLK_PID 2>/dev/null\n\
+    echo 'bcvk: ublksrv failed, falling back to NBD' > /dev/kmsg\n\
+    kill $SOCAT_PID 2>/dev/null\n\
 fi\n\
 echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
