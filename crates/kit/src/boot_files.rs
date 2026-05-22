@@ -16,6 +16,7 @@ use tracing::info;
 const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 
 
+
 #[cfg(target_os = "windows")]
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
@@ -192,13 +193,15 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let _ = ssh.ssh_cmd(&format!(
         "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
          xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko",
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko; \
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/ublk_drv.ko.xz > /tmp/ublk_drv.ko 2>/dev/null || true",
         m = merged_path, k = kver,
     ));
     let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
-    info!("kernel modules (vsock, hv_sock, nbd): SCP complete");
+    let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
+    info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
@@ -329,13 +332,26 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         b.write(&mut buf, 0).finish()?;
     }
 
+    // nbd-vsock binary (always included as NBD fallback)
     let b = NewcBuilder::new("usr/bin/nbd-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, NBD_VSOCK_BIN.len() as u32);
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // Include kernel modules in initramfs (standard nbd.ko, socketpair relay in nbd-vsock)
-    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko"] {
+    // ublk-vsock binary (included if available in cache_dir)
+    let ublk_vsock_path = cache_dir.join("ublk-vsock");
+    let has_ublk_binary = ublk_vsock_path.exists();
+    if has_ublk_binary {
+        let ublk_data = std::fs::read(&ublk_vsock_path)?;
+        let b = NewcBuilder::new("usr/bin/ublk-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+        let mut w = b.write(&mut buf, ublk_data.len() as u32);
+        w.write_all(&ublk_data)?;
+        w.finish()?;
+        info!("included ublk-vsock ({} bytes) in initramfs", ublk_data.len());
+    }
+
+    // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko (always), ublk_drv.ko (if available)
+    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
@@ -348,16 +364,16 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         }
     }
 
-    // Service 1: load kernel modules (oneshot, runs first)
+    // Module loading script: load vsock + hv_sock (required), try ublk_drv (optional)
     let setup_modules = "\
 #!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
-insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
 for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
   sleep 1\n\
-done\n";
+done\n\
+insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null || true\n";
     let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup_modules.len() as u32);
     w.write_all(setup_modules.as_bytes())?;
@@ -368,7 +384,7 @@ done\n";
          Description=Load bcvk kernel modules\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
-         Before=bcvk-nbd-vsock.service\n\
+         Before=bcvk-block-device.service\n\
          After=systemd-udevd.service systemd-modules-load.service\n\
          \n\
          [Service]\n\
@@ -381,10 +397,46 @@ done\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Service 2: nbd-vsock relay (notify, stays running)
-    let svc_nbd = format!(
+    // Block device setup script: ublk if available, NBD fallback
+    let block_device_script = format!("\
+#!/bin/bash\n\
+VSOCK_PORT={vsock_port}\n\
+\n\
+if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ]; then\n\
+    echo 'bcvk: using ublk (io_uring) block device' > /dev/kmsg\n\
+    exec /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 2>/dev/kmsg\n\
+else\n\
+    echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
+    insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
+    exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n\
+fi\n",
+        vsock_port = vsock_port
+    );
+    let b = NewcBuilder::new("usr/lib/bcvk/block-device-setup.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, block_device_script.len() as u32);
+    w.write_all(block_device_script.as_bytes())?;
+    w.finish()?;
+
+    // ExecStartPost script: reread partition table on whichever device was created
+    let post_script = "\
+#!/bin/bash\n\
+sleep 1\n\
+if [ -b /dev/ublkb0 ]; then\n\
+    DEV=ublkb0\n\
+else\n\
+    DEV=nbd0\n\
+fi\n\
+blockdev --rereadpt /dev/$DEV 2>/dev/null\n\
+echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
+    let b = NewcBuilder::new("usr/lib/bcvk/block-device-post.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, post_script.len() as u32);
+    w.write_all(post_script.as_bytes())?;
+    w.finish()?;
+
+    // Block device service (replaces bcvk-nbd-vsock.service)
+    let svc_block =
         "[Unit]\n\
-         Description=NBD vsock relay\n\
+         Description=bcvk block device setup\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
          Before=sysroot.mount initrd-root-device.target\n\
@@ -396,16 +448,14 @@ done\n";
          NotifyAccess=all\n\
          KillMode=none\n\
          TimeoutStartSec=120\n\
-         ExecStart=/bin/sh -c '/usr/bin/nbd-vsock /dev/nbd0 {vsock_port} 1 2>/dev/kmsg'\n\
-         ExecStartPost=/usr/bin/bash -c 'sleep 1; blockdev --rereadpt /dev/nbd0 2>/dev/null; echo 65536 > /sys/block/nbd0/queue/read_ahead_kb 2>/dev/null'\n",
-        vsock_port = vsock_port
-    );
-    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-nbd-vsock.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, svc_nbd.len() as u32);
-    w.write_all(svc_nbd.as_bytes())?;
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/block-device-setup.sh\n\
+         ExecStartPost=/usr/bin/bash /usr/lib/bcvk/block-device-post.sh\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-block-device.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut buf, svc_block.len() as u32);
+    w.write_all(svc_block.as_bytes())?;
     w.finish()?;
 
-    let dropin = b"[Unit]\nWants=bcvk-nbd-vsock.service\n";
+    let dropin = b"[Unit]\nWants=bcvk-block-device.service\n";
     let b = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf").mode(0o644).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, dropin.len() as u32);
     w.write_all(dropin)?;
