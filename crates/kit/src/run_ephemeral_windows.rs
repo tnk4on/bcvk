@@ -401,15 +401,20 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let run_cmd = if rootful { "sudo podman" } else { "podman" }.to_string();
         std::thread::spawn(move || -> Result<Vec<u8>> {
             let result = ps.ssh_cmd(&nbdkit_script)?;
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let check = ps.ssh_cmd(&format!(
-                "{} ps --filter name={} --format '{{{{.Status}}}}'",
-                run_cmd, container_name
-            ));
-            match check {
-                Ok(out) if String::from_utf8_lossy(&out).contains("Up") => Ok(result),
-                _ => bail!("nbdkit container '{}' failed to start. Check EROFS plugin and image mount.", container_name),
+            // Quick check: poll container status (200ms intervals, max 5s)
+            for _ in 0..25 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let check = ps.ssh_cmd(&format!(
+                    "{} ps --filter name={} --format '{{{{.Status}}}}'",
+                    run_cmd, container_name
+                ));
+                if let Ok(out) = check {
+                    if String::from_utf8_lossy(&out).contains("Up") {
+                        return Ok(result);
+                    }
+                }
             }
+            bail!("nbdkit container '{}' failed to start. Check EROFS plugin and image mount.", container_name)
         })
     };
 
