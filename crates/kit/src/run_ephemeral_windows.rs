@@ -256,14 +256,27 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let machine = crate::run_ephemeral_windows::detect_machine_name()?;
     info!("podman machine: {}", machine);
 
-    // rootful check: podman machine inspect (no SSH needed)
-    let rootful = {
-        let out = Command::new("podman")
-            .args(["machine", "inspect", &machine])
-            .stdout(Stdio::piped()).stderr(Stdio::null())
-            .output()?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        stdout.contains("\"Rootful\": true") || stdout.contains("\"Rootful\":true")
+    // podman machine inspect (rootful + SSH port/key in one call)
+    let inspect_out = Command::new("podman")
+        .args(["machine", "inspect", &machine])
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .output()?;
+    let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
+    let rootful = inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
+    let pm_ssh_port = inspect_json.lines()
+        .find(|l| l.contains("\"Port\""))
+        .and_then(|l| l.trim().trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+        .unwrap_or(22);
+    let pm_identity = inspect_json.lines()
+        .find(|l| l.contains("\"IdentityPath\""))
+        .map(|l| l.split('"').nth(3).unwrap_or("").to_string())
+        .unwrap_or_default();
+    info!("Podman Machine SSH: port={}, key={}", pm_ssh_port, pm_identity);
+
+    let podman_ssh = boot_files::PodmanSsh {
+        port: pm_ssh_port,
+        key: pm_identity.clone(),
+        rootful,
     };
 
     let vm_name_suffix = opts.name.clone().unwrap_or_else(|| {
@@ -274,77 +287,111 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     });
     let vm_name = format!("{}{}", VM_PREFIX, vm_name_suffix);
     let name = vm_name_suffix.clone();
-
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
-
-    // SSH key
-    let base_dir = ephemeral_base_dir();
-    std::fs::create_dir_all(&base_dir)?;
-    let ssh_key_path = base_dir.join(format!("{}-key", name));
-    let ssh_pubkey = if opts.ssh_keygen || !opts.execute.is_empty() {
-        let _ = std::fs::remove_file(&ssh_key_path);
-        let _ = std::fs::remove_file(ssh_key_path.with_extension("pub"));
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&ssh_key_path)
-            .args(["-N", "", "-q"])
-            .status()?;
-        if !status.success() {
-            bail!("ssh-keygen failed");
-        }
-        std::fs::read_to_string(ssh_key_path.with_extension("pub"))?
-    } else {
-        String::new()
-    };
-
-    // Ensure image exists and get digest for caching
-    let digest_short = boot_files::ensure_image_and_get_digest(&opts.image)?;
-
     let vsock_port: u32 = 1030;
     let nbd_container_name = format!("bcvk-nbd-{}", name);
+    let switch_name = "bcvk";
+    let host_ip = "10.0.0.1";
+    let client_ip = "10.0.0.100";
+    let base_dir = ephemeral_base_dir();
+    std::fs::create_dir_all(&base_dir)?;
 
-    // Register vsock service GUID in Windows registry
-    hyperv::register_vsock_service(vsock_port)?;
+    // === Phase 0: All independent tasks in parallel with image mount ===
 
-    // Detect podman machine backend and get VM GUID
-    let vmtype = detect_podman_vmtype()?;
-    info!("podman machine VM type: {}", vmtype);
-    let podman_vm_guid = match vmtype.as_str() {
-        "wsl" => hyperv::get_wsl_vm_guid(&machine)?,
-        "hyperv" => hyperv::get_vm_guid(&machine)?,
-        other => bail!("unsupported podman machine VM type: {} (expected 'wsl' or 'hyperv')", other),
+    // A1. ssh-keygen (local, ~0.2s)
+    let ssh_key_path = base_dir.join(format!("{}-key", name));
+    let need_ssh = opts.ssh_keygen || !opts.execute.is_empty();
+    let ssh_key_path_clone = ssh_key_path.clone();
+    let ssh_handle = std::thread::spawn(move || -> Result<String> {
+        if need_ssh {
+            let _ = std::fs::remove_file(&ssh_key_path_clone);
+            let _ = std::fs::remove_file(ssh_key_path_clone.with_extension("pub"));
+            let status = Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f"])
+                .arg(&ssh_key_path_clone)
+                .args(["-N", "", "-q"])
+                .status()?;
+            if !status.success() {
+                bail!("ssh-keygen failed");
+            }
+            Ok(std::fs::read_to_string(ssh_key_path_clone.with_extension("pub"))?)
+        } else {
+            Ok(String::new())
+        }
+    });
+
+    // A2. switch + firewall (PowerShell, ~1.5s)
+    let switch_handle = {
+        let sn = switch_name.to_string();
+        let hi = host_ip.to_string();
+        std::thread::spawn(move || {
+            let sw = hyperv::ensure_internal_switch(&sn, &hi, 24)?;
+            hyperv::add_firewall_rules(0)?;
+            Ok::<_, color_eyre::Report>(sw)
+        })
     };
-    info!("podman machine VM GUID: {}", podman_vm_guid);
 
-    // 既存コンテナを削除
-    let _ = Command::new("podman")
-        .args(["rm", "-f", &nbd_container_name])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status();
-
-    // podman machine inspect から SSH ポートとキーを取得
-    let inspect_out = Command::new("podman")
-        .args(["machine", "inspect", &machine])
-        .stdout(Stdio::piped()).stderr(Stdio::null())
-        .output()?;
-    let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
-
-    let pm_ssh_port = inspect_json.lines()
-        .find(|l| l.contains("\"Port\""))
-        .and_then(|l| l.trim().trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
-        .unwrap_or(22);
-    let pm_identity = inspect_json.lines()
-        .find(|l| l.contains("\"IdentityPath\""))
-        .map(|l| l.split('"').nth(3).unwrap_or("").to_string())
-        .unwrap_or_default();
-
-    info!("Podman Machine SSH: port={}, key={}", pm_ssh_port, pm_identity);
-
-    let podman_ssh = boot_files::PodmanSsh {
-        port: pm_ssh_port,
-        key: pm_identity.clone(),
-        rootful,
+    // A3. VM create (PowerShell, ~2s — switch name "bcvk" is fixed, no need to wait)
+    let vm_handle = {
+        let vn = vm_name.clone();
+        let sn = switch_name.to_string();
+        std::thread::spawn(move || hyperv::create_gen2_vm(&vn, memory_mb, vcpus, &sn))
     };
+
+    // A4. vsock registration + vmtype + VM GUID (PowerShell + hcsdiag, ~0.5s)
+    let machine_clone = machine.clone();
+    let guid_handle = std::thread::spawn(move || -> Result<String> {
+        hyperv::register_vsock_service(1030)?;
+        let vmtype = detect_podman_vmtype()?;
+        info!("podman machine VM type: {}", vmtype);
+        let guid = match vmtype.as_str() {
+            "wsl" => hyperv::get_wsl_vm_guid(&machine_clone)?,
+            "hyperv" => hyperv::get_vm_guid(&machine_clone)?,
+            other => bail!("unsupported podman machine VM type: {}", other),
+        };
+        info!("podman machine VM GUID: {}", guid);
+        Ok(guid)
+    });
+
+    // A5. digest (podman inspect, ~0.3s)
+    let image_clone = opts.image.clone();
+    let digest_handle = std::thread::spawn(move || {
+        boot_files::ensure_image_and_get_digest(&image_clone)
+    });
+
+    // A6. image mount (podman SSH, ~5.6s — the longest task, everything above runs during this)
+    let ps_mount = podman_ssh.clone();
+    let image_mount = opts.image.clone();
+    let mount_handle = std::thread::spawn(move || -> Result<String> {
+        let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
+        let mount_script = format!(
+            "{pfx} pull -q {image}; \
+             MERGED=$({pfx} image mount {image}); \
+             echo MERGED=$MERGED",
+            pfx = podman_prefix, image = image_mount,
+        );
+        let mount_output = ps_mount.ssh_cmd(&mount_script)?;
+        let mount_stdout = String::from_utf8_lossy(&mount_output);
+        let merged_path = mount_stdout.lines()
+            .find(|l| l.starts_with("MERGED="))
+            .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
+            .unwrap_or_default();
+        if merged_path.is_empty() {
+            bail!("failed to get MERGED path");
+        }
+        Ok(merged_path)
+    });
+
+    // === Wait for Phase 0 results ===
+    let ssh_pubkey = ssh_handle.join().map_err(|_| eyre!("ssh-keygen panicked"))??;
+    let digest_short = digest_handle.join().map_err(|_| eyre!("digest panicked"))??;
+    let podman_vm_guid = guid_handle.join().map_err(|_| eyre!("guid panicked"))??;
+    let merged_path = mount_handle.join().map_err(|_| eyre!("mount panicked"))??;
+    info!("image mounted at: {}", merged_path);
+    elapsed!("image mount + setup");
+
+    // === Phase 1: mount-dependent tasks (nbdkit + VHDX) parallel with VM/switch completion ===
 
     // SSH param for nbdkit plugin
     let mut ssh_param_str = String::new();
@@ -355,32 +402,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         ssh_param_str = format!(" {}", escaped);
     }
 
-    // Step 1: Mount image (needed before parallel tasks)
-    let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
-    let mount_script = format!(
-        "{pfx} pull -q {image}; \
-         MERGED=$({pfx} image mount {image}); \
-         echo MERGED=$MERGED",
-        pfx = podman_prefix, image = opts.image,
-    );
-    let mount_output = podman_ssh.ssh_cmd(&mount_script)?;
-    let mount_stdout = String::from_utf8_lossy(&mount_output);
-    let merged_path = mount_stdout.lines()
-        .find(|l| l.starts_with("MERGED="))
-        .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
-        .unwrap_or_default();
-    if merged_path.is_empty() {
-        bail!("failed to get MERGED path");
-    }
-    info!("image mounted at: {}", merged_path);
-    elapsed!("image mount");
-
-    // Step 2: Parallel tasks
-    let switch_name = "bcvk";
-    let host_ip = "10.0.0.1";
-    let client_ip = "10.0.0.100";
-
-    // 2a. nbdkit container (--vsock --privileged, direct vsock listen, no bridge)
+    // B1. nbdkit container start (background, needs merged_path)
     let nbdkit_handle = {
         let ps = podman_ssh.clone();
         let podman_run = if rootful { "sudo podman" } else { "podman" };
@@ -409,7 +431,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         let run_cmd = if rootful { "sudo podman" } else { "podman" }.to_string();
         std::thread::spawn(move || -> Result<Vec<u8>> {
             let result = ps.ssh_cmd(&nbdkit_script)?;
-            // Quick check: poll container status (200ms intervals, max 5s)
             for _ in 0..25 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let check = ps.ssh_cmd(&format!(
@@ -426,46 +447,62 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         })
     };
 
-    // 2b. Switch + VM + VHDX (parallel)
-    let switch_handle = {
-        let sn = switch_name.to_string();
-        let hi = host_ip.to_string();
-        std::thread::spawn(move || hyperv::ensure_internal_switch(&sn, &hi, 24))
-    };
-    let vm_handle = {
-        let vn = vm_name.clone();
-        let sn = switch_name.to_string();
-        std::thread::spawn(move || -> Result<()> {
-            hyperv::create_gen2_vm(&vn, memory_mb, vcpus, &sn)?;
-            Ok(())
-        })
-    };
-    let firewall_handle = {
-        std::thread::spawn(move || hyperv::add_firewall_rules(0))
-    };
-    // Step 3: Wait for VHDX + VM + switch (nbdkit runs in background)
-    elapsed!("parallel tasks spawned");
+    // B2. VHDX create (needs merged_path + ssh_pubkey + digest)
     let vhdx_path = boot_files::create_boot_vhdx(
         &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
     )?;
     elapsed!("VHDX created");
 
-    let switch = switch_handle.join().map_err(|_| eyre!("switch thread panicked"))??;
+    // Wait for VM + switch (should already be done during image mount)
+    let switch = switch_handle.join().map_err(|_| eyre!("switch panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
     elapsed!("switch ready");
-    vm_handle.join().map_err(|_| eyre!("VM thread panicked"))??;
+    vm_handle.join().map_err(|_| eyre!("VM panicked"))??;
     elapsed!("VM created");
-    firewall_handle.join().map_err(|_| eyre!("firewall thread panicked"))??;
 
+    // Wait for nbdkit (relay will retry connection anyway)
     let nbd_container = nbd_container_name.clone();
-    if let Err(e) = nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))? {
+    if let Err(e) = nbdkit_handle.join().map_err(|_| eyre!("nbdkit panicked"))? {
         info!("nbdkit warning: {}", e);
     }
     elapsed!("nbdkit ready");
 
-    // Attach VHDX + set boot + start VM + get GUID in 1 PowerShell call
+    // === Phase 2: VM start ===
     let ephemeral_vm_guid = hyperv::attach_and_start_vm(&vm_name, &vhdx_path)?;
     elapsed!("VHDX attach + VM start");
+
+    // Start serial pipe reader immediately after VM start to capture early boot
+    let serial_log_path = base_dir.join(format!("serial-{}.log", name));
+    let serial_pipe_path = format!("\\\\.\\pipe\\bcvk-serial-{}", vm_name);
+    let serial_log_clone = serial_log_path.clone();
+    let serial_debug = opts.debug;
+    let _serial_thread = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let pipe = match std::fs::File::open(&serial_pipe_path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("serial pipe open failed ({}): {}", serial_pipe_path, e);
+                return;
+            }
+        };
+        let mut log = match std::fs::File::create(&serial_log_clone) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let reader = BufReader::new(pipe);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    let _ = writeln!(log, "{}", l);
+                    let _ = log.flush();
+                    if serial_debug {
+                        eprintln!("[serial] {}", l);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     let mut cleanup = VmCleanup {
         vm_name: vm_name.clone(),
@@ -489,7 +526,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
         // Relay connects to both VMs (Host-initiated, with retry for ephemeral VM)
         let _vsock_relay = crate::vsock_relay::VsockRelay::start(
-            vsock_port, 4, &podman_vm_guid, &ephemeral_vm_guid
+            vsock_port, 1, &podman_vm_guid, &ephemeral_vm_guid
         ).await?;
         info!("vsock relay connected (port {})", vsock_port);
         elapsed!("relay connected");
@@ -501,57 +538,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
                 .spawn();
         }
 
-        // Serial console log: read named pipe → log file (background)
-        let serial_log_path = base_dir.join(format!("serial-{}.log", name));
-        let pipe_path = format!("\\\\.\\pipe\\bcvk-serial-{}", vm_name);
-        let serial_log_path_clone = serial_log_path.clone();
-        let debug_mode = opts.debug;
-        let _serial_handle = tokio::task::spawn_blocking(move || {
-            use std::io::{BufRead, BufReader, Write};
-            let pipe = match std::fs::File::open(&pipe_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("serial pipe open failed ({}): {}", pipe_path, e);
-                    return;
-                }
-            };
-            let mut log = match std::fs::File::create(&serial_log_path_clone) {
-                Ok(f) => f,
-                Err(_) => return,
-            };
-            let reader = BufReader::new(pipe);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        let _ = writeln!(log, "{}", l);
-                        let _ = log.flush();
-                        if debug_mode {
-                            eprintln!("[serial] {}", l);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
         info!("serial log: {}", serial_log_path.display());
 
-        // Wait for VM to get IP, fall back to DHCP-assigned IP
-        let ip_deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let vm_ip = loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            let name_clone = vm_name.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                hyperv::get_vm_ip(&name_clone)
-            }).await?;
-            if let Ok(Some(ip)) = result {
-                break ip;
-            }
-            if std::time::Instant::now() > ip_deadline {
-                info!("Hyper-V did not report VM IP, using DHCP-assigned {}", client_ip);
-                break client_ip.to_string();
-            }
-            debug!("waiting for VM IP...");
-        };
+        // Use DHCP-assigned IP directly (bcvk DHCP server assigns fixed 10.0.0.100)
+        let vm_ip = client_ip.to_string();
         info!("VM IP: {}", vm_ip);
 
         // SSH forward
