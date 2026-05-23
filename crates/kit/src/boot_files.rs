@@ -275,33 +275,52 @@ pub fn create_boot_vhdx(
     let grub_cfg_path = cache_dir.join("grub.cfg");
     std::fs::write(&grub_cfg_path, grub_cfg)?;
 
-    // Create VHDX via PowerShell
+    // Create or update VHDX
     let vhdx_path = cache_dir.join("esp.vhdx");
     let vhdx_str = vhdx_path.to_string_lossy().to_string();
 
-    let ps_script = format!(
-        "Remove-Item '{vhdx}' -Force -ErrorAction SilentlyContinue; \
-         New-VHD -Path '{vhdx}' -SizeBytes 256MB -Dynamic | Out-Null; \
-         Mount-VHD -Path '{vhdx}'; \
-         $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
-         Initialize-Disk -Number $disk.Number -PartitionStyle GPT -ErrorAction SilentlyContinue; \
-         $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter; \
-         Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel ESP -Confirm:$false | Out-Null; \
-         $d = $part.DriveLetter; \
-         New-Item -Path \"${{d}}:\\EFI\\BOOT\" -ItemType Directory -Force | Out-Null; \
-         New-Item -Path \"${{d}}:\\boot\" -ItemType Directory -Force | Out-Null; \
-         Copy-Item '{grub_efi}' \"${{d}}:\\EFI\\BOOT\\BOOTX64.EFI\"; \
-         Copy-Item '{kernel}' \"${{d}}:\\boot\\vmlinuz\"; \
-         Copy-Item '{initramfs}' \"${{d}}:\\boot\\initramfs.img\"; \
-         Copy-Item '{grub_cfg}' \"${{d}}:\\EFI\\BOOT\\grub.cfg\"; \
-         Dismount-VHD -Path '{vhdx}'; \
-         Write-Host 'VHDX_OK'",
-        vhdx = vhdx_str,
-        grub_efi = cache_dir.join("grubx64.efi").to_string_lossy(),
-        kernel = cache_dir.join("vmlinuz").to_string_lossy(),
-        initramfs = initramfs_tmp.to_string_lossy(),
-        grub_cfg = grub_cfg_path.to_string_lossy(),
-    );
+    let ps_script = if vhdx_path.exists() {
+        // Cache hit: VHDX exists, only update initramfs (0.8s vs 8s)
+        info!("VHDX cache hit, updating initramfs only");
+        format!(
+            "Mount-VHD -Path '{vhdx}'; \
+             $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
+             $part = Get-Partition -DiskNumber $disk.Number | Where-Object {{ $_.Type -eq 'Basic' }}; \
+             $d = $part.DriveLetter; \
+             if (-not $d) {{ $d = ($part | Add-PartitionAccessPath -AssignDriveLetter -PassThru).DriveLetter }}; \
+             Copy-Item '{initramfs}' \"${{d}}:\\boot\\initramfs.img\" -Force; \
+             Dismount-VHD -Path '{vhdx}'; \
+             Write-Host 'VHDX_OK'",
+            vhdx = vhdx_str,
+            initramfs = initramfs_tmp.to_string_lossy(),
+        )
+    } else {
+        // Cache miss: create new VHDX from scratch
+        info!("VHDX cache miss, creating new VHDX");
+        format!(
+            "Remove-Item '{vhdx}' -Force -ErrorAction SilentlyContinue; \
+             New-VHD -Path '{vhdx}' -SizeBytes 256MB -Dynamic | Out-Null; \
+             Mount-VHD -Path '{vhdx}'; \
+             $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
+             Initialize-Disk -Number $disk.Number -PartitionStyle GPT -ErrorAction SilentlyContinue; \
+             $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter; \
+             Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel ESP -Confirm:$false | Out-Null; \
+             $d = $part.DriveLetter; \
+             New-Item -Path \"${{d}}:\\EFI\\BOOT\" -ItemType Directory -Force | Out-Null; \
+             New-Item -Path \"${{d}}:\\boot\" -ItemType Directory -Force | Out-Null; \
+             Copy-Item '{grub_efi}' \"${{d}}:\\EFI\\BOOT\\BOOTX64.EFI\"; \
+             Copy-Item '{kernel}' \"${{d}}:\\boot\\vmlinuz\"; \
+             Copy-Item '{initramfs}' \"${{d}}:\\boot\\initramfs.img\"; \
+             Copy-Item '{grub_cfg}' \"${{d}}:\\EFI\\BOOT\\grub.cfg\"; \
+             Dismount-VHD -Path '{vhdx}'; \
+             Write-Host 'VHDX_OK'",
+            vhdx = vhdx_str,
+            grub_efi = cache_dir.join("grubx64.efi").to_string_lossy(),
+            kernel = cache_dir.join("vmlinuz").to_string_lossy(),
+            initramfs = initramfs_tmp.to_string_lossy(),
+            grub_cfg = grub_cfg_path.to_string_lossy(),
+        )
+    };
 
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
