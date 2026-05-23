@@ -329,7 +329,7 @@ pub fn create_boot_vhdx(
         info!("VHDX cache miss, creating new VHDX");
         format!(
             "Remove-Item '{vhdx}' -Force -ErrorAction SilentlyContinue; \
-             New-VHD -Path '{vhdx}' -SizeBytes 256MB -Dynamic | Out-Null; \
+             New-VHD -Path '{vhdx}' -SizeBytes 512MB -Dynamic | Out-Null; \
              Mount-VHD -Path '{vhdx}'; \
              $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
              Initialize-Disk -Number $disk.Number -PartitionStyle GPT -ErrorAction SilentlyContinue; \
