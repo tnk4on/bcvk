@@ -414,19 +414,19 @@ impl VsockRelay {
         let mut handles = Vec::new();
         let cache = cache_new();
 
-        // Prefetch boot regions FIRST (before relay connections)
-        // Uses 1 podman connection, closes it before relay connects
+        // Prefetch boot regions in background (with retry, parallel with relay)
         {
             let pod_prefetch = podman_guid.clone();
             let cache_prefetch = cache.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 info!("vsock relay: prefetching boot regions from podman");
-                let podman_sock = match unsafe { hvsock_connect(&pod_prefetch, vsock_port) } {
+                let podman_sock = match unsafe { hvsock_connect_retry(&pod_prefetch, vsock_port, 15, 1) } {
                     Ok(s) => s,
                     Err(e) => { info!("vsock relay: prefetch connect failed: {}", e); return; }
                 };
                 prefetch_boot_regions(podman_sock, cache_prefetch);
-            }).await;
+            });
+            // NOT awaited — runs in parallel with relay connections
         }
 
         let mut connect_handles = Vec::new();
