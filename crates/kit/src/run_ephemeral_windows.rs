@@ -435,11 +435,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let firewall_handle = {
         std::thread::spawn(move || hyperv::add_firewall_rules(0))
     };
-    // Step 3: Wait for parallel tasks that VHDX depends on
-    nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))??;
-    let nbd_container = nbd_container_name.clone();
-    info!("nbdkit started (--vsock port 1030)");
-
+    // Step 3: Wait for VHDX + VM + switch (nbdkit runs in background)
     let vhdx_path = boot_files::create_boot_vhdx(
         &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
     )?;
@@ -448,6 +444,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
     vm_handle.join().map_err(|_| eyre!("VM thread panicked"))??;
     firewall_handle.join().map_err(|_| eyre!("firewall thread panicked"))??;
+
+    // nbdkit join deferred — it runs in background, relay will retry connection
+    let nbd_container = nbd_container_name.clone();
+    if let Err(e) = nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))? {
+        info!("nbdkit warning: {}", e);
+    }
+    info!("nbdkit started (--vsock port 1030)");
 
     // Attach VHDX and set boot device
     hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
