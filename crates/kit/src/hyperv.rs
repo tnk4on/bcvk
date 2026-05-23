@@ -1,6 +1,5 @@
 //! Hyper-V VM lifecycle management via PowerShell commands.
 
-
 #[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
 #[cfg(target_os = "windows")]
@@ -32,7 +31,12 @@ fn powershell(script: &str) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!("PowerShell failed ({}): stderr={} stdout={}", script.chars().take(80).collect::<String>(), stderr.trim(), stdout.trim());
+        bail!(
+            "PowerShell failed ({}): stderr={} stdout={}",
+            script.chars().take(80).collect::<String>(),
+            stderr.trim(),
+            stdout.trim()
+        );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -48,7 +52,14 @@ fn powershell_ignore_error(script: &str) {
 
 #[cfg(target_os = "windows")]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
-    let subnet = format!("{}/{}", host_ip.rsplit_once('.').map(|(base, _)| format!("{}.0", base)).unwrap_or_default(), prefix_len);
+    let subnet = format!(
+        "{}/{}",
+        host_ip
+            .rsplit_once('.')
+            .map(|(base, _)| format!("{}.0", base))
+            .unwrap_or_default(),
+        prefix_len
+    );
     let script = format!(
         "$ErrorActionPreference = 'SilentlyContinue'; \
          $sw = Get-VMSwitch -Name '{name}' -EA SilentlyContinue; \
@@ -88,40 +99,10 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         name = name, mem = memory_bytes, cpu = vcpus, sw = switch,
     );
     powershell(&script)?;
-    info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)", name, vcpus, memory_mb);
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn add_firewall_rules(_unused: u16) -> Result<()> {
-    powershell_ignore_error(
-        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
+    info!(
+        "created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)",
+        name, vcpus, memory_mb
     );
-    powershell_ignore_error(
-        "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
-    );
-    debug!("firewall rules added");
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn add_vhdx_boot(name: &str, vhdx_path: &str) -> Result<()> {
-    powershell(&format!(
-        "Add-VMHardDiskDrive -VMName '{}' -Path '{}' -ControllerType SCSI",
-        name, vhdx_path
-    ))?;
-    powershell(&format!(
-        "Set-VMFirmware -VMName '{}' -FirstBootDevice (Get-VMHardDiskDrive -VMName '{}' | Select-Object -First 1)",
-        name, name
-    ))?;
-    debug!("set VHDX boot for {}: {}", name, vhdx_path);
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub fn start_vm(name: &str) -> Result<()> {
-    powershell(&format!("Start-VM -Name '{}'", name))?;
-    info!("started VM: {}", name);
     Ok(())
 }
 
@@ -170,19 +151,6 @@ pub fn get_vm_state(name: &str) -> Result<String> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_vm_ip(name: &str) -> Result<Option<String>> {
-    let ips = powershell(&format!(
-        "(Get-VMNetworkAdapter -VMName '{}').IPAddresses | Select-Object -First 1",
-        name
-    ))?;
-    if ips.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(ips))
-    }
-}
-
-#[cfg(target_os = "windows")]
 pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
     let output = powershell(&format!(
         "$vms = Get-VM -Name '{}*' -ErrorAction SilentlyContinue; if ($vms) {{ $vms | ForEach-Object {{ \"$($_.Name)|$($_.State)\" }} }}; exit 0",
@@ -202,15 +170,18 @@ pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
 
 #[cfg(target_os = "windows")]
 pub fn is_hyper_v_enabled() -> bool {
-    powershell("Write-Host (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State")
-        .map(|s| s.contains("Enabled"))
-        .unwrap_or(false)
+    powershell(
+        "Write-Host (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State",
+    )
+    .map(|s| s.contains("Enabled"))
+    .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
 pub fn get_vm_guid(vm_name: &str) -> Result<String> {
     powershell(&format!(
-        "Write-Host (Get-VM -Name '{}').VMId.Guid", vm_name
+        "Write-Host (Get-VM -Name '{}').VMId.Guid",
+        vm_name
     ))
 }
 

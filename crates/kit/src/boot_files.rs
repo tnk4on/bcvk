@@ -15,8 +15,6 @@ use tracing::info;
 #[cfg(target_os = "windows")]
 const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
 
-
-
 #[cfg(target_os = "windows")]
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
@@ -33,16 +31,25 @@ pub struct PodmanSsh {
 #[cfg(target_os = "windows")]
 impl PodmanSsh {
     fn user(&self) -> &str {
-        if self.rootful { "root" } else { "core" }
+        if self.rootful {
+            "root"
+        } else {
+            "core"
+        }
     }
 
     fn ssh_args(&self) -> Vec<String> {
         vec![
-            "-p".to_string(), self.port.to_string(),
-            "-i".to_string(), self.key.clone(),
-            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
-            "-o".to_string(), "LogLevel=ERROR".to_string(),
+            "-p".to_string(),
+            self.port.to_string(),
+            "-i".to_string(),
+            self.key.clone(),
+            "-o".to_string(),
+            "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(),
+            "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(),
+            "LogLevel=ERROR".to_string(),
         ]
     }
 
@@ -94,11 +101,16 @@ impl PodmanSsh {
         let remote = format!("{}:{}", self.user_host(), remote_path);
         let status = Command::new("scp")
             .args([
-                "-P", &self.port.to_string(),
-                "-i", &self.key,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR",
+                "-P",
+                &self.port.to_string(),
+                "-i",
+                &self.key,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
             ])
             .arg(&remote)
             .arg(local_path)
@@ -110,7 +122,6 @@ impl PodmanSsh {
         }
         Ok(())
     }
-
 }
 
 /// Ensure image exists locally (pull if needed) and return short digest.
@@ -123,9 +134,7 @@ pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
         .status()?;
     if !exists.success() {
         info!("pulling image {}...", image);
-        let pull = Command::new("podman")
-            .args(["pull", image])
-            .status()?;
+        let pull = Command::new("podman").args(["pull", image]).status()?;
         if !pull.success() {
             bail!("failed to pull image: {}", image);
         }
@@ -136,8 +145,14 @@ pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
         .stderr(Stdio::null())
         .output()?;
     let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if digest.is_empty() { bail!("failed to get image digest: {}", image); }
-    Ok(digest.trim_start_matches("sha256:").chars().take(16).collect())
+    if digest.is_empty() {
+        bail!("failed to get image digest: {}", image);
+    }
+    Ok(digest
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(16)
+        .collect())
 }
 
 /// Cache directory for boot files, keyed by short digest.
@@ -145,12 +160,18 @@ pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
 fn cache_dir_from_digest(digest_short: &str) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk").join("cache").join(format!("boot-{}", digest_short))
+        .join("bcvk")
+        .join("cache")
+        .join(format!("boot-{}", digest_short))
 }
 
 /// Fetch boot files via SCP (fast, ~50MB/s) and cache locally.
 #[cfg(target_os = "windows")]
-fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+fn fetch_boot_files(
+    merged_path: &str,
+    ssh: &PodmanSsh,
+    cache_dir: &PathBuf,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     // Get metadata via SSH (small, fast)
     let meta = ssh.ssh_cmd(&format!(
         "KVER=$(ls {m}/usr/lib/modules/ | head -1); \
@@ -161,17 +182,23 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     ))?;
     let meta_str = String::from_utf8_lossy(&meta);
 
-    let kver = meta_str.lines()
+    let kver = meta_str
+        .lines()
         .find(|l| l.starts_with("KVER="))
         .map(|l| l.trim_start_matches("KVER=").trim().to_string())
         .unwrap_or_default();
-    let grub_path = meta_str.lines()
+    let grub_path = meta_str
+        .lines()
         .find(|l| l.starts_with("GRUB="))
         .map(|l| l.trim_start_matches("GRUB=").trim().to_string())
         .unwrap_or_default();
 
-    if kver.is_empty() { bail!("kernel version not found"); }
-    if grub_path.is_empty() { bail!("GRUB EFI not found"); }
+    if kver.is_empty() {
+        bail!("kernel version not found");
+    }
+    if grub_path.is_empty() {
+        bail!("GRUB EFI not found");
+    }
     info!("kernel version: {}", kver);
 
     // SCP files directly to cache directory
@@ -206,7 +233,8 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     // Copy ublk-vsock binary from well-known location if available
     let ublk_vsock_src = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk").join("ublk-vsock");
+        .join("bcvk")
+        .join("ublk-vsock");
     if ublk_vsock_src.exists() {
         let dest = cache_dir.join("ublk-vsock");
         std::fs::copy(&ublk_vsock_src, &dest)?;
@@ -217,13 +245,15 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
     let initramfs = std::fs::read(cache_dir.join("initramfs.img"))?;
 
-    info!("kernel: {} bytes, GRUB: {} bytes, initramfs: {} bytes (SCP cached)",
-          kernel.len(), grub_efi.len(), initramfs.len());
+    info!(
+        "kernel: {} bytes, GRUB: {} bytes, initramfs: {} bytes (SCP cached)",
+        kernel.len(),
+        grub_efi.len(),
+        initramfs.len()
+    );
 
     Ok((kernel, grub_efi, initramfs))
 }
-
-
 
 /// Create a VHDX with FAT32 ESP containing GRUB + kernel + initramfs.
 /// Returns the path to the VHDX file.
@@ -342,57 +372,101 @@ pub fn create_boot_vhdx(
     Ok(vhdx_str)
 }
 
-/// Create CPIO with nbd-vsock binary + vsock modules + systemd service.
+/// Create CPIO with block device binaries, kernel modules, and systemd services.
 #[cfg(target_os = "windows")]
 fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
-    use std::io::Write;
 
     let mut buf = Vec::new();
 
     let dirs = [
-        "usr", "usr/bin", "usr/lib", "usr/lib/bcvk",
-        "usr/lib/systemd", "usr/lib/systemd/system",
+        "usr",
+        "usr/bin",
+        "usr/lib",
+        "usr/lib/bcvk",
+        "usr/lib/systemd",
+        "usr/lib/systemd/system",
         "usr/lib/systemd/system/initrd-root-device.target.d",
     ];
     for dir in &dirs {
-        let b = NewcBuilder::new(dir).mode(0o755).set_mode_file_type(ModeFileType::Directory);
+        let b = NewcBuilder::new(dir)
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Directory);
         b.write(&mut buf, 0).finish()?;
     }
 
-    // nbd-vsock binary (always included as NBD fallback)
-    let b = NewcBuilder::new("usr/bin/nbd-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, NBD_VSOCK_BIN.len() as u32);
+    add_binaries_to_cpio(&mut buf, cache_dir)?;
+    add_kernel_modules_to_cpio(&mut buf, cache_dir)?;
+    add_shell_scripts_to_cpio(&mut buf, vsock_port)?;
+    add_systemd_services_to_cpio(&mut buf)?;
+
+    Ok(cpio::newc::trailer(buf)?)
+}
+
+#[cfg(target_os = "windows")]
+fn add_binaries_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Result<()> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
+    let b = NewcBuilder::new("usr/bin/nbd-vsock")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, NBD_VSOCK_BIN.len() as u32);
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // ublk-vsock binary (included if available in cache_dir)
     let ublk_vsock_path = cache_dir.join("ublk-vsock");
     if ublk_vsock_path.exists() {
         let ublk_data = std::fs::read(&ublk_vsock_path)?;
-        let b = NewcBuilder::new("usr/bin/ublk-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-        let mut w = b.write(&mut buf, ublk_data.len() as u32);
+        let b = NewcBuilder::new("usr/bin/ublk-vsock")
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Regular);
+        let mut w = b.write(&mut *buf, ublk_data.len() as u32);
         w.write_all(&ublk_data)?;
         w.finish()?;
-        info!("included ublk-vsock ({} bytes) in initramfs", ublk_data.len());
+        info!(
+            "included ublk-vsock ({} bytes) in initramfs",
+            ublk_data.len()
+        );
     }
+    Ok(())
+}
 
-    // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko, ublk_drv.ko (optional)
+#[cfg(target_os = "windows")]
+fn add_kernel_modules_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Result<()> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
     for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
             let cpio_path = format!("usr/lib/bcvk/{}", module_name);
-            let b = NewcBuilder::new(&cpio_path).mode(0o644).set_mode_file_type(ModeFileType::Regular);
-            let mut w = b.write(&mut buf, module_data.len() as u32);
+            let b = NewcBuilder::new(&cpio_path)
+                .mode(0o644)
+                .set_mode_file_type(ModeFileType::Regular);
+            let mut w = b.write(&mut *buf, module_data.len() as u32);
             w.write_all(&module_data)?;
             w.finish()?;
-            info!("included {} ({} bytes) in initramfs", module_name, module_data.len());
+            info!(
+                "included {} ({} bytes) in initramfs",
+                module_name,
+                module_data.len()
+            );
         }
     }
+    Ok(())
+}
 
-    // Module loading script: load vsock + hv_sock, try ublk_drv (optional)
+#[cfg(target_os = "windows")]
+fn add_shell_scripts_to_cpio(buf: &mut Vec<u8>, vsock_port: u32) -> Result<()> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
     let setup_modules = "\
 #!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
@@ -407,31 +481,15 @@ if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
     mknod /dev/ublk-control c ${DEVNUM%%:*} ${DEVNUM##*:}\n\
   fi\n\
 fi\n";
-    let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, setup_modules.len() as u32);
+    let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, setup_modules.len() as u32);
     w.write_all(setup_modules.as_bytes())?;
     w.finish()?;
 
-    let svc_modules =
-        "[Unit]\n\
-         Description=Load bcvk kernel modules\n\
-         DefaultDependencies=no\n\
-         ConditionPathExists=/etc/initrd-release\n\
-         Before=bcvk-block-device.service\n\
-         After=systemd-udevd.service systemd-modules-load.service\n\
-         \n\
-         [Service]\n\
-         Type=oneshot\n\
-         RemainAfterExit=yes\n\
-         TimeoutStartSec=30\n\
-         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-modules.sh\n";
-    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-modules.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, svc_modules.len() as u32);
-    w.write_all(svc_modules.as_bytes())?;
-    w.finish()?;
-
-    // Block device setup script: try ublk, fall back to NBD
-    let block_device_script = format!("\
+    let block_device_script = format!(
+        "\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
@@ -458,12 +516,13 @@ insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
         vsock_port = vsock_port
     );
-    let b = NewcBuilder::new("usr/lib/bcvk/block-device-setup.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, block_device_script.len() as u32);
+    let b = NewcBuilder::new("usr/lib/bcvk/block-device-setup.sh")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, block_device_script.len() as u32);
     w.write_all(block_device_script.as_bytes())?;
     w.finish()?;
 
-    // ExecStartPost script: reread partition table on whichever device was created
     let post_script = "\
 #!/bin/bash\n\
 sleep 1\n\
@@ -474,14 +533,42 @@ else\n\
 fi\n\
 blockdev --rereadpt /dev/$DEV 2>/dev/null\n\
 echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
-    let b = NewcBuilder::new("usr/lib/bcvk/block-device-post.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, post_script.len() as u32);
+    let b = NewcBuilder::new("usr/lib/bcvk/block-device-post.sh")
+        .mode(0o755)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, post_script.len() as u32);
     w.write_all(post_script.as_bytes())?;
     w.finish()?;
 
-    // Block device service (replaces bcvk-nbd-vsock.service)
-    let svc_block =
-        "[Unit]\n\
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn add_systemd_services_to_cpio(buf: &mut Vec<u8>) -> Result<()> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+    use std::io::Write;
+
+    let svc_modules = "[Unit]\n\
+         Description=Load bcvk kernel modules\n\
+         DefaultDependencies=no\n\
+         ConditionPathExists=/etc/initrd-release\n\
+         Before=bcvk-block-device.service\n\
+         After=systemd-udevd.service systemd-modules-load.service\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         RemainAfterExit=yes\n\
+         TimeoutStartSec=30\n\
+         ExecStart=/usr/bin/bash /usr/lib/bcvk/setup-modules.sh\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-setup-modules.service")
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, svc_modules.len() as u32);
+    w.write_all(svc_modules.as_bytes())?;
+    w.finish()?;
+
+    let svc_block = "[Unit]\n\
          Description=bcvk block device setup\n\
          DefaultDependencies=no\n\
          ConditionPathExists=/etc/initrd-release\n\
@@ -496,20 +583,24 @@ echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
          TimeoutStartSec=120\n\
          ExecStart=/usr/bin/bash /usr/lib/bcvk/block-device-setup.sh\n\
          ExecStartPost=/usr/bin/bash /usr/lib/bcvk/block-device-post.sh\n";
-    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-block-device.service").mode(0o644).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, svc_block.len() as u32);
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-block-device.service")
+        .mode(0o644)
+        .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, svc_block.len() as u32);
     w.write_all(svc_block.as_bytes())?;
     w.finish()?;
 
     let dropin = b"[Unit]\nWants=bcvk-block-device.service\n";
-    let b = NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf").mode(0o644).set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut buf, dropin.len() as u32);
+    let b =
+        NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf")
+            .mode(0o644)
+            .set_mode_file_type(ModeFileType::Regular);
+    let mut w = b.write(&mut *buf, dropin.len() as u32);
     w.write_all(dropin)?;
     w.finish()?;
 
-    Ok(cpio::newc::trailer(buf)?)
+    Ok(())
 }
-
 
 #[cfg(target_os = "windows")]
 fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
@@ -517,4 +608,3 @@ fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     initramfs.resize(aligned, 0);
     initramfs.extend_from_slice(cpio);
 }
-
