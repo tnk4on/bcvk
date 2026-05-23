@@ -37,6 +37,9 @@ fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
         let opt: libc::c_int = 1;
         setsockopt(fd, SOL_SOCKET, libc::SO_REUSEADDR,
             &opt as *const _ as *const libc::c_void, std::mem::size_of_val(&opt) as u32);
+        let timeout = libc::timeval { tv_sec: 5, tv_usec: 0 };
+        setsockopt(fd, SOL_SOCKET, libc::SO_RCVTIMEO,
+            &timeout as *const _ as *const libc::c_void, std::mem::size_of_val(&timeout) as u32);
         let mut addr: sockaddr_vm = std::mem::zeroed();
         addr.svm_family = AF_VSOCK as u16;
         addr.svm_cid = VMADDR_CID_ANY;
@@ -162,7 +165,7 @@ fn main() {
         std::process::exit(1);
     }
     let vsock_port: u32 = args[2].parse().expect("invalid port");
-    let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
 
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
 
@@ -171,7 +174,14 @@ fn main() {
 
     let connections: Arc<Mutex<Vec<(UnixStream, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     for i in 0..num_queues {
-        let mut stream = vsock_accept(lsock).expect("accept failed");
+        let mut stream = match vsock_accept(lsock) {
+            Ok(s) => s,
+            Err(e) => {
+                msg!("accept failed (timeout or error): {}", e);
+                unsafe { libc::close(lsock); }
+                std::process::exit(2);
+            }
+        };
         let (export_size, _) = nbd_handshake(&mut stream).expect("handshake failed");
         msg!("connection {}: export_size={} MB", i, export_size / (1024 * 1024));
         connections.lock().unwrap().push((stream, export_size));
