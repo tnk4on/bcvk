@@ -7,7 +7,10 @@
 //! 4. Supports WSL2 (default) and Hyper-V podman machine backends
 
 #[cfg(target_os = "windows")]
-use color_eyre::{eyre::{bail, eyre}, Result};
+use color_eyre::{
+    eyre::{bail, eyre},
+    Result,
+};
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -22,9 +25,9 @@ use tracing::{debug, info};
 #[cfg(target_os = "windows")]
 use crate::boot_files;
 #[cfg(target_os = "windows")]
-use crate::hyperv;
-#[cfg(target_os = "windows")]
 use crate::dhcp_server::DhcpServer;
+#[cfg(target_os = "windows")]
+use crate::hyperv;
 #[cfg(target_os = "windows")]
 use crate::ssh_forward::SshForward;
 
@@ -88,7 +91,12 @@ impl EphemeralVmMetadata {
         let mut vms = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                if entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "json")
+                    .unwrap_or(false)
+                {
                     if let Ok(data) = std::fs::read_to_string(entry.path()) {
                         if let Ok(vm) = serde_json::from_str(&data) {
                             vms.push(vm);
@@ -130,8 +138,19 @@ impl Drop for VmCleanup {
         }
         if let Ok(machine) = detect_machine_name() {
             let _ = Command::new("podman")
-                .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &self.image])
-                .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                .args([
+                    "machine",
+                    "ssh",
+                    &machine,
+                    "--",
+                    "podman",
+                    "image",
+                    "umount",
+                    &self.image,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
         if let Some(port) = self.vsock_port {
             let _ = hyperv::unregister_vsock_service(port);
@@ -150,12 +169,14 @@ fn spawn_cleanup(c: &VmCleanup) {
     );
     let _ = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdout(Stdio::null()).stderr(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn();
     if let Some(ref name) = c.nbd_container {
         let _ = Command::new("podman")
             .args(["rm", "-f", name])
-            .stdout(Stdio::null()).stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn();
     }
     if let Some(ref vhdx) = c.vhdx_path {
@@ -163,8 +184,11 @@ fn spawn_cleanup(c: &VmCleanup) {
     }
     if let Ok(machine) = detect_machine_name() {
         let _ = Command::new("podman")
-            .args(["machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image])
-            .stdout(Stdio::null()).stderr(Stdio::null())
+            .args([
+                "machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn();
     }
     if let Some(port) = c.vsock_port {
@@ -244,7 +268,11 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let t_start = std::time::Instant::now();
     macro_rules! elapsed {
         ($label:expr) => {
-            info!("[timing] {}: {:.1}s", $label, t_start.elapsed().as_secs_f64());
+            info!(
+                "[timing] {}: {:.1}s",
+                $label,
+                t_start.elapsed().as_secs_f64()
+            );
         };
     }
 
@@ -259,19 +287,31 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     // podman machine inspect (rootful + SSH port/key in one call)
     let inspect_out = Command::new("podman")
         .args(["machine", "inspect", &machine])
-        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .output()?;
     let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
-    let rootful = inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
-    let pm_ssh_port = inspect_json.lines()
+    let rootful =
+        inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
+    let pm_ssh_port = inspect_json
+        .lines()
         .find(|l| l.contains("\"Port\""))
-        .and_then(|l| l.trim().trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+        .and_then(|l| {
+            l.trim()
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u16>()
+                .ok()
+        })
         .unwrap_or(22);
-    let pm_identity = inspect_json.lines()
+    let pm_identity = inspect_json
+        .lines()
         .find(|l| l.contains("\"IdentityPath\""))
         .map(|l| l.split('"').nth(3).unwrap_or("").to_string())
         .unwrap_or_default();
-    info!("Podman Machine SSH: port={}, key={}", pm_ssh_port, pm_identity);
+    info!(
+        "Podman Machine SSH: port={}, key={}",
+        pm_ssh_port, pm_identity
+    );
 
     let podman_ssh = boot_files::PodmanSsh {
         port: pm_ssh_port,
@@ -280,10 +320,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     };
 
     let vm_name_suffix = opts.name.clone().unwrap_or_else(|| {
-        format!("{:08x}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32)
+        format!(
+            "{:08x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32
+        )
     });
     let vm_name = format!("{}{}", VM_PREFIX, vm_name_suffix);
     let name = vm_name_suffix.clone();
@@ -315,7 +358,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             if !status.success() {
                 bail!("ssh-keygen failed");
             }
-            Ok(std::fs::read_to_string(ssh_key_path_clone.with_extension("pub"))?)
+            Ok(std::fs::read_to_string(
+                ssh_key_path_clone.with_extension("pub"),
+            )?)
         } else {
             Ok(String::new())
         }
@@ -325,11 +370,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let switch_handle = {
         let sn = switch_name.to_string();
         let hi = host_ip.to_string();
-        std::thread::spawn(move || {
-            let sw = hyperv::ensure_internal_switch(&sn, &hi, 24)?;
-            hyperv::add_firewall_rules(0)?;
-            Ok::<_, color_eyre::Report>(sw)
-        })
+        std::thread::spawn(move || hyperv::ensure_internal_switch(&sn, &hi, 24))
     };
 
     // A3. VM create (PowerShell, ~2s — switch name "bcvk" is fixed, no need to wait)
@@ -356,24 +397,29 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     // A5. digest (podman inspect, ~0.3s)
     let image_clone = opts.image.clone();
-    let digest_handle = std::thread::spawn(move || {
-        boot_files::ensure_image_and_get_digest(&image_clone)
-    });
+    let digest_handle =
+        std::thread::spawn(move || boot_files::ensure_image_and_get_digest(&image_clone));
 
     // A6. image mount (podman SSH, ~5.6s — the longest task, everything above runs during this)
     let ps_mount = podman_ssh.clone();
     let image_mount = opts.image.clone();
     let mount_handle = std::thread::spawn(move || -> Result<String> {
-        let podman_prefix = if rootful { "sudo podman" } else { "podman unshare podman" };
+        let podman_prefix = if rootful {
+            "sudo podman"
+        } else {
+            "podman unshare podman"
+        };
         let mount_script = format!(
             "{pfx} pull -q {image}; \
              MERGED=$({pfx} image mount {image}); \
              echo MERGED=$MERGED",
-            pfx = podman_prefix, image = image_mount,
+            pfx = podman_prefix,
+            image = image_mount,
         );
         let mount_output = ps_mount.ssh_cmd(&mount_script)?;
         let mount_stdout = String::from_utf8_lossy(&mount_output);
-        let merged_path = mount_stdout.lines()
+        let merged_path = mount_stdout
+            .lines()
             .find(|l| l.starts_with("MERGED="))
             .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
             .unwrap_or_default();
@@ -384,8 +430,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     });
 
     // === Wait for Phase 0 results ===
-    let ssh_pubkey = ssh_handle.join().map_err(|_| eyre!("ssh-keygen panicked"))??;
-    let digest_short = digest_handle.join().map_err(|_| eyre!("digest panicked"))??;
+    let ssh_pubkey = ssh_handle
+        .join()
+        .map_err(|_| eyre!("ssh-keygen panicked"))??;
+    let digest_short = digest_handle
+        .join()
+        .map_err(|_| eyre!("digest panicked"))??;
     let podman_vm_guid = guid_handle.join().map_err(|_| eyre!("guid panicked"))??;
     let merged_path = mount_handle.join().map_err(|_| eyre!("mount panicked"))??;
     info!("image mounted at: {}", merged_path);
@@ -443,18 +493,27 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
                     }
                 }
             }
-            bail!("nbdkit container '{}' failed to start. Check EROFS plugin and image mount.", container_name)
+            bail!(
+                "nbdkit container '{}' failed to start. Check EROFS plugin and image mount.",
+                container_name
+            )
         })
     };
 
     // B2. VHDX create (needs merged_path + ssh_pubkey + digest)
     let vhdx_path = boot_files::create_boot_vhdx(
-        &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
+        &digest_short,
+        &merged_path,
+        &podman_ssh,
+        &ssh_pubkey,
+        vsock_port,
     )?;
     elapsed!("VHDX created");
 
     // Wait for VM + switch (should already be done during image mount)
-    let switch = switch_handle.join().map_err(|_| eyre!("switch panicked"))??;
+    let switch = switch_handle
+        .join()
+        .map_err(|_| eyre!("switch panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
     elapsed!("switch ready");
     vm_handle.join().map_err(|_| eyre!("VM panicked"))??;
@@ -526,8 +585,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
         // Relay connects to both VMs (Host-initiated, with retry for ephemeral VM)
         let _vsock_relay = crate::vsock_relay::VsockRelay::start(
-            vsock_port, 1, &podman_vm_guid, &ephemeral_vm_guid
-        ).await?;
+            vsock_port,
+            1,
+            &podman_vm_guid,
+            &ephemeral_vm_guid,
+        )
+        .await?;
         info!("vsock relay connected (port {})", vsock_port);
         elapsed!("relay connected");
 
@@ -571,12 +634,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Execute commands or interactive
         if !opts.execute.is_empty() {
             for cmd in &opts.execute {
-                crate::run_ephemeral_windows::run_ssh_command(ssh_port, &ssh_key_path, "root", cmd).map(|_| ())?;
+                crate::run_ephemeral_windows::run_ssh_command(ssh_port, &ssh_key_path, "root", cmd)
+                    .map(|_| ())?;
             }
         } else if ssh_pubkey.is_empty() {
             info!("VM running. Use: bcvk ephemeral ssh {}", name);
         } else {
-            let status = crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
+            let status =
+                crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
             let exit_code = status.code().unwrap_or(1);
             dhcp.stop();
             dhcp_handle.abort();
@@ -602,10 +667,13 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     std::fs::create_dir_all(&base)?;
 
     let vm_name = opts.name.clone().unwrap_or_else(|| {
-        format!("{:08x}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32)
+        format!(
+            "{:08x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32
+        )
     });
     let log_path = base.join(format!("bcvk-{}.log", vm_name));
     let log_file = std::fs::File::create(&log_path)?;
@@ -641,7 +709,10 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         image: opts.image.clone(),
         vm_name: format!("{}{}", VM_PREFIX, vm_name),
         ssh_port: 0, // Will be updated by child process once SSH is ready
-        ssh_key: base.join(format!("{}-key", vm_name)).to_string_lossy().to_string(),
+        ssh_key: base
+            .join(format!("{}-key", vm_name))
+            .to_string_lossy()
+            .to_string(),
         nbd_container: None, // Will be set by child process
         vsock_port: Some(1030),
         created: chrono::Utc::now().to_rfc3339(),
@@ -658,7 +729,9 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
 fn stop_nbdkit_container(name: &str) {
     let _ = Command::new("podman")
         .args(["rm", "-f", name])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---
@@ -680,7 +753,9 @@ pub fn detect_podman_vmtype() -> Result<String> {
     let output = Command::new("podman")
         .args(["machine", "info", "--format", "{{.Host.VMType}}"])
         .output()?;
-    let vmtype = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+    let vmtype = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_lowercase();
     if vmtype.is_empty() {
         bail!("could not detect podman machine VM type");
     }
@@ -709,14 +784,25 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
                 return Ok(());
             }
         }
-        let backoff = if attempt < 2 { 500 } else if attempt < 4 { 1000 } else { 2000 };
+        let backoff = if attempt < 2 {
+            500
+        } else if attempt < 4 {
+            1000
+        } else {
+            2000
+        };
         std::thread::sleep(Duration::from_millis(backoff));
         attempt += 1;
     }
 }
 
 #[cfg(target_os = "windows")]
-pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) -> Result<std::process::ExitStatus> {
+pub fn run_ssh_command(
+    port: u16,
+    key_path: &Path,
+    user: &str,
+    command: &str,
+) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
     let user_host = format!("{}@localhost", user);
@@ -724,12 +810,19 @@ pub fn run_ssh_command(port: u16, key_path: &Path, user: &str, command: &str) ->
     cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
     ssh_opts.apply_to_command(&mut cmd);
     cmd.args(["-o", "BatchMode=yes", &user_host, command]);
-    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-        .status().map_err(|e| eyre!("ssh failed: {}", e))
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| eyre!("ssh failed: {}", e))
 }
 
 #[cfg(target_os = "windows")]
-pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std::process::ExitStatus> {
+pub fn run_ssh_interactive(
+    port: u16,
+    key_path: &Path,
+    user: &str,
+) -> Result<std::process::ExitStatus> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
     let user_host = format!("{}@localhost", user);
@@ -737,8 +830,11 @@ pub fn run_ssh_interactive(port: u16, key_path: &Path, user: &str) -> Result<std
     cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
     ssh_opts.apply_to_command(&mut cmd);
     cmd.args(["-t", &user_host]);
-    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-        .status().map_err(|e| eyre!("ssh failed: {}", e))
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| eyre!("ssh failed: {}", e))
 }
 
 #[cfg(test)]
@@ -776,7 +872,7 @@ mod tests {
             ssh_port: 2222,
             ssh_key: "/tmp/test-key".to_string(),
             nbd_container: Some("bcvk-nbd-test".to_string()),
-            nbd_port: Some(10800),
+            vsock_port: Some(1030),
             created: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&meta).unwrap();
