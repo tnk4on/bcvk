@@ -241,6 +241,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         return run_detached(&opts);
     }
 
+    let t_start = std::time::Instant::now();
+    macro_rules! elapsed {
+        ($label:expr) => {
+            info!("[timing] {}: {:.1}s", $label, t_start.elapsed().as_secs_f64());
+        };
+    }
+
     // Preflight checks
     if !hyperv::is_hyper_v_enabled() {
         bail!("Hyper-V is not enabled. Run: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All");
@@ -366,6 +373,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         bail!("failed to get MERGED path");
     }
     info!("image mounted at: {}", merged_path);
+    elapsed!("image mount");
 
     // Step 2: Parallel tasks
     let switch_name = "bcvk";
@@ -436,24 +444,28 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         std::thread::spawn(move || hyperv::add_firewall_rules(0))
     };
     // Step 3: Wait for VHDX + VM + switch (nbdkit runs in background)
+    elapsed!("parallel tasks spawned");
     let vhdx_path = boot_files::create_boot_vhdx(
         &digest_short, &merged_path, &podman_ssh, &ssh_pubkey, vsock_port
     )?;
+    elapsed!("VHDX created");
 
     let switch = switch_handle.join().map_err(|_| eyre!("switch thread panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
+    elapsed!("switch ready");
     vm_handle.join().map_err(|_| eyre!("VM thread panicked"))??;
+    elapsed!("VM created");
     firewall_handle.join().map_err(|_| eyre!("firewall thread panicked"))??;
 
-    // nbdkit join deferred — it runs in background, relay will retry connection
     let nbd_container = nbd_container_name.clone();
     if let Err(e) = nbdkit_handle.join().map_err(|_| eyre!("nbdkit thread panicked"))? {
         info!("nbdkit warning: {}", e);
     }
-    info!("nbdkit started (--vsock port 1030)");
+    elapsed!("nbdkit ready");
 
     // Attach VHDX and set boot device
     hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
+    elapsed!("VHDX attached + boot set");
 
     let mut cleanup = VmCleanup {
         vm_name: vm_name.clone(),
@@ -478,12 +490,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Start VM first — nbd-vsock will listen on vsock port
         hyperv::start_vm(&vm_name)?;
         info!("VM {} started, VHDX booting...", vm_name);
+        elapsed!("VM started");
 
         // Relay connects to both VMs (Host-initiated, with retry for ephemeral VM)
         let _vsock_relay = crate::vsock_relay::VsockRelay::start(
             vsock_port, 4, &podman_vm_guid, &ephemeral_vm_guid
         ).await?;
         info!("vsock relay connected (port {})", vsock_port);
+        elapsed!("relay connected");
 
         // Open Hyper-V console window if --gui
         if opts.gui {
@@ -567,6 +581,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         // Wait for SSH
         crate::run_ephemeral_windows::wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
         info!("SSH connected!");
+        elapsed!("SSH connected (total)");
 
         // Execute commands or interactive
         if !opts.execute.is_empty() {
