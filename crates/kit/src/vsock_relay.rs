@@ -148,6 +148,64 @@ fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
 // --- Prefetch: read all sectors from podman into cache ---
 
 #[cfg(target_os = "windows")]
+/// Prefetch boot-critical regions: GPT + ESP + EROFS metadata (~256 MB)
+/// Remaining sectors are cached on-demand as VM reads them.
+#[cfg(target_os = "windows")]
+fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
+    // Handshake
+    let mut hs = [0u8; 18];
+    if !wsa_recv_exact(podman_sock, &mut hs) { return; }
+    let mut client_hs = [0u8; 20];
+    client_hs[0..4].copy_from_slice(&1u32.to_be().to_ne_bytes());
+    client_hs[4..12].copy_from_slice(&0x49484156454F5054u64.to_be().to_ne_bytes());
+    client_hs[12..16].copy_from_slice(&1u32.to_be().to_ne_bytes());
+    client_hs[16..20].copy_from_slice(&0u32.to_be().to_ne_bytes());
+    if !wsa_send_all(podman_sock, &client_hs) { return; }
+    let mut reply = [0u8; 134];
+    if !wsa_recv_exact(podman_sock, &mut reply) { return; }
+    let export_size = u64::from_be_bytes(reply[0..8].try_into().unwrap());
+
+    // Prefetch first 256 MB (GPT + ESP + EROFS metadata + early rootfs files)
+    const PREFETCH_LIMIT: u64 = 256 * 1024 * 1024;
+    let prefetch_end = std::cmp::min(PREFETCH_LIMIT, export_size);
+    let chunk_size: u32 = 512 * 1024;
+    let mut offset: u64 = 0;
+    let mut cached_bytes: u64 = 0;
+    let start = std::time::Instant::now();
+
+    while offset < prefetch_end {
+        let len = std::cmp::min(chunk_size as u64, prefetch_end - offset) as u32;
+        let mut req = [0u8; 28];
+        req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+        req[8..16].copy_from_slice(&offset.to_be_bytes());
+        req[16..24].copy_from_slice(&offset.to_be_bytes());
+        req[24..28].copy_from_slice(&len.to_be_bytes());
+        if !wsa_send_all(podman_sock, &req) { break; }
+
+        let mut reply_hdr = [0u8; 16];
+        if !wsa_recv_exact(podman_sock, &mut reply_hdr) { break; }
+        if u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap()) != 0 { break; }
+
+        let mut data = vec![0u8; len as usize];
+        if !wsa_recv_exact(podman_sock, &mut data) { break; }
+
+        cache.write().unwrap().insert(offset, data);
+        cached_bytes += len as u64;
+        offset += len as u64;
+    }
+
+    let elapsed = start.elapsed();
+    let speed = if elapsed.as_secs_f64() > 0.0 {
+        (cached_bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+    } else { 0.0 };
+
+    info!("prefetch: boot regions {} MB in {:.1}s ({:.0} MB/s), {} entries",
+        cached_bytes / (1024 * 1024), elapsed.as_secs_f64(), speed,
+        cache.read().unwrap().len());
+
+    unsafe { closesocket(podman_sock); }
+}
+
 #[allow(dead_code)]
 fn prefetch_all(podman_sock: RawSocket, cache: NbdCache) {
     // NBD handshake with podman (we act as client)
@@ -356,8 +414,20 @@ impl VsockRelay {
         let mut handles = Vec::new();
         let cache = cache_new();
 
-        // On-demand caching: no prefetch, cache filled as VM reads sectors
-        info!("vsock relay: on-demand NBD caching enabled (no prefetch)");
+        // Prefetch boot regions FIRST (before relay connections)
+        // Uses 1 podman connection, closes it before relay connects
+        {
+            let pod_prefetch = podman_guid.clone();
+            let cache_prefetch = cache.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                info!("vsock relay: prefetching boot regions from podman");
+                let podman_sock = match unsafe { hvsock_connect(&pod_prefetch, vsock_port) } {
+                    Ok(s) => s,
+                    Err(e) => { info!("vsock relay: prefetch connect failed: {}", e); return; }
+                };
+                prefetch_boot_regions(podman_sock, cache_prefetch);
+            }).await;
+        }
 
         let mut connect_handles = Vec::new();
         for i in 0..num_connections {
