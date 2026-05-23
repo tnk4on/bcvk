@@ -1,6 +1,6 @@
 use libc::{
-    sockaddr_vm, socket, bind, listen, accept, setsockopt, AF_VSOCK, SOCK_STREAM, SOL_SOCKET,
-    SO_SNDBUF, SO_RCVBUF, VMADDR_CID_ANY,
+    accept, bind, listen, setsockopt, sockaddr_vm, socket, AF_VSOCK, SOCK_STREAM, SOL_SOCKET,
+    SO_RCVBUF, SO_SNDBUF, VMADDR_CID_ANY,
 };
 use libublk::ctrl::UblkCtrlBuilder;
 use libublk::io::{BufDesc, BufDescList, UblkDev, UblkIOCtx, UblkQueue};
@@ -24,7 +24,12 @@ fn readall(fd: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()> {
     let mut done = 0;
     while done < buf.len() {
         let n = fd.read(&mut buf[done..])?;
-        if n == 0 { return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF")); }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF",
+            ));
+        }
         done += n;
     }
     Ok(())
@@ -33,23 +38,44 @@ fn readall(fd: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()> {
 fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
     unsafe {
         let fd = socket(AF_VSOCK, SOCK_STREAM, 0);
-        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         let opt: libc::c_int = 1;
-        setsockopt(fd, SOL_SOCKET, libc::SO_REUSEADDR,
-            &opt as *const _ as *const libc::c_void, std::mem::size_of_val(&opt) as u32);
-        let timeout = libc::timeval { tv_sec: 5, tv_usec: 0 };
-        setsockopt(fd, SOL_SOCKET, libc::SO_RCVTIMEO,
-            &timeout as *const _ as *const libc::c_void, std::mem::size_of_val(&timeout) as u32);
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            &opt as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&opt) as u32,
+        );
+        let timeout = libc::timeval {
+            tv_sec: 30,
+            tv_usec: 0,
+        };
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &timeout as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&timeout) as u32,
+        );
         let mut addr: sockaddr_vm = std::mem::zeroed();
         addr.svm_family = AF_VSOCK as u16;
         addr.svm_cid = VMADDR_CID_ANY;
         addr.svm_port = port;
-        if bind(fd, &addr as *const _ as *const libc::sockaddr,
-                std::mem::size_of_val(&addr) as u32) < 0 {
-            libc::close(fd); return Err(std::io::Error::last_os_error());
+        if bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of_val(&addr) as u32,
+        ) < 0
+        {
+            libc::close(fd);
+            return Err(std::io::Error::last_os_error());
         }
         if listen(fd, 16) < 0 {
-            libc::close(fd); return Err(std::io::Error::last_os_error());
+            libc::close(fd);
+            return Err(std::io::Error::last_os_error());
         }
         Ok(fd)
     }
@@ -58,23 +84,45 @@ fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
 fn vsock_accept(lsock: RawFd) -> std::io::Result<UnixStream> {
     unsafe {
         let fd = accept(lsock, std::ptr::null_mut(), std::ptr::null_mut());
-        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         let sockbuf: libc::c_int = SOCKET_BUF_SIZE;
-        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf as *const _ as *const libc::c_void, 4);
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf as *const _ as *const libc::c_void, 4);
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sockbuf as *const _ as *const libc::c_void,
+            4,
+        );
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &sockbuf as *const _ as *const libc::c_void,
+            4,
+        );
         Ok(UnixStream::from_raw_fd(fd))
     }
 }
 
 fn nbd_handshake(stream: &mut UnixStream) -> std::io::Result<(u64, u16)> {
-    let mut magic = [0u8; 8]; let mut ihaveopt = [0u8; 8]; let mut hflags = [0u8; 2];
-    readall(stream, &mut magic)?; readall(stream, &mut ihaveopt)?; readall(stream, &mut hflags)?;
+    let mut magic = [0u8; 8];
+    let mut ihaveopt = [0u8; 8];
+    let mut hflags = [0u8; 2];
+    readall(stream, &mut magic)?;
+    readall(stream, &mut ihaveopt)?;
+    readall(stream, &mut hflags)?;
     stream.write_all(&1u32.to_be().to_ne_bytes())?;
     stream.write_all(&0x49484156454F5054u64.to_be().to_ne_bytes())?;
     stream.write_all(&1u32.to_be().to_ne_bytes())?;
     stream.write_all(&0u32.to_be().to_ne_bytes())?;
-    let mut sz = [0u8; 8]; let mut tf = [0u8; 2]; let mut pad = [0u8; 124];
-    readall(stream, &mut sz)?; readall(stream, &mut tf)?; readall(stream, &mut pad)?;
+    let mut sz = [0u8; 8];
+    let mut tf = [0u8; 2];
+    let mut pad = [0u8; 124];
+    readall(stream, &mut sz)?;
+    readall(stream, &mut tf)?;
+    readall(stream, &mut pad)?;
     Ok((u64::from_be_bytes(sz), u16::from_be_bytes(tf)))
 }
 
@@ -85,11 +133,19 @@ fn nbd_read(stream: &mut UnixStream, offset: u64, buf: &mut [u8]) -> i32 {
     req[6..8].copy_from_slice(&NBD_CMD_READ.to_be_bytes());
     req[16..24].copy_from_slice(&offset.to_be_bytes());
     req[24..28].copy_from_slice(&(len as u32).to_be_bytes());
-    if stream.write_all(&req).is_err() { return -(libc::EIO as i32); }
+    if stream.write_all(&req).is_err() {
+        return -(libc::EIO as i32);
+    }
     let mut reply = [0u8; 16];
-    if readall(stream, &mut reply).is_err() { return -(libc::EIO as i32); }
-    if u32::from_be_bytes(reply[4..8].try_into().unwrap()) != 0 { return -(libc::EIO as i32); }
-    if readall(stream, buf).is_err() { return -(libc::EIO as i32); }
+    if readall(stream, &mut reply).is_err() {
+        return -(libc::EIO as i32);
+    }
+    if u32::from_be_bytes(reply[4..8].try_into().unwrap()) != 0 {
+        return -(libc::EIO as i32);
+    }
+    if readall(stream, buf).is_err() {
+        return -(libc::EIO as i32);
+    }
     len as i32
 }
 
@@ -104,29 +160,62 @@ fn nbd_write(stream: &mut UnixStream, offset: u64, buf: &[u8]) -> i32 {
         return -(libc::EIO as i32);
     }
     let mut reply = [0u8; 16];
-    if readall(stream, &mut reply).is_err() { return -(libc::EIO as i32); }
-    if u32::from_be_bytes(reply[4..8].try_into().unwrap()) != 0 { return -(libc::EIO as i32); }
+    if readall(stream, &mut reply).is_err() {
+        return -(libc::EIO as i32);
+    }
+    if u32::from_be_bytes(reply[4..8].try_into().unwrap()) != 0 {
+        return -(libc::EIO as i32);
+    }
     len as i32
 }
 
 fn sd_notify_ready() {
-    let sock_path = match std::env::var("NOTIFY_SOCKET") { Ok(p) => p, Err(_) => return };
+    let sock_path = match std::env::var("NOTIFY_SOCKET") {
+        Ok(p) => p,
+        Err(_) => return,
+    };
     unsafe {
         let fd = socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0);
-        if fd < 0 { return; }
+        if fd < 0 {
+            return;
+        }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as u16;
         let pb = sock_path.as_bytes();
-        if pb[0] == b'@' { addr.sun_path[0] = 0; for (i,&b) in pb[1..].iter().enumerate() { if i+1 >= addr.sun_path.len() { break; } addr.sun_path[i+1] = b as i8; } }
-        else { for (i,&b) in pb.iter().enumerate() { if i >= addr.sun_path.len()-1 { break; } addr.sun_path[i] = b as i8; } }
+        if pb[0] == b'@' {
+            addr.sun_path[0] = 0;
+            for (i, &b) in pb[1..].iter().enumerate() {
+                if i + 1 >= addr.sun_path.len() {
+                    break;
+                }
+                addr.sun_path[i + 1] = b as i8;
+            }
+        } else {
+            for (i, &b) in pb.iter().enumerate() {
+                if i >= addr.sun_path.len() - 1 {
+                    break;
+                }
+                addr.sun_path[i] = b as i8;
+            }
+        }
         let len = std::mem::size_of::<libc::sa_family_t>() + pb.len();
-        libc::sendto(fd, b"READY=1".as_ptr() as *const _, 7, 0, &addr as *const _ as *const _, len as u32);
+        libc::sendto(
+            fd,
+            b"READY=1".as_ptr() as *const _,
+            7,
+            0,
+            &addr as *const _ as *const _,
+            len as u32,
+        );
         libc::close(fd);
     }
 }
 
 fn move_to_root_cgroup() {
-    let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", format!("{}\n", std::process::id()));
+    let _ = std::fs::write(
+        "/sys/fs/cgroup/cgroup.procs",
+        format!("{}\n", std::process::id()),
+    );
 }
 
 fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
@@ -141,20 +230,29 @@ fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
         let res = match op {
             sys::UBLK_IO_OP_READ => {
                 let p = bufs_ref[tag as usize].as_mut_ptr();
-                nbd_read(&mut stream, offset, unsafe { std::slice::from_raw_parts_mut(p, bytes) })
+                nbd_read(&mut stream, offset, unsafe {
+                    std::slice::from_raw_parts_mut(p, bytes)
+                })
             }
             sys::UBLK_IO_OP_WRITE => {
                 let p = bufs_ref[tag as usize].as_mut_ptr();
-                nbd_write(&mut stream, offset, unsafe { std::slice::from_raw_parts(p, bytes) })
+                nbd_write(&mut stream, offset, unsafe {
+                    std::slice::from_raw_parts(p, bytes)
+                })
             }
             _ => bytes as i32,
         };
-        let _ = q.complete_io_cmd_unified(tag,
-            BufDesc::Slice(bufs_ref[tag as usize].as_slice()), Ok(UblkIORes::Result(res)));
+        let _ = q.complete_io_cmd_unified(
+            tag,
+            BufDesc::Slice(bufs_ref[tag as usize].as_slice()),
+            Ok(UblkIORes::Result(res)),
+        );
     };
 
-    let queue = UblkQueue::new(qid, dev).unwrap()
-        .submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs))).unwrap();
+    let queue = UblkQueue::new(qid, dev)
+        .unwrap()
+        .submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs)))
+        .unwrap();
     queue.wait_and_handle_io(io_handler);
 }
 
@@ -167,9 +265,15 @@ fn main() {
     let vsock_port: u32 = args[2].parse().expect("invalid port");
     let num_queues: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
 
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
 
-    msg!("listening on vsock port {} (queues={})", vsock_port, num_queues);
+    msg!(
+        "listening on vsock port {} (queues={})",
+        vsock_port,
+        num_queues
+    );
     let lsock = vsock_listen(vsock_port).expect("vsock listen failed");
 
     let connections: Arc<Mutex<Vec<(UnixStream, u64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -178,25 +282,39 @@ fn main() {
             Ok(s) => s,
             Err(e) => {
                 msg!("accept failed (timeout or error): {}", e);
-                unsafe { libc::close(lsock); }
+                unsafe {
+                    libc::close(lsock);
+                }
                 std::process::exit(2);
             }
         };
         let (export_size, _) = nbd_handshake(&mut stream).expect("handshake failed");
-        msg!("connection {}: export_size={} MB", i, export_size / (1024 * 1024));
+        msg!(
+            "connection {}: export_size={} MB",
+            i,
+            export_size / (1024 * 1024)
+        );
         connections.lock().unwrap().push((stream, export_size));
     }
-    unsafe { libc::close(lsock); }
+    unsafe {
+        libc::close(lsock);
+    }
 
     let export_size = connections.lock().unwrap()[0].1;
 
     let ctrl = UblkCtrlBuilder::default()
-        .name("bcvk").nr_queues(num_queues).depth(64u16)
+        .name("bcvk")
+        .nr_queues(num_queues)
+        .depth(64u16)
         .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
-        .build().expect("ublk ctrl build failed");
+        .build()
+        .expect("ublk ctrl build failed");
 
     let sz = export_size;
-    let tgt_init = move |dev: &mut UblkDev| { dev.set_default_params(sz); Ok(()) };
+    let tgt_init = move |dev: &mut UblkDev| {
+        dev.set_default_params(sz);
+        Ok(())
+    };
 
     let conns = connections.clone();
     let q_fn = move |qid: u16, dev: &UblkDev| {
@@ -208,9 +326,14 @@ fn main() {
     let res = ctrl.run_target(tgt_init, q_fn, move |ctrl| {
         msg!("/dev/ublkb{} ready ({} queues)", ctrl.dev_info().dev_id, nq);
         sd_notify_ready();
-        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
         move_to_root_cgroup();
     });
 
-    if let Err(e) = res { msg!("FAILED: {:?}", e); std::process::exit(1); }
+    if let Err(e) = res {
+        msg!("FAILED: {:?}", e);
+        std::process::exit(1);
+    }
 }

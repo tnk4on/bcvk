@@ -498,7 +498,7 @@ if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-c
     /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
     UBLK_PID=$!\n\
     i=0\n\
-    while [ $i -lt 16 ]; do\n\
+    while [ $i -lt 60 ]; do\n\
         if [ -b /dev/ublkb0 ]; then\n\
             echo 'bcvk: ublk device ready' > /dev/kmsg\n\
             wait $UBLK_PID\n\
