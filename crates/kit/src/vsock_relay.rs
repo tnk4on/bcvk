@@ -454,13 +454,31 @@ impl VsockRelay {
                 let idx = i;
                 let sc = stop_clone;
                 let cc = cache_clone;
+                let pod_g2 = pod_g.clone();
+                let eph_g2 = eph_g.clone();
                 Some(tokio::spawn(async move {
                     let relay_task = tokio::task::spawn_blocking(move || {
-                        relay_one_connection_cached(vm_sock, podman_sock, cc);
+                        relay_one_connection_cached(vm_sock, podman_sock, cc.clone());
+                        // Connection dropped — attempt one reconnect (ublk→NBD failover)
+                        info!("vsock relay[{}]: connection closed, attempting reconnect", idx);
+                        let new_podman = match unsafe { hvsock_connect_retry(&pod_g2, vsock_port, 30, 200) } {
+                            Ok(s) => s,
+                            Err(e) => { info!("vsock relay[{}]: podman reconnect failed: {}", idx, e); return; }
+                        };
+                        let new_vm = match unsafe { hvsock_connect_retry(&eph_g2, vsock_port, 50, 200) } {
+                            Ok(s) => s,
+                            Err(e) => {
+                                info!("vsock relay[{}]: VM reconnect failed: {}", idx, e);
+                                unsafe { closesocket(new_podman); }
+                                return;
+                            }
+                        };
+                        info!("vsock relay[{}]: reconnected (failover)", idx);
+                        relay_one_connection_cached(new_vm, new_podman, cc);
                     });
                     tokio::select! {
                         _ = sc.notified() => { debug!("vsock relay[{}]: stop requested", idx); }
-                        _ = relay_task => { debug!("vsock relay[{}]: connection finished", idx); }
+                        _ = relay_task => { debug!("vsock relay[{}]: relay finished", idx); }
                     }
                 }))
             }));
