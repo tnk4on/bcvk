@@ -233,13 +233,14 @@ pub struct RunEphemeralOpts {
     pub debug: bool,
 }
 
+/// Parse memory specification string (e.g. "4G", "2048M") to megabytes.
 #[cfg(target_os = "windows")]
 pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
     let s = s.trim();
-    if let Some(num) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
-        Ok(num.parse::<u32>()? * 1024)
-    } else if let Some(num) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
-        Ok(num.parse::<u32>()?)
+    if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+        Ok((n.parse::<f64>()? * 1024.0) as u32)
+    } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+        Ok(n.parse::<f64>()? as u32)
     } else {
         Ok(s.parse::<u32>()?)
     }
