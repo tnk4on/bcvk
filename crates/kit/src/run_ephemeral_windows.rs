@@ -463,9 +463,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     elapsed!("nbdkit ready");
 
-    // Attach VHDX and set boot device
-    hyperv::add_vhdx_boot(&vm_name, &vhdx_path)?;
-    elapsed!("VHDX attached + boot set");
+    // Attach VHDX + set boot + start VM + get GUID in 1 PowerShell call
+    let ephemeral_vm_guid = hyperv::attach_and_start_vm(&vm_name, &vhdx_path)?;
+    elapsed!("VHDX attach + VM start");
 
     let mut cleanup = VmCleanup {
         vm_name: vm_name.clone(),
@@ -477,18 +477,13 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vsock_port: Some(vsock_port),
     };
 
-    // Get ephemeral VM GUID (created but not yet started)
-    let ephemeral_vm_guid = hyperv::get_vm_guid(&vm_name)?;
     info!("ephemeral VM GUID: {}", ephemeral_vm_guid);
 
-    // Run vsock relay + DHCP server + VM boot + SSH in async runtime
+    // Run vsock relay + DHCP server + SSH in async runtime
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let dhcp = DhcpServer::new(host_ip, client_ip)?;
         let dhcp_handle = dhcp.start_background();
-
-        // Start VM first — nbd-vsock will listen on vsock port
-        hyperv::start_vm(&vm_name)?;
         info!("VM {} started, VHDX booting...", vm_name);
         elapsed!("VM started");
 

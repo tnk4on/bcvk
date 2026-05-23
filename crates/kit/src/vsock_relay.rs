@@ -442,7 +442,7 @@ impl VsockRelay {
                     Err(e) => { info!("vsock relay[{}]: podman connect failed: {}", i, e); return None; }
                 };
                 info!("vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)", i, vsock_port);
-                let vm_sock = match unsafe { hvsock_connect_retry(&eph_g, vsock_port, 60, 2) } {
+                let vm_sock = match unsafe { hvsock_connect_retry(&eph_g, vsock_port, 60, 1) } {
                     Ok(s) => s,
                     Err(e) => {
                         info!("vsock relay[{}]: VM connect failed: {}", i, e);

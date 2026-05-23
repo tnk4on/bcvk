@@ -48,57 +48,24 @@ fn powershell_ignore_error(script: &str) {
 
 #[cfg(target_os = "windows")]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
-    let check = powershell(&format!(
-        "try {{ (Get-VMSwitch -Name '{}' -ErrorAction Stop).Name }} catch {{}}; exit 0",
-        name
-    ))?;
-
-    if check.is_empty() {
-        info!("creating Internal Switch: {}", name);
-        powershell(&format!("New-VMSwitch -Name '{}' -SwitchType Internal", name))?;
-    } else {
-        debug!("switch {} already exists", name);
-    }
-
-    let if_index = powershell(&format!(
-        "(Get-NetAdapter -Name 'vEthernet ({})').ifIndex",
-        name
-    ))?;
-
-    let existing_ip = powershell(&format!(
-        "Get-NetIPAddress -InterfaceIndex {} -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress",
-        if_index
-    )).unwrap_or_default();
-
-    if !existing_ip.contains(host_ip) {
-        powershell_ignore_error(&format!(
-            "New-NetIPAddress -InterfaceIndex {} -IPAddress {} -PrefixLength {}",
-            if_index, host_ip, prefix_len
-        ));
-        info!("assigned {} to switch {}", host_ip, name);
-    }
-
-    let nat_name = format!("{}-nat", name);
     let subnet = format!("{}/{}", host_ip.rsplit_once('.').map(|(base, _)| format!("{}.0", base)).unwrap_or_default(), prefix_len);
-    powershell_ignore_error(&format!(
-        "New-NetNat -Name '{}' -InternalIPInterfaceAddressPrefix '{}' -ErrorAction SilentlyContinue",
-        nat_name, subnet
-    ));
-
-    // Firewall rules for DHCP
-    powershell_ignore_error(&format!(
-        "New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -ErrorAction SilentlyContinue"
-    ));
-    // Disable firewall for the Internal Switch profile
-    powershell_ignore_error(
-        "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue"
+    let script = format!(
+        "$ErrorActionPreference = 'SilentlyContinue'; \
+         $sw = Get-VMSwitch -Name '{name}' -EA SilentlyContinue; \
+         if (-not $sw) {{ New-VMSwitch -Name '{name}' -SwitchType Internal | Out-Null }}; \
+         $idx = (Get-NetAdapter -Name 'vEthernet ({name})').ifIndex; \
+         $existing = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -EA SilentlyContinue; \
+         if (-not ($existing | Where-Object {{ $_.IPAddress -eq '{ip}' }})) {{ \
+             New-NetIPAddress -InterfaceIndex $idx -IPAddress {ip} -PrefixLength {pl} -EA SilentlyContinue | Out-Null \
+         }}; \
+         New-NetNat -Name '{name}-nat' -InternalIPInterfaceAddressPrefix '{subnet}' -EA SilentlyContinue | Out-Null; \
+         New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -EA SilentlyContinue | Out-Null; \
+         Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -EA SilentlyContinue; \
+         Disable-VMSwitchExtension -VMSwitchName '{name}' -Name 'Microsoft NDIS Capture' -EA SilentlyContinue; \
+         Write-Host 'OK'",
+        name = name, ip = host_ip, pl = prefix_len, subnet = subnet,
     );
-    // Disable NDIS Capture extension (blocks host→VM traffic)
-    powershell_ignore_error(&format!(
-        "Disable-VMSwitchExtension -VMSwitchName '{}' -Name 'Microsoft NDIS Capture' -ErrorAction SilentlyContinue",
-        name
-    ));
-
+    powershell(&script)?;
     Ok(SwitchInfo {
         name: name.to_string(),
         host_ip: host_ip.to_string(),
@@ -107,45 +74,20 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
 
 #[cfg(target_os = "windows")]
 pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> Result<()> {
-    powershell_ignore_error(&format!(
-        "Stop-VM -Name '{}' -Force -ErrorAction SilentlyContinue; Remove-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
-        name, name
-    ));
-
     let memory_bytes = (memory_mb as u64) * 1024 * 1024;
-    powershell(&format!(
-        "New-VM -Name '{}' -Generation 2 -MemoryStartupBytes {} -NoVHD -SwitchName '{}'",
-        name, memory_bytes, switch
-    ))?;
-
-    powershell(&format!(
-        "Set-VMProcessor -VMName '{}' -Count {}",
-        name, vcpus
-    ))?;
-
-    powershell(&format!(
-        "Set-VMFirmware -VMName '{}' -EnableSecureBoot Off",
-        name
-    ))?;
-
-    // Enable Guest Service Interface for hv_sock (vsock) communication
-    powershell_ignore_error(&format!(
-        "Enable-VMIntegrationService -VMName '{}' -Name 'Guest Service Interface'",
-        name
-    ));
-
-    // Disable checkpoints (not needed for ephemeral VMs)
-    powershell_ignore_error(&format!(
-        "Set-VM -Name '{}' -CheckpointType Disabled",
-        name
-    ));
-
-    // COM1 → named pipe for serial console capture
-    powershell_ignore_error(&format!(
-        "Set-VMComPort -VMName '{}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{}'",
-        name, name
-    ));
-
+    let script = format!(
+        "Stop-VM -Name '{name}' -Force -EA SilentlyContinue; \
+         Remove-VM -Name '{name}' -Force -EA SilentlyContinue; \
+         New-VM -Name '{name}' -Generation 2 -MemoryStartupBytes {mem} -NoVHD -SwitchName '{sw}' | Out-Null; \
+         Set-VMProcessor -VMName '{name}' -Count {cpu}; \
+         Set-VMFirmware -VMName '{name}' -EnableSecureBoot Off; \
+         Enable-VMIntegrationService -VMName '{name}' -Name 'Guest Service Interface' -EA SilentlyContinue; \
+         Set-VM -Name '{name}' -CheckpointType Disabled; \
+         Set-VMComPort -VMName '{name}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{name}'; \
+         Write-Host 'OK'",
+        name = name, mem = memory_bytes, cpu = vcpus, sw = switch,
+    );
+    powershell(&script)?;
     info!("created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)", name, vcpus, memory_mb);
     Ok(())
 }
@@ -181,6 +123,21 @@ pub fn start_vm(name: &str) -> Result<()> {
     powershell(&format!("Start-VM -Name '{}'", name))?;
     info!("started VM: {}", name);
     Ok(())
+}
+
+/// Attach VHDX, set boot device, start VM, return VM GUID — all in 1 PowerShell call.
+#[cfg(target_os = "windows")]
+pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
+    let script = format!(
+        "Add-VMHardDiskDrive -VMName '{name}' -Path '{vhdx}' -ControllerType SCSI; \
+         Set-VMFirmware -VMName '{name}' -FirstBootDevice (Get-VMHardDiskDrive -VMName '{name}' | Select-Object -First 1); \
+         Start-VM -Name '{name}'; \
+         (Get-VM -Name '{name}').Id.ToString()",
+        name = name, vhdx = vhdx_path,
+    );
+    let guid = powershell(&script)?;
+    info!("started VM: {} (GUID: {})", name, guid.trim());
+    Ok(guid.trim().to_string())
 }
 
 #[cfg(target_os = "windows")]
