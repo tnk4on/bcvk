@@ -24,7 +24,7 @@ use std::mem;
 #[cfg(target_os = "windows")]
 use std::os::windows::io::RawSocket;
 #[cfg(target_os = "windows")]
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 #[cfg(target_os = "windows")]
 const AF_HYPERV: i32 = 34;
@@ -105,11 +105,11 @@ impl HvSockGuid {
 // --- NBD cache ---
 
 #[cfg(target_os = "windows")]
-type NbdCache = Arc<Mutex<HashMap<u64, Vec<u8>>>>;
+type NbdCache = Arc<RwLock<HashMap<u64, Vec<u8>>>>;
 
 #[cfg(target_os = "windows")]
 fn cache_new() -> NbdCache {
-    Arc::new(Mutex::new(HashMap::new()))
+    Arc::new(RwLock::new(HashMap::new()))
 }
 
 // --- Socket helpers ---
@@ -200,7 +200,7 @@ fn prefetch_all(podman_sock: RawSocket, cache: NbdCache) {
         if !wsa_recv_exact(podman_sock, &mut data) { break; }
 
         // Store in cache
-        cache.lock().unwrap().insert(offset, data);
+        cache.write().unwrap().insert(offset, data);
         cached_bytes += len as u64;
         offset += len as u64;
     }
@@ -212,7 +212,7 @@ fn prefetch_all(podman_sock: RawSocket, cache: NbdCache) {
 
     info!("prefetch: cached {} MB in {:.1}s ({:.0} MB/s), {} entries",
         cached_bytes / (1024 * 1024), elapsed.as_secs_f64(), speed,
-        cache.lock().unwrap().len());
+        cache.read().unwrap().len());
 
     unsafe { closesocket(podman_sock); }
 }
@@ -226,7 +226,7 @@ struct PendingRead {
 }
 
 #[cfg(target_os = "windows")]
-type PendingMap = Arc<Mutex<HashMap<u64, PendingRead>>>;
+type PendingMap = Arc<RwLock<HashMap<u64, PendingRead>>>;
 
 #[cfg(target_os = "windows")]
 fn relay_vm_to_podman_tracked(vm_sock: RawSocket, podman_sock: RawSocket, cache: NbdCache, pending: PendingMap) {
@@ -253,7 +253,7 @@ fn relay_vm_to_podman_tracked(vm_sock: RawSocket, podman_sock: RawSocket, cache:
 
         if cmd == NBD_CMD_READ {
             // Check cache
-            if let Some(cached_data) = cache.lock().unwrap().get(&offset) {
+            if let Some(cached_data) = cache.read().unwrap().get(&offset) {
                 if cached_data.len() == length {
                     // Cache hit!
                     let mut reply = [0u8; 16];
@@ -265,7 +265,7 @@ fn relay_vm_to_podman_tracked(vm_sock: RawSocket, podman_sock: RawSocket, cache:
                 }
             }
             // Cache miss: track this request for caching on reply
-            pending.lock().unwrap().insert(handle, PendingRead { offset, length });
+            pending.write().unwrap().insert(handle, PendingRead { offset, length });
         }
 
         // Forward to podman
@@ -307,7 +307,7 @@ fn relay_podman_to_vm_tracked(podman_sock: RawSocket, vm_sock: RawSocket, cache:
         let handle = u64::from_be_bytes(reply_hdr[8..16].try_into().unwrap());
 
         // Check if this is a response to a tracked read
-        let pending_read = pending.lock().unwrap().remove(&handle);
+        let pending_read = pending.write().unwrap().remove(&handle);
 
         if let Some(pr) = pending_read {
             if error == 0 {
@@ -316,7 +316,7 @@ fn relay_podman_to_vm_tracked(podman_sock: RawSocket, vm_sock: RawSocket, cache:
                 if !wsa_recv_exact(podman_sock, &mut data) { break; }
 
                 // Cache it
-                cache.lock().unwrap().insert(pr.offset, data.clone());
+                cache.write().unwrap().insert(pr.offset, data.clone());
 
                 // Forward reply + data to VM
                 if !wsa_send_all(vm_sock, &reply_hdr) { break; }
@@ -433,7 +433,7 @@ impl Drop for VsockRelay {
 
 #[cfg(target_os = "windows")]
 fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache: NbdCache) {
-    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(RwLock::new(HashMap::new()));
 
     let cache_req = cache.clone();
     let pending_req = pending.clone();
