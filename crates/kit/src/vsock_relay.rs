@@ -145,6 +145,78 @@ fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
     true
 }
 
+// --- Prefetch: read all sectors from podman into cache ---
+
+#[cfg(target_os = "windows")]
+fn prefetch_all(podman_sock: RawSocket, cache: NbdCache) {
+    // NBD handshake with podman (we act as client)
+    // Read: magic(8) + ihaveopt(8) + hflags(2) = 18 bytes
+    let mut hs = [0u8; 18];
+    if !wsa_recv_exact(podman_sock, &mut hs) { info!("prefetch: handshake read failed"); return; }
+
+    // Send: cflags(4) + opt_magic(8) + opt_id(4) + opt_len(4) = 20 bytes
+    let mut client_hs = [0u8; 20];
+    client_hs[0..4].copy_from_slice(&1u32.to_be().to_ne_bytes()); // cflags
+    client_hs[4..12].copy_from_slice(&0x49484156454F5054u64.to_be().to_ne_bytes()); // opt_magic
+    client_hs[12..16].copy_from_slice(&1u32.to_be().to_ne_bytes()); // NBD_OPT_EXPORT_NAME
+    client_hs[16..20].copy_from_slice(&0u32.to_be().to_ne_bytes()); // opt_len
+    if !wsa_send_all(podman_sock, &client_hs) { info!("prefetch: handshake send failed"); return; }
+
+    // Read: export_size(8) + tflags(2) + pad(124) = 134 bytes
+    let mut reply = [0u8; 134];
+    if !wsa_recv_exact(podman_sock, &mut reply) { info!("prefetch: handshake reply failed"); return; }
+
+    let export_size = u64::from_be_bytes(reply[0..8].try_into().unwrap());
+    info!("prefetch: export_size={} MB, starting sequential read", export_size / (1024 * 1024));
+
+    // Sequential read in 512KB chunks
+    let chunk_size: u32 = 512 * 1024;
+    let mut offset: u64 = 0;
+    let mut cached_bytes: u64 = 0;
+    let start = std::time::Instant::now();
+
+    while offset < export_size {
+        let len = std::cmp::min(chunk_size as u64, export_size - offset) as u32;
+
+        // Send NBD read request
+        let mut req = [0u8; 28];
+        req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+        // cmd = READ (0)
+        // handle = offset as handle (unique enough for prefetch)
+        req[8..16].copy_from_slice(&offset.to_be_bytes());
+        req[16..24].copy_from_slice(&offset.to_be_bytes());
+        req[24..28].copy_from_slice(&len.to_be_bytes());
+        if !wsa_send_all(podman_sock, &req) { break; }
+
+        // Read reply header
+        let mut reply_hdr = [0u8; 16];
+        if !wsa_recv_exact(podman_sock, &mut reply_hdr) { break; }
+
+        let error = u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap());
+        if error != 0 { break; }
+
+        // Read data
+        let mut data = vec![0u8; len as usize];
+        if !wsa_recv_exact(podman_sock, &mut data) { break; }
+
+        // Store in cache
+        cache.lock().unwrap().insert(offset, data);
+        cached_bytes += len as u64;
+        offset += len as u64;
+    }
+
+    let elapsed = start.elapsed();
+    let speed = if elapsed.as_secs_f64() > 0.0 {
+        (cached_bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+    } else { 0.0 };
+
+    info!("prefetch: cached {} MB in {:.1}s ({:.0} MB/s), {} entries",
+        cached_bytes / (1024 * 1024), elapsed.as_secs_f64(), speed,
+        cache.lock().unwrap().len());
+
+    unsafe { closesocket(podman_sock); }
+}
+
 // --- NBD-aware caching relay with request tracking ---
 
 #[cfg(target_os = "windows")]
@@ -282,6 +354,18 @@ impl VsockRelay {
         let stop = Arc::new(Notify::new());
         let mut handles = Vec::new();
         let cache = cache_new();
+
+        // Prefetch: connect to podman separately and read all sectors into cache
+        let pod_prefetch = podman_guid.clone();
+        let cache_prefetch = cache.clone();
+        tokio::task::spawn_blocking(move || {
+            info!("vsock relay: starting prefetch from podman machine");
+            let podman_sock = match unsafe { hvsock_connect(&pod_prefetch, vsock_port) } {
+                Ok(s) => s,
+                Err(e) => { info!("vsock relay: prefetch connect failed: {}", e); return; }
+            };
+            prefetch_all(podman_sock, cache_prefetch);
+        });
 
         let mut connect_handles = Vec::new();
         for i in 0..num_connections {
