@@ -148,6 +148,7 @@ fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
 // --- Prefetch: read all sectors from podman into cache ---
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn prefetch_all(podman_sock: RawSocket, cache: NbdCache) {
     // NBD handshake with podman (we act as client)
     // Read: magic(8) + ihaveopt(8) + hflags(2) = 18 bytes
@@ -355,17 +356,8 @@ impl VsockRelay {
         let mut handles = Vec::new();
         let cache = cache_new();
 
-        // Prefetch: connect to podman separately and read all sectors into cache
-        let pod_prefetch = podman_guid.clone();
-        let cache_prefetch = cache.clone();
-        tokio::task::spawn_blocking(move || {
-            info!("vsock relay: starting prefetch from podman machine");
-            let podman_sock = match unsafe { hvsock_connect(&pod_prefetch, vsock_port) } {
-                Ok(s) => s,
-                Err(e) => { info!("vsock relay: prefetch connect failed: {}", e); return; }
-            };
-            prefetch_all(podman_sock, cache_prefetch);
-        });
+        // On-demand caching: no prefetch, cache filled as VM reads sectors
+        info!("vsock relay: on-demand NBD caching enabled (no prefetch)");
 
         let mut connect_handles = Vec::new();
         for i in 0..num_connections {
