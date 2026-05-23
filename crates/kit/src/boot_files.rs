@@ -193,25 +193,13 @@ fn fetch_boot_files(merged_path: &str, ssh: &PodmanSsh, cache_dir: &PathBuf) -> 
     let _ = ssh.ssh_cmd(&format!(
         "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
          xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/ublk_drv.ko.xz > /tmp/ublk_drv.ko 2>/dev/null || true",
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko",
         m = merged_path, k = kver,
     ));
     let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
-    let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
-    info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
-
-    // Copy ublk-vsock binary from well-known location if available
-    let ublk_vsock_src = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk").join("ublk-vsock");
-    if ublk_vsock_src.exists() {
-        let dest = cache_dir.join("ublk-vsock");
-        std::fs::copy(&ublk_vsock_src, &dest)?;
-        info!("copied ublk-vsock from {}", ublk_vsock_src.display());
-    }
+    info!("kernel modules (vsock, hv_sock, nbd): SCP complete");
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
     let grub_efi = std::fs::read(cache_dir.join("grubx64.efi"))?;
@@ -367,19 +355,8 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     w.write_all(NBD_VSOCK_BIN)?;
     w.finish()?;
 
-    // ublk-vsock binary (included if available in cache_dir)
-    let ublk_vsock_path = cache_dir.join("ublk-vsock");
-    if ublk_vsock_path.exists() {
-        let ublk_data = std::fs::read(&ublk_vsock_path)?;
-        let b = NewcBuilder::new("usr/bin/ublk-vsock").mode(0o755).set_mode_file_type(ModeFileType::Regular);
-        let mut w = b.write(&mut buf, ublk_data.len() as u32);
-        w.write_all(&ublk_data)?;
-        w.finish()?;
-        info!("included ublk-vsock ({} bytes) in initramfs", ublk_data.len());
-    }
-
-    // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko (always), ublk_drv.ko (if available)
-    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
+    // Kernel modules: nbd.ko, vsock.ko, hv_sock.ko
+    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
@@ -392,7 +369,7 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
         }
     }
 
-    // Module loading script: load vsock + hv_sock (required), try ublk_drv (optional)
+    // Module loading script: load vsock + hv_sock + nbd
     let setup_modules = "\
 #!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
@@ -400,14 +377,7 @@ insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
 for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
   sleep 1\n\
-done\n\
-if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
-  # Create device node manually (udev may not be running yet in initramfs)\n\
-  if [ ! -e /dev/ublk-control ] && [ -f /sys/class/misc/ublk-control/dev ]; then\n\
-    DEVNUM=$(cat /sys/class/misc/ublk-control/dev)\n\
-    mknod /dev/ublk-control c ${DEVNUM%%:*} ${DEVNUM##*:}\n\
-  fi\n\
-fi\n";
+done\n";
     let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, setup_modules.len() as u32);
     w.write_all(setup_modules.as_bytes())?;
@@ -431,26 +401,11 @@ fi\n";
     w.write_all(svc_modules.as_bytes())?;
     w.finish()?;
 
-    // Block device setup script: try ublk-vsock, fall back to NBD
+    // Block device setup script: NBD via vsock
     let block_device_script = format!("\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
-\n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    echo 'bcvk: trying ublk (io_uring) block device' > /dev/kmsg\n\
-    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 4 2>/dev/kmsg &\n\
-    UBLK_PID=$!\n\
-    sleep 10\n\
-    if [ -b /dev/ublkb0 ]; then\n\
-        echo 'bcvk: ublk device created successfully' > /dev/kmsg\n\
-        wait $UBLK_PID\n\
-        exit $?\n\
-    fi\n\
-    echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
-    kill $UBLK_PID 2>/dev/null\n\
-    wait $UBLK_PID 2>/dev/null\n\
-fi\n\
-echo 'bcvk: using NBD (socketpair relay) block device' > /dev/kmsg\n\
+echo 'bcvk: using NBD block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
         vsock_port = vsock_port
@@ -460,17 +415,12 @@ exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
     w.write_all(block_device_script.as_bytes())?;
     w.finish()?;
 
-    // ExecStartPost script: reread partition table on whichever device was created
+    // ExecStartPost script: reread partition table
     let post_script = "\
 #!/bin/bash\n\
 sleep 1\n\
-if [ -b /dev/ublkb0 ]; then\n\
-    DEV=ublkb0\n\
-else\n\
-    DEV=nbd0\n\
-fi\n\
-blockdev --rereadpt /dev/$DEV 2>/dev/null\n\
-echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
+blockdev --rereadpt /dev/nbd0 2>/dev/null\n\
+echo 65536 > /sys/block/nbd0/queue/read_ahead_kb 2>/dev/null\n";
     let b = NewcBuilder::new("usr/lib/bcvk/block-device-post.sh").mode(0o755).set_mode_file_type(ModeFileType::Regular);
     let mut w = b.write(&mut buf, post_script.len() as u32);
     w.write_all(post_script.as_bytes())?;
