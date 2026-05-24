@@ -366,8 +366,9 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     let ssh_key_path = ctx.ssh_key_path.clone();
     let ssh_handle = std::thread::spawn(move || -> Result<String> {
         if need_ssh {
+            let pub_path = PathBuf::from(format!("{}.pub", ssh_key_path.display()));
             let _ = std::fs::remove_file(&ssh_key_path);
-            let _ = std::fs::remove_file(ssh_key_path.with_extension("pub"));
+            let _ = std::fs::remove_file(&pub_path);
             let status = Command::new("ssh-keygen")
                 .args(["-t", "ed25519", "-f"])
                 .arg(&ssh_key_path)
@@ -376,7 +377,7 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
             if !status.success() {
                 bail!("ssh-keygen failed");
             }
-            Ok(std::fs::read_to_string(ssh_key_path.with_extension("pub"))?)
+            Ok(std::fs::read_to_string(&pub_path)?)
         } else {
             Ok(String::new())
         }
