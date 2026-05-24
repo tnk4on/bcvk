@@ -258,6 +258,21 @@ fn q_handler(qid: u16, dev: &UblkDev, mut stream: UnixStream) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // --test mode: check if ublk device creation works (no vsock, no I/O)
+    if args.get(1).map(|s| s.as_str()) == Some("--test") {
+        match UblkCtrlBuilder::default()
+            .name("bcvk-test")
+            .nr_queues(1u16)
+            .depth(1u16)
+            .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+            .build()
+        {
+            Ok(_ctrl) => std::process::exit(0),
+            Err(_) => std::process::exit(1),
+        }
+    }
+
     if args.len() < 3 || args.len() > 4 {
         eprintln!("Usage: ublk-vsock <device> <vsock_port> [num_queues]");
         std::process::exit(1);
