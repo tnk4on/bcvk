@@ -148,7 +148,11 @@ pub fn create_windows_ssh_cpio(pubkey: &str, password_hash: &str) -> io::Result<
          sed -i 's|^root:[^:]*:|root:{}:|' /sysroot/etc/shadow\n",
         pubkey, password_hash
     );
-    write_file_exec(&mut buf, "usr/lib/bcvk/setup-ssh.sh", setup_script.as_bytes())?;
+    write_file_exec(
+        &mut buf,
+        "usr/lib/bcvk/setup-ssh.sh",
+        setup_script.as_bytes(),
+    )?;
 
     write_file(
         &mut buf,
