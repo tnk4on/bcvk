@@ -410,21 +410,35 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
         Ok(guid)
     });
 
-    let image_clone = opts.image.clone();
-    let digest_handle =
-        std::thread::spawn(move || boot_files::ensure_image_and_get_digest(&image_clone));
-
+    // Pull via host podman (has registry auth), then mount via SSH
+    let image_pull = opts.image.clone();
     let ps_mount = ctx.podman_ssh.clone();
     let image_mount = opts.image.clone();
     let rootful = ctx.rootful;
     let mount_handle = std::thread::spawn(move || -> Result<String> {
+        // Pull on host side (uses podman machine connection with registry auth)
+        let exists = Command::new("podman")
+            .args(["image", "exists", &image_pull])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !exists.success() {
+            info!("pulling image {}...", image_pull);
+            let pull = Command::new("podman")
+                .args(["pull", &image_pull])
+                .status()?;
+            if !pull.success() {
+                bail!("failed to pull image: {}", image_pull);
+            }
+        }
+        // Mount via SSH (image already pulled above)
         let pfx = if rootful {
             "sudo podman"
         } else {
             "podman unshare podman"
         };
         let script = format!(
-            "{pfx} pull -q {image}; MERGED=$({pfx} image mount {image}); echo MERGED=$MERGED",
+            "MERGED=$({pfx} image mount {image}); echo MERGED=$MERGED",
             pfx = pfx,
             image = image_mount,
         );
@@ -444,12 +458,11 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     let ssh_pubkey = ssh_handle
         .join()
         .map_err(|_| eyre!("ssh-keygen panicked"))??;
-    let digest_short = digest_handle
-        .join()
-        .map_err(|_| eyre!("digest panicked"))??;
     let podman_vm_guid = guid_handle.join().map_err(|_| eyre!("guid panicked"))??;
     let merged_path = mount_handle.join().map_err(|_| eyre!("mount panicked"))??;
     info!("image mounted at: {}", merged_path);
+    // Get digest after mount (pull is done by mount_handle, avoids parallel pull race)
+    let digest_short = boot_files::get_image_digest(&opts.image)?;
 
     Ok(Phase0Result {
         ssh_pubkey,

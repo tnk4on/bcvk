@@ -124,21 +124,9 @@ impl PodmanSsh {
     }
 }
 
-/// Ensure image exists locally (pull if needed) and return short digest.
+/// Get image digest (image must already exist locally).
 #[cfg(target_os = "windows")]
-pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
-    let exists = Command::new("podman")
-        .args(["image", "exists", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !exists.success() {
-        info!("pulling image {}...", image);
-        let pull = Command::new("podman").args(["pull", image]).status()?;
-        if !pull.success() {
-            bail!("failed to pull image: {}", image);
-        }
-    }
+pub fn get_image_digest(image: &str) -> Result<String> {
     let output = Command::new("podman")
         .args(["image", "inspect", "--format", "{{.Digest}}", image])
         .stdout(Stdio::piped())
