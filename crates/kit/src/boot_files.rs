@@ -494,22 +494,29 @@ fi\n";
 VSOCK_PORT={vsock_port}\n\
 \n\
 if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    echo 'bcvk: trying ublk block device' > /dev/kmsg\n\
-    /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
-    UBLK_PID=$!\n\
-    i=0\n\
-    while [ $i -lt 60 ]; do\n\
-        if [ -b /dev/ublkb0 ]; then\n\
-            echo 'bcvk: ublk device ready' > /dev/kmsg\n\
-            wait $UBLK_PID\n\
-            exit $?\n\
-        fi\n\
-        sleep 0.5\n\
-        i=$((i + 1))\n\
-    done\n\
-    echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
-    kill $UBLK_PID 2>/dev/null\n\
-    wait $UBLK_PID 2>/dev/null\n\
+    if /usr/bin/ublk-vsock --test 2>/dev/null; then\n\
+        echo 'bcvk: trying ublk block device' > /dev/kmsg\n\
+        /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
+        UBLK_PID=$!\n\
+        i=0\n\
+        while [ $i -lt 60 ]; do\n\
+            if [ -b /dev/ublkb0 ]; then\n\
+                echo 'bcvk: ublk device ready' > /dev/kmsg\n\
+                exit 0\n\
+            fi\n\
+            if ! kill -0 $UBLK_PID 2>/dev/null; then\n\
+                echo 'bcvk: ublk-vsock exited, falling back to NBD' > /dev/kmsg\n\
+                break\n\
+            fi\n\
+            sleep 0.5\n\
+            i=$((i + 1))\n\
+        done\n\
+        echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
+        kill $UBLK_PID 2>/dev/null\n\
+        wait $UBLK_PID 2>/dev/null\n\
+    else\n\
+        echo 'bcvk: ublk not available (test failed), using NBD' > /dev/kmsg\n\
+    fi\n\
 fi\n\
 echo 'bcvk: using NBD block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
