@@ -116,8 +116,7 @@ fn find_grub(dir: &std::path::Path) -> Option<PathBuf> {
         }
         None
     }
-    walk(&dir.join("usr/lib"), "grubaa64.efi")
-        .or_else(|| walk(&dir.join("usr/lib"), "grubx64.efi"))
+    walk(&dir.join("usr/lib"), "grubaa64.efi").or_else(|| walk(&dir.join("usr/lib"), "grubx64.efi"))
 }
 
 #[no_mangle]
@@ -145,9 +144,8 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let erofs_regions = regions::consolidate_regions(
-        erofs::build_erofs_regions(&erofs_layout, &walk),
-    );
+    let erofs_regions =
+        regions::consolidate_regions(erofs::build_erofs_regions(&erofs_layout, &walk));
 
     // Discover boot files from dir
     let (kernel_path, initrd_path) = match find_kernel_dir(&state.dir) {

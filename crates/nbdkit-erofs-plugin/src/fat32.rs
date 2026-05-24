@@ -79,7 +79,11 @@ pub fn build_esp_regions(
     // Files
     let mut files: Vec<FatFile> = Vec::new();
 
-    let boot_efi_name = if grub_path.file_name().map(|n| n == "grubx64.efi").unwrap_or(false) {
+    let boot_efi_name = if grub_path
+        .file_name()
+        .map(|n| n == "grubx64.efi")
+        .unwrap_or(false)
+    {
         "BOOTX64"
     } else {
         "BOOTAA64"
@@ -358,8 +362,7 @@ pub fn build_esp_regions(
                         len: *len,
                         region_type: RegionType::File {
                             file: std::sync::Arc::new(
-                                std::fs::File::open(path)
-                                    .expect("failed to open file for region"),
+                                std::fs::File::open(path).expect("failed to open file for region"),
                             ),
                         },
                     });

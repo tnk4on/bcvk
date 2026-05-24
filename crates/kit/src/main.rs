@@ -73,21 +73,21 @@ mod vfkit;
 
 // Windows-only modules (Hyper-V + NBD backend)
 #[cfg(target_os = "windows")]
+mod boot_files;
+#[cfg(target_os = "windows")]
+mod dhcp_server;
+#[cfg(target_os = "windows")]
 mod ephemeral_windows;
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 mod hyperv;
 #[cfg(target_os = "windows")]
+mod run_ephemeral_windows;
+#[cfg(target_os = "windows")]
 mod ssh_forward;
-#[cfg(target_os = "windows")]
-mod dhcp_server;
-#[cfg(target_os = "windows")]
-mod boot_files;
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod vsock_relay;
-#[cfg(target_os = "windows")]
-mod run_ephemeral_windows;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]

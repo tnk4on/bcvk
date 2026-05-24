@@ -49,7 +49,10 @@ impl DhcpServer {
 
 #[cfg(target_os = "windows")]
 fn parse_ip(s: &str) -> Result<[u8; 4]> {
-    let parts: Vec<u8> = s.split('.').map(|p| p.parse::<u8>()).collect::<std::result::Result<Vec<_>, _>>()?;
+    let parts: Vec<u8> = s
+        .split('.')
+        .map(|p| p.parse::<u8>())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     if parts.len() != 4 {
         bail!("invalid IP: {}", s);
     }
@@ -58,7 +61,10 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
 
 #[cfg(target_os = "windows")]
 async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> Result<()> {
-    let bind_addr = format!("{}.{}.{}.{}:67", server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
+    let bind_addr = format!(
+        "{}.{}.{}.{}:67",
+        server_ip[0], server_ip[1], server_ip[2], server_ip[3]
+    );
     let sock = UdpSocket::bind(&bind_addr).await?;
     sock.set_broadcast(true)?;
     info!("DHCP listening on {}", bind_addr);
@@ -92,7 +98,13 @@ async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> 
 }
 
 #[cfg(target_os = "windows")]
-fn build_dhcp_response(xid: &[u8], chaddr: &[u8], server_ip: &[u8; 4], client_ip: &[u8; 4], msg_type: u8) -> Vec<u8> {
+fn build_dhcp_response(
+    xid: &[u8],
+    chaddr: &[u8],
+    server_ip: &[u8; 4],
+    client_ip: &[u8; 4],
+    msg_type: u8,
+) -> Vec<u8> {
     let mut resp = vec![0u8; 512];
     resp[0] = 2;
     resp[1] = 1;
@@ -103,12 +115,28 @@ fn build_dhcp_response(xid: &[u8], chaddr: &[u8], server_ip: &[u8; 4], client_ip
     resp[28..44].copy_from_slice(chaddr);
     resp[236..240].copy_from_slice(&[99, 130, 83, 99]);
     let mut i = 240;
-    resp[i] = 53; resp[i + 1] = 1; resp[i + 2] = msg_type; i += 3;
-    resp[i] = 1; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(&[255, 255, 255, 0]); i += 6;
-    resp[i] = 3; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(server_ip); i += 6;
-    resp[i] = 54; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(server_ip); i += 6;
-    resp[i] = 51; resp[i + 1] = 4; resp[i + 2..i + 6].copy_from_slice(&[0, 0, 14, 16]); i += 6;
-    resp[i] = 255; i += 1;
+    resp[i] = 53;
+    resp[i + 1] = 1;
+    resp[i + 2] = msg_type;
+    i += 3;
+    resp[i] = 1;
+    resp[i + 1] = 4;
+    resp[i + 2..i + 6].copy_from_slice(&[255, 255, 255, 0]);
+    i += 6;
+    resp[i] = 3;
+    resp[i + 1] = 4;
+    resp[i + 2..i + 6].copy_from_slice(server_ip);
+    i += 6;
+    resp[i] = 54;
+    resp[i + 1] = 4;
+    resp[i + 2..i + 6].copy_from_slice(server_ip);
+    i += 6;
+    resp[i] = 51;
+    resp[i + 1] = 4;
+    resp[i + 2..i + 6].copy_from_slice(&[0, 0, 14, 16]);
+    i += 6;
+    resp[i] = 255;
+    i += 1;
     resp.truncate(i);
     resp
 }
@@ -118,7 +146,9 @@ fn find_dhcp_option(data: &[u8], option: u8) -> Option<Vec<u8>> {
     let mut i = 240;
     while i < data.len() && data[i] != 255 {
         let opt = data[i];
-        if i + 1 >= data.len() { break; }
+        if i + 1 >= data.len() {
+            break;
+        }
         let len = data[i + 1] as usize;
         if opt == option && i + 2 + len <= data.len() {
             return Some(data[i + 2..i + 2 + len].to_vec());
