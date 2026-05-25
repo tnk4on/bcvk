@@ -70,6 +70,11 @@ mod nbdkit_macos;
 mod run_ephemeral_macos;
 #[cfg(target_os = "macos")]
 mod vfkit;
+// macOS krun backend (requires --features krun and libkrun-efi >= 1.18.0)
+#[cfg(all(target_os = "macos", feature = "krun"))]
+mod boot_files_macos;
+#[cfg(all(target_os = "macos", feature = "krun"))]
+mod run_ephemeral_macos_krun;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]

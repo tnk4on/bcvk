@@ -121,6 +121,9 @@ impl EphemeralVmMetadata {
 pub struct RunEphemeralOpts {
     /// Container image to boot
     pub image: String,
+    /// VM backend: "vfkit" (default) or "krun"
+    #[clap(long, short = 'b', default_value = "vfkit")]
+    pub backend: String,
     /// Number of vCPUs
     #[clap(long)]
     pub vcpus: Option<u32>,
@@ -150,7 +153,8 @@ pub struct RunEphemeralOpts {
     pub debug: bool,
 }
 
-fn default_vcpus() -> u32 {
+/// Default number of vCPUs based on available host parallelism.
+pub fn default_vcpus() -> u32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(2)
@@ -219,12 +223,25 @@ impl Drop for VmCleanup {
 
 // --- Main entry point ---
 
-/// Run an ephemeral VM from a container image using vfkit + EROFS over NBD.
+/// Run an ephemeral VM from a container image.
+///
+/// Dispatches to the appropriate backend based on `--backend` option.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together (GUI requires foreground process)");
     }
+    match opts.backend.as_str() {
+        "vfkit" => run_vfkit(opts),
+        #[cfg(feature = "krun")]
+        "krun" => crate::run_ephemeral_macos_krun::run_krun(opts),
+        #[cfg(not(feature = "krun"))]
+        "krun" => bail!("krun backend not available (rebuild with --features krun)"),
+        other => bail!("unknown backend: {} (expected 'vfkit' or 'krun')", other),
+    }
+}
 
+/// Run an ephemeral VM using vfkit + EROFS over NBD.
+fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.detach {
         return run_detached(&opts);
     }
@@ -537,7 +554,8 @@ pub fn detect_machine_name() -> Result<String> {
     Ok(name)
 }
 
-fn ensure_image_and_get_digest(image: &str) -> Result<String> {
+/// Ensure image exists locally (pulling if needed) and return its digest.
+pub fn ensure_image_and_get_digest(image: &str) -> Result<String> {
     let status = Command::new("podman")
         .args(["image", "exists", image])
         .stdout(Stdio::null())
@@ -560,7 +578,8 @@ fn ensure_image_and_get_digest(image: &str) -> Result<String> {
     Ok(digest.trim_start_matches("sha256:").to_string())
 }
 
-fn is_machine_rootful(machine: &str) -> bool {
+/// Check if the podman machine is running in rootful mode.
+pub fn is_machine_rootful(machine: &str) -> bool {
     Command::new("podman")
         .args(["machine", "ssh", machine, "id", "-u"])
         .output()

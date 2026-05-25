@@ -69,6 +69,8 @@ similar-asserts = "1.5"
 [features]
 # Implementation detail of man page generation.
 docgen = ["clap_mangen"]
+# Enable libkrun backend for macOS ephemeral VMs (requires libkrun-efi >= 1.18.0)
+krun = []
 
 [lints]
 workspace = true

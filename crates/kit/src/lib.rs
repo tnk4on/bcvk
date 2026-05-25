@@ -20,3 +20,9 @@ pub mod run_ephemeral_macos;
 
 #[cfg(target_os = "macos")]
 pub mod vfkit;
+
+// macOS krun backend (requires --features krun and libkrun-efi >= 1.18.0)
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub mod boot_files_macos;
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub mod run_ephemeral_macos_krun;
