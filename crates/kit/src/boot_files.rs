@@ -13,9 +13,6 @@ use std::process::{Command, Stdio};
 use tracing::info;
 
 #[cfg(target_os = "windows")]
-const NBD_VSOCK_BIN: &[u8] = include_bytes!("nbd-vsock.bin");
-
-#[cfg(target_os = "windows")]
 const PASSWORD_HASH: &str =
     "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
 
@@ -218,15 +215,17 @@ fn fetch_boot_files(
     let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
     info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
 
-    // Copy ublk-vsock binary from well-known location if available
-    let ublk_vsock_src = dirs::data_local_dir()
+    // Copy nbd-vsock and ublk-vsock binaries from well-known location
+    let bcvk_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
-        .join("bcvk")
-        .join("ublk-vsock");
-    if ublk_vsock_src.exists() {
-        let dest = cache_dir.join("ublk-vsock");
-        std::fs::copy(&ublk_vsock_src, &dest)?;
-        info!("copied ublk-vsock from {}", ublk_vsock_src.display());
+        .join("bcvk");
+    for bin_name in &["nbd-vsock", "ublk-vsock"] {
+        let src = bcvk_dir.join(bin_name);
+        if src.exists() {
+            let dest = cache_dir.join(bin_name);
+            std::fs::copy(&src, &dest)?;
+            info!("copied {} from {}", bin_name, src.display());
+        }
     }
 
     let kernel = std::fs::read(cache_dir.join("vmlinuz"))?;
@@ -398,11 +397,19 @@ fn add_binaries_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Resul
     use cpio::newc::ModeFileType;
     use std::io::Write;
 
+    let nbd_vsock_path = cache_dir.join("nbd-vsock");
+    if !nbd_vsock_path.exists() {
+        bail!(
+            "nbd-vsock binary not found at {}. Build it with: scripts/windows/build-nbd-vsock.sh",
+            nbd_vsock_path.display()
+        );
+    }
+    let nbd_data = std::fs::read(&nbd_vsock_path)?;
     let b = NewcBuilder::new("usr/bin/nbd-vsock")
         .mode(0o755)
         .set_mode_file_type(ModeFileType::Regular);
-    let mut w = b.write(&mut *buf, NBD_VSOCK_BIN.len() as u32);
-    w.write_all(NBD_VSOCK_BIN)?;
+    let mut w = b.write(&mut *buf, nbd_data.len() as u32);
+    w.write_all(&nbd_data)?;
     w.finish()?;
 
     let ublk_vsock_path = cache_dir.join("ublk-vsock");
