@@ -42,7 +42,7 @@ pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Resu
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Start nbdkit with the erofs plugin for dynamic EROFS + ESP + GPT generation.
+#[allow(dead_code)]
 pub(crate) fn start_nbdkit_erofs_plugin(
     machine: &str,
     merged_path: &str,
@@ -145,11 +145,10 @@ pub(crate) fn start_nbdkit_erofs_plugin(
     Ok(container_name)
 }
 
-/// Start nbdkit with the erofs plugin in AF_VSOCK mode for krun backend.
+/// Start nbdkit with the erofs plugin in AF_VSOCK mode for vsock backends.
 ///
 /// Unlike TCP mode, nbdkit listens on a vsock port inside the container.
-/// The krun VM connects via AF_VSOCK through krunkit connect mode.
-#[cfg(feature = "krun")]
+/// The VM connects via AF_VSOCK through krunkit connect mode.
 pub(crate) fn start_nbdkit_vsock(
     machine: &str,
     merged_path: &str,
@@ -235,6 +234,7 @@ pub(crate) fn start_nbdkit_vsock(
 }
 
 /// Find an available TCP port for NBD in range 10800-10900.
+#[allow(dead_code)]
 pub fn find_available_nbd_port() -> u16 {
     use rand::Rng;
     let mut rng = rand::rng();

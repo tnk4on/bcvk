@@ -10,16 +10,19 @@
 use std::ffi::{c_char, c_int, CString};
 use std::fs;
 use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use color_eyre::{
-    eyre::{bail, eyre, Context},
+    eyre::bail,
     Result,
 };
 use tracing::{debug, info};
 
+use crate::boot_files_macos::{
+    ensure_boot_files, build_vsock_initramfs, start_unix_bridge,
+};
 use crate::run_ephemeral_macos::{
     default_vcpus, detect_machine_name, ephemeral_base_dir, ensure_image_and_get_digest,
     expose_ssh_port, find_available_ssh_port, generate_mac, is_machine_rootful,
@@ -71,304 +74,8 @@ const COMPAT_NET_FEATURES: u32 =
 const NET_FLAG_VFKIT: u32 = 1 << 0;
 const VSOCK_PORT: u32 = 1030;
 
-// --- Boot file extraction ---
-
-struct BootFiles {
-    kernel_path: PathBuf,
-    initramfs_path: PathBuf,
-    cache_dir: PathBuf,
-}
-
-/// Decompress vmlinuz (PE+zstd) to ARM64 Image.
-/// ARM64 vmlinuz is a PE binary containing a zstd-compressed kernel payload.
-/// The zboot header at offset 4 contains payload offset and size.
-fn decompress_vmlinuz(vmlinuz_path: &Path, output_path: &Path) -> Result<()> {
-    let data = fs::read(vmlinuz_path)?;
-
-    // Check for zboot header: magic "zimg" at offset 4
-    if data.len() < 0x14 || &data[4..8] != b"zimg" {
-        bail!("vmlinuz does not have zboot header (not PE+zstd?)");
-    }
-
-    let payload_offset = u32::from_le_bytes(data[0x08..0x0c].try_into().unwrap()) as usize;
-    let payload_size = u32::from_le_bytes(data[0x0c..0x10].try_into().unwrap()) as usize;
-
-    if payload_offset + payload_size > data.len() {
-        bail!(
-            "zboot payload exceeds file size (offset={}, size={}, file={})",
-            payload_offset,
-            payload_size,
-            data.len()
-        );
-    }
-
-    let compressed = &data[payload_offset..payload_offset + payload_size];
-    let decompressed = zstd::decode_all(compressed)
-        .context("zstd decompression of vmlinuz payload failed")?;
-
-    // Verify ARM64 Image magic at offset 0x38
-    if decompressed.len() > 0x40 && &decompressed[0x38..0x3c] == b"ARMd" {
-        info!(
-            "ARM64 Image decompressed: {} → {} bytes",
-            data.len(),
-            decompressed.len()
-        );
-    } else {
-        tracing::warn!("decompressed kernel does not have ARM64 magic at 0x38");
-    }
-
-    fs::write(output_path, &decompressed)?;
-    Ok(())
-}
-
-fn ensure_boot_files(
-    machine: &str,
-    rootful: bool,
-    merged_path: &str,
-    digest_short: &str,
-) -> Result<BootFiles> {
-    let cache_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".local/share/bcvk/cache")
-        .join(format!("boot-{}", digest_short));
-
-    let vmlinuz_path = cache_dir.join("vmlinuz");
-    let kernel_path = cache_dir.join("Image");
-    let initramfs_path = cache_dir.join("initramfs.img");
-
-    if kernel_path.exists() && initramfs_path.exists() {
-        info!("boot files cache hit: {}", cache_dir.display());
-        return Ok(BootFiles {
-            kernel_path,
-            initramfs_path,
-            cache_dir,
-        });
-    }
-
-    fs::create_dir_all(&cache_dir)?;
-    info!("extracting boot files via podman machine ssh...");
-
-    let ssh_prefix = if rootful { "" } else { "sudo " };
-
-    // Get kernel version
-    let kver_cmd = format!(
-        "{}ls {}/usr/lib/modules/ | head -1",
-        ssh_prefix, merged_path
-    );
-    let kver_output = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", &kver_cmd])
-        .output()
-        .context("failed to get kernel version")?;
-    let kver = String::from_utf8_lossy(&kver_output.stdout)
-        .trim()
-        .to_string();
-    if kver.is_empty() {
-        bail!("kernel version not found in {}/usr/lib/modules/", merged_path);
-    }
-    info!("kernel version: {}", kver);
-
-    // Extract vmlinuz via cat
-    let vmlinuz_remote = format!("{}/usr/lib/modules/{}/vmlinuz", merged_path, kver);
-    podman_machine_cat(machine, ssh_prefix, &vmlinuz_remote, &vmlinuz_path)?;
-    info!("vmlinuz extracted ({} bytes)", fs::metadata(&vmlinuz_path)?.len());
-
-    // Extract initramfs.img
-    let initramfs_remote = format!("{}/usr/lib/modules/{}/initramfs.img", merged_path, kver);
-    podman_machine_cat(machine, ssh_prefix, &initramfs_remote, &initramfs_path)?;
-    info!(
-        "initramfs.img extracted ({} bytes)",
-        fs::metadata(&initramfs_path)?.len()
-    );
-
-    // Extract kernel modules (.ko.xz → decompress to /tmp, then cat)
-    let modules_cmd = format!(
-        "{p}bash -c '\
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko 2>/dev/null; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.xz > /tmp/vmw_vsock_virtio_transport_common.ko 2>/dev/null; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.xz > /tmp/vmw_vsock_virtio_transport.ko 2>/dev/null; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko 2>/dev/null; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/ublk_drv.ko.xz > /tmp/ublk_drv.ko 2>/dev/null; \
-         echo OK'",
-        p = ssh_prefix,
-        m = merged_path,
-        k = kver,
-    );
-    let _ = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", &modules_cmd])
-        .output();
-
-    for ko in &[
-        "vsock.ko",
-        "vmw_vsock_virtio_transport_common.ko",
-        "vmw_vsock_virtio_transport.ko",
-        "nbd.ko",
-        "ublk_drv.ko",
-    ] {
-        let _ = podman_machine_cat(
-            machine,
-            ssh_prefix,
-            &format!("/tmp/{}", ko),
-            &cache_dir.join(ko),
-        );
-    }
-    info!("kernel modules extracted");
-
-    // Copy ublk-vsock binary from well-known location if available
-    let ublk_vsock_src = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".local/share/bcvk/ublk-vsock");
-    if ublk_vsock_src.exists() {
-        fs::copy(&ublk_vsock_src, cache_dir.join("ublk-vsock"))?;
-        info!("copied ublk-vsock from {}", ublk_vsock_src.display());
-    }
-
-    // Decompress vmlinuz PE+zstd → ARM64 Image (libkrun aarch64 doesn't support format=5)
-    info!("decompressing vmlinuz to ARM64 Image...");
-    decompress_vmlinuz(&vmlinuz_path, &kernel_path)?;
-
-    Ok(BootFiles {
-        kernel_path,
-        initramfs_path,
-        cache_dir,
-    })
-}
-
-fn podman_machine_cat(
-    machine: &str,
-    ssh_prefix: &str,
-    remote_path: &str,
-    local_path: &Path,
-) -> Result<()> {
-    let cmd = format!("{}cat {}", ssh_prefix, remote_path);
-    let output = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", &cmd])
-        .output()
-        .context(format!("failed to cat {}", remote_path))?;
-    if !output.status.success() || output.stdout.is_empty() {
-        bail!(
-            "failed to extract {}: {}",
-            remote_path,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    fs::write(local_path, &output.stdout)?;
-    Ok(())
-}
-
-// --- Initramfs construction ---
-
-fn build_krun_initramfs(
-    boot_files: &BootFiles,
-    vsock_port: u32,
-    ssh_pubkey: &str,
-) -> Result<PathBuf> {
-    let mut initramfs = fs::read(&boot_files.initramfs_path)?;
-
-    let block_cpio =
-        crate::boot_files_macos::create_krun_block_device_cpio(vsock_port, &boot_files.cache_dir)?;
-    crate::boot_files_macos::append_cpio(&mut initramfs, &block_cpio);
-
-    let overlay_cpio = crate::cpio::create_initramfs_units_cpio()
-        .map_err(|e| eyre!("failed to create overlay CPIO: {e}"))?;
-    crate::boot_files_macos::append_cpio(&mut initramfs, &overlay_cpio);
-
-    if !ssh_pubkey.is_empty() {
-        let ssh_cpio = crate::boot_files_macos::create_macos_ssh_cpio(ssh_pubkey)?;
-        crate::boot_files_macos::append_cpio(&mut initramfs, &ssh_cpio);
-    }
-
-    let final_path = boot_files.cache_dir.join("initramfs-krun.img");
-    fs::write(&final_path, &initramfs)?;
-    info!("krun initramfs: {} bytes (uncompressed + CPIOs)", initramfs.len());
-    Ok(final_path)
-}
-
-// --- Unix socket bridge ---
-
-/// Bridge two Unix sockets bidirectionally.
-/// Connects to both sockets and relays data between them in two threads.
-/// Verifies NBD handshake on sock_b (nbdkit) before starting relay.
-fn start_unix_bridge(sock_a: &str, sock_b: &str) -> Result<()> {
-    use std::os::unix::net::UnixStream;
-
-    // Connect to nbdkit side FIRST (krunkit, always ready)
-    let b = UnixStream::connect(sock_b)
-        .context(format!("bridge: connect to nbdkit ({}) failed", sock_b))?;
-    b.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    debug!("bridge: connected to nbdkit side");
-
-    // Connect to krun VM side with retry (guest nbd-vsock may not be listening yet)
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let a = loop {
-        match UnixStream::connect(sock_a) {
-            Ok(s) => {
-                s.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                // Verify the krun side accepted by checking we can read (OP_REQUEST → guest accept)
-                let mut peek = [0u8; 1];
-                match std::io::Read::read(&mut s.try_clone()?, &mut peek) {
-                    Ok(0) => {
-                        // EOF = OP_REQUEST was RST'd (guest not ready yet)
-                        debug!("bridge: krun side not ready (RST), retrying...");
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-                    _ => {
-                        // Got data or would block = connection is alive
-                        debug!("bridge: krun side connected and alive");
-                        break s;
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("bridge: krun connect retry: {}", e);
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            bail!("bridge: krun side connection timed out");
-        }
-    };
-
-    // Clear read timeouts for relay
-    a.set_read_timeout(None).ok();
-    b.set_read_timeout(None).ok();
-
-    info!("bridge: {} ↔ {}", sock_a, sock_b);
-
-    let mut a_read = a.try_clone()?;
-    let mut b_write = b.try_clone()?;
-    let mut b_read = b;
-    let mut a_write = a;
-
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            match std::io::Read::read(&mut a_read, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if std::io::Write::write_all(&mut b_write, &buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            match std::io::Read::read(&mut b_read, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if std::io::Write::write_all(&mut a_write, &buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
+// Boot file extraction, initramfs construction, and Unix socket bridge
+// are in crate::boot_files_macos (shared with vfkit backend).
 
 // --- RAII cleanup ---
 
@@ -472,7 +179,7 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
     let cmdline = build_cmdline(&opts.kernel_args);
 
     // Build initramfs with CPIO appends
-    let final_initramfs = build_krun_initramfs(&boot_files, VSOCK_PORT, &ssh_pubkey)?;
+    let final_initramfs = build_vsock_initramfs(&boot_files, VSOCK_PORT, "initramfs-krun.img")?;
 
     // Start nbdkit in vsock mode
     let nbd_container = crate::nbdkit_macos::start_nbdkit_vsock(

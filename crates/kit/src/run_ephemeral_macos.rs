@@ -1,10 +1,13 @@
-//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS plugin.
+//! Ephemeral VM launch flow for macOS using vfkit + ublk/NBD over vsock.
 //!
 //! Boot flow (fully diskless):
 //! 1. Mount container image overlay (`podman image mount`)
-//! 2. Start nbdkit with erofs plugin (dynamically generates GPT + ESP + EROFS)
-//! 3. Launch vfkit with EFI boot via NBD + virtio-net (gvproxy)
-//! 4. Wait for SSH and execute commands
+//! 2. Extract boot files (vmlinuz → ARM64 Image, initramfs, kernel modules)
+//! 3. Build initramfs with CPIO appends (ublk-vsock/nbd-vsock, modules, services)
+//! 4. Start nbdkit with EROFS plugin in vsock mode (podman machine container)
+//! 5. Launch vfkit with direct kernel boot + virtio-vsock + virtio-net (gvproxy)
+//! 6. Start Unix socket bridge (vfkit vsock ↔ nbdkit vsock via krunkit)
+//! 7. Wait for SSH and execute commands
 //!
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
@@ -240,14 +243,32 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 }
 
-/// Run an ephemeral VM using vfkit + EROFS over NBD.
+const VSOCK_PORT: u32 = 1030;
+
+fn build_vsock_cmdline(user_args: &[String]) -> String {
+    let mut parts: Vec<&str> = vec![
+        "root=/dev/nbd0p2",
+        "rootfstype=erofs",
+        "ro",
+        "console=hvc0",
+        "loglevel=7",
+        "selinux=0",
+        "net.ifnames=0",
+        "systemd.journald.storage=volatile",
+    ];
+    let user: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
+    parts.extend(&user);
+    parts.join(" ")
+}
+
+/// Run an ephemeral VM using vfkit + ublk/NBD over vsock.
 fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.detach {
         return run_detached(&opts);
     }
 
     let vfkit_bin = find_vfkit()?;
-    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + EROFS)");
+    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + vsock)");
 
     let cache_base = ephemeral_base_dir();
     fs::create_dir_all(&cache_base)?;
@@ -296,39 +317,55 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
             .to_string();
     }
 
-    let mut cmdline_parts: Vec<&str> = vec![
-        "root=/dev/vda2",
-        "ro",
-        "rootfstype=erofs",
-        "console=tty0",
-        "console=hvc0",
-        "loglevel=4",
-        "selinux=0",
-        "net.ifnames=0",
-        "systemd.journald.storage=volatile",
-    ];
-    let user_args: Vec<&str> = opts.kernel_args.iter().map(|s| s.as_str()).collect();
-    cmdline_parts.extend(&user_args);
-    let cmdline = cmdline_parts.join(" ");
+    let cmdline = build_vsock_cmdline(&opts.kernel_args);
 
     // Get container image merged overlay path
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    // Start nbdkit with erofs plugin (dynamic EROFS + ESP + GPT from overlay dir)
-    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
-    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+    // Extract boot files (vmlinuz → ARM64 Image, initramfs, kernel modules)
+    let boot_files = crate::boot_files_macos::ensure_boot_files(
+        &machine, rootful, &merged_path, digest_short,
+    )?;
+
+    // Build initramfs with CPIO appends (ublk-vsock, nbd-vsock, modules, services)
+    let final_initramfs = crate::boot_files_macos::build_vsock_initramfs(
+        &boot_files, VSOCK_PORT, "initramfs-vfkit.img",
+    )?;
+
+    // Start nbdkit with EROFS plugin in vsock mode
+    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_vsock(
         &machine,
         &merged_path,
         &cmdline,
         &ssh_pubkey,
-        nbd_port,
+        VSOCK_PORT,
         &vm_name,
     )?;
-    std::thread::sleep(Duration::from_millis(500));
-    info!("nbdkit ready on port {}", nbd_port);
 
-    // gvproxy + vfkit (EFI boot)
+    // Verify nbdkit vsock readiness via krunkit connect socket
+    let nbd_sock = "/tmp/bcvk-nbd.sock";
+    info!("verifying nbdkit vsock via {}...", nbd_sock);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(nbd_sock) {
+            use std::io::Read;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .ok();
+            let mut buf = [0u8; 8];
+            if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
+                info!("nbdkit vsock ready (NBDMAGIC verified)");
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // gvproxy (SSH networking)
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
     let services_sock = cache_base.join(format!("{}-gvproxy-svc.sock", vm_name));
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
@@ -342,11 +379,20 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
-    let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
-
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
+
+    // vfkit vsock socket path
+    let vm_sock = "/tmp/bcvk-vm.sock";
+    let _ = fs::remove_file(vm_sock);
+
+    // vfkit args: direct kernel boot + virtio-vsock
+    let bootloader_arg = format!(
+        "linux,kernel={},initrd={},cmdline=\"{}\"",
+        boot_files.kernel_path.display(),
+        final_initramfs.display(),
+        cmdline,
+    );
 
     let mut vfkit_args = vec![
         "--cpus".to_string(),
@@ -357,8 +403,8 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         bootloader_arg,
         "--device".to_string(),
         format!(
-            "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
-            nbd_port
+            "virtio-vsock,port={},socketURL={},connect",
+            VSOCK_PORT, vm_sock
         ),
         "--device".to_string(),
         format!(
@@ -403,7 +449,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         log_path: None,
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: Some(nbd_container_name.clone()),
-        nbd_port: Some(nbd_port),
+        nbd_port: None,
     };
     metadata.save()?;
 
@@ -414,6 +460,25 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         image: opts.image.clone(),
         vm_name: vm_name.clone(),
     };
+
+    // Wait for VM guest to start listening, then start bridge
+    info!("waiting for vsock bridge...");
+    let bridge_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        match crate::boot_files_macos::start_unix_bridge(vm_sock, nbd_sock) {
+            Ok(()) => {
+                info!("bridge connected");
+                break;
+            }
+            Err(e) => {
+                if std::time::Instant::now() > bridge_deadline {
+                    bail!("bridge connection timed out: {}", e);
+                }
+                debug!("bridge retry: {}", e);
+            }
+        }
+    }
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");
@@ -468,7 +533,6 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }
-    // Release container image overlay mount
     let _ = Command::new("podman")
         .args([
             "machine",
