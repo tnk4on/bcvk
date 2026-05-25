@@ -584,7 +584,10 @@ fn run_phase2(
             let mut file = None;
             for _ in 0..10 {
                 match std::fs::File::open(&serial_pipe_path) {
-                    Ok(f) => { file = Some(f); break; }
+                    Ok(f) => {
+                        file = Some(f);
+                        break;
+                    }
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
                 }
             }
