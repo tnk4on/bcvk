@@ -331,7 +331,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         &vm_name,
     )?;
 
-    // Verify nbdkit vsock readiness via krunkit connect socket
+    // Verify nbdkit is ready by connecting and checking NBDMAGIC
     info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -342,6 +342,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
                 .ok();
             let mut buf = [0u8; 8];
             if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
+                drop(stream);
                 info!("nbdkit vsock ready (NBDMAGIC verified)");
                 break;
             }
@@ -372,30 +373,10 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
-    // VZ framework NBD via bridge (fork per connection for VZ reconnection pattern)
-    let bridge_sock = "/tmp/bcvk-bridge.sock";
-    let _ = fs::remove_file(bridge_sock);
-    info!("starting NBD bridge (socat fork)...");
-    let _bridge_child = Command::new("socat")
-        .args([
-            &format!("UNIX-LISTEN:{},fork", bridge_sock),
-            &format!("UNIX-CONNECT:{}", NBD_VSOCK_SOCK),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to start socat bridge")?;
-    // Wait for socat to create the listener socket
-    for _ in 0..50 {
-        if std::path::Path::new(bridge_sock).exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
+    // VZ framework NBD via krunkit connect socket (direct, no bridge)
     let nbd_device_arg = format!(
         "nbd,uri=nbd+unix:///export?socket={},readonly,timeout=5000,deviceId=rootfs",
-        bridge_sock
+        NBD_VSOCK_SOCK
     );
 
     let mut vfkit_args = vec![
