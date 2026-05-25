@@ -410,9 +410,8 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
-    // vsock socket path for krun_add_vsock_port2
-    let vsock_sock = cache_base.join(format!("{}-vsock-nbd.sock", vm_name));
-    let vsock_sock_str = vsock_sock.to_string_lossy().to_string();
+    // vsock socket path — must match krunkit wrapper's socketURL
+    let vsock_sock_str = "/tmp/bcvk-nbd.sock".to_string();
 
     // Serial console log
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
