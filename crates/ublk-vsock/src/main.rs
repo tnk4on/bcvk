@@ -269,7 +269,10 @@ fn main() {
             .build()
         {
             Ok(_ctrl) => std::process::exit(0),
-            Err(_) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("ublk test failed: {:?}", e);
+                std::process::exit(1);
+            }
         }
     }
 
