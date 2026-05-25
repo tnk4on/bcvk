@@ -279,7 +279,7 @@ fn build_krun_initramfs(
 
     let final_path = boot_files.cache_dir.join("initramfs-krun.img");
     fs::write(&final_path, &initramfs)?;
-    info!("krun initramfs: {} bytes", initramfs.len());
+    info!("krun initramfs: {} bytes (uncompressed + CPIOs)", initramfs.len());
     Ok(final_path)
 }
 
@@ -584,7 +584,7 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
 
 fn build_cmdline(user_args: &[String]) -> String {
     let mut parts: Vec<&str> = vec![
-        "root=PARTLABEL=root",
+        "root=/dev/nbd0p2",
         "rootfstype=erofs",
         "ro",
         "console=hvc0",

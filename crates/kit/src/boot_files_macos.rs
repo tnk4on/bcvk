@@ -158,14 +158,33 @@ exec /usr/bin/nbd-vsock --connect /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
 
     let post_script = "\
 #!/bin/bash\n\
-sleep 1\n\
+sleep 2\n\
 if [ -b /dev/ublkb0 ]; then\n\
     DEV=ublkb0\n\
 else\n\
     DEV=nbd0\n\
 fi\n\
-blockdev --rereadpt /dev/$DEV 2>/dev/null\n\
-echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
+echo \"bcvk: post-setup for /dev/$DEV\" > /dev/kmsg\n\
+blockdev --rereadpt /dev/$DEV 2>/dev/kmsg\n\
+# Ensure partition device nodes exist (initramfs devtmpfs may not auto-create)\n\
+if [ ! -b /dev/${DEV}p2 ] && [ -f /sys/block/${DEV}/${DEV}p2/partition ]; then\n\
+    MAJOR=$(cat /sys/block/${DEV}/dev | cut -d: -f1)\n\
+    MINOR2=$(cat /sys/block/${DEV}/${DEV}p2/dev | cut -d: -f2)\n\
+    mknod /dev/${DEV}p2 b $MAJOR $MINOR2\n\
+    echo \"bcvk: created /dev/${DEV}p2 ($MAJOR:$MINOR2)\" > /dev/kmsg\n\
+fi\n\
+if [ ! -b /dev/${DEV}p1 ] && [ -f /sys/block/${DEV}/${DEV}p1/partition ]; then\n\
+    MAJOR=$(cat /sys/block/${DEV}/dev | cut -d: -f1)\n\
+    MINOR1=$(cat /sys/block/${DEV}/${DEV}p1/dev | cut -d: -f2)\n\
+    mknod /dev/${DEV}p1 b $MAJOR $MINOR1\n\
+fi\n\
+echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n\
+udevadm trigger --action=change /sys/block/$DEV 2>/dev/kmsg\n\
+udevadm trigger --action=add /sys/block/${DEV}/${DEV}p1 2>/dev/kmsg\n\
+udevadm trigger --action=add /sys/block/${DEV}/${DEV}p2 2>/dev/kmsg\n\
+udevadm settle --timeout=10 2>/dev/kmsg\n\
+ls /dev/${DEV}* > /dev/kmsg 2>&1\n\
+echo \"bcvk: post-setup done\" > /dev/kmsg\n";
     write_script(buf, "usr/lib/bcvk/block-device-post.sh", post_script)?;
 
     Ok(())
