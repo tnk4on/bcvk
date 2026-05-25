@@ -3,3 +3,4 @@ target/
 .serena/
 *.core
 NUL
+.serena/
