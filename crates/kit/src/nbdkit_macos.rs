@@ -177,7 +177,7 @@ pub(crate) fn start_nbdkit_vsock(
 
     let podman_cmd = format!(
         "podman run -d --name {name} --privileged \
-         --network=host --device /dev/vsock \
+         --network=host --pid=host --device /dev/vsock \
          -v {merged}:{merged}:ro \
          -v {plugin}:/plugin.so:ro \
          -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
