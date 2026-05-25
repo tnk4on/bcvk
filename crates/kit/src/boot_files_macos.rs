@@ -30,6 +30,8 @@ pub(crate) fn create_krun_block_device_cpio(
         "usr/lib/systemd",
         "usr/lib/systemd/system",
         "usr/lib/systemd/system/initrd-root-device.target.d",
+        "usr/lib/udev",
+        "usr/lib/udev/rules.d",
     ];
     for dir in &dirs {
         let b = NewcBuilder::new(dir)
@@ -179,11 +181,17 @@ if [ ! -b /dev/${DEV}p1 ] && [ -f /sys/block/${DEV}/${DEV}p1/partition ]; then\n
     mknod /dev/${DEV}p1 b $MAJOR $MINOR1\n\
 fi\n\
 echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n\
-udevadm trigger --action=change /sys/block/$DEV 2>/dev/kmsg\n\
-udevadm trigger --action=add /sys/block/${DEV}/${DEV}p1 2>/dev/kmsg\n\
-udevadm trigger --action=add /sys/block/${DEV}/${DEV}p2 2>/dev/kmsg\n\
-udevadm settle --timeout=10 2>/dev/kmsg\n\
-ls /dev/${DEV}* > /dev/kmsg 2>&1\n\
+echo \"bcvk: post-setup for /dev/$DEV\" > /dev/kmsg\n\
+echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n\
+# Mount root directly — systemd device unit doesn't activate for nbd partitions\n\
+mount -t erofs -o ro /dev/${DEV}p2 /sysroot 2>/dev/kmsg\n\
+if [ $? -eq 0 ]; then\n\
+    echo \"bcvk: mounted /dev/${DEV}p2 on /sysroot\" > /dev/kmsg\n\
+    # Signal to systemd that root is ready\n\
+    systemctl start --no-block sysroot.mount 2>/dev/null || true\n\
+else\n\
+    echo \"bcvk: FAILED to mount /dev/${DEV}p2\" > /dev/kmsg\n\
+fi\n\
 echo \"bcvk: post-setup done\" > /dev/kmsg\n";
     write_script(buf, "usr/lib/bcvk/block-device-post.sh", post_script)?;
 
@@ -228,6 +236,10 @@ fn add_systemd_services_to_cpio(buf: &mut Vec<u8>) -> Result<()> {
         "usr/lib/systemd/system/initrd-root-device.target.d/bcvk-setup-nbd.conf",
         dropin,
     )?;
+
+    // udev rule to notify systemd about nbd partitions
+    let udev_rule = b"SUBSYSTEM==\"block\", KERNEL==\"nbd[0-9]*\", OPTIONS+=\"db_persist\"\nSUBSYSTEM==\"block\", KERNEL==\"ublkb[0-9]*\", OPTIONS+=\"db_persist\"\n";
+    write_file(buf, "usr/lib/udev/rules.d/99-bcvk-nbd.rules", udev_rule)?;
 
     Ok(())
 }
