@@ -244,31 +244,16 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 }
 
 const VSOCK_PORT: u32 = 1030;
+const NBD_VSOCK_SOCK: &str = "/tmp/bcvk-nbd.sock";
 
-fn build_vsock_cmdline(user_args: &[String]) -> String {
-    let mut parts: Vec<&str> = vec![
-        "root=/dev/nbd0p2",
-        "rootfstype=erofs",
-        "ro",
-        "console=hvc0",
-        "loglevel=7",
-        "selinux=0",
-        "net.ifnames=0",
-        "systemd.journald.storage=volatile",
-    ];
-    let user: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
-    parts.extend(&user);
-    parts.join(" ")
-}
-
-/// Run an ephemeral VM using vfkit + ublk/NBD over vsock.
+/// Run an ephemeral VM using vfkit + EROFS over NBD (vsock transport).
 fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.detach {
         return run_detached(&opts);
     }
 
     let vfkit_bin = find_vfkit()?;
-    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + vsock)");
+    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + NBD vsock)");
 
     let cache_base = ephemeral_base_dir();
     fs::create_dir_all(&cache_base)?;
@@ -317,23 +302,26 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
             .to_string();
     }
 
-    let cmdline = build_vsock_cmdline(&opts.kernel_args);
+    let mut cmdline_parts: Vec<&str> = vec![
+        "root=/dev/vda2",
+        "ro",
+        "rootfstype=erofs",
+        "console=tty0",
+        "console=hvc0",
+        "loglevel=4",
+        "selinux=0",
+        "net.ifnames=0",
+        "systemd.journald.storage=volatile",
+    ];
+    let user_args: Vec<&str> = opts.kernel_args.iter().map(|s| s.as_str()).collect();
+    cmdline_parts.extend(&user_args);
+    let cmdline = cmdline_parts.join(" ");
 
     // Get container image merged overlay path
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    // Extract boot files (vmlinuz → ARM64 Image, initramfs, kernel modules)
-    let boot_files = crate::boot_files_macos::ensure_boot_files(
-        &machine, rootful, &merged_path, digest_short,
-    )?;
-
-    // Build initramfs with CPIO appends (ublk-vsock, nbd-vsock, modules, services)
-    let final_initramfs = crate::boot_files_macos::build_vsock_initramfs(
-        &boot_files, VSOCK_PORT, "initramfs-vfkit.img",
-    )?;
-
-    // Start nbdkit with EROFS plugin in vsock mode
+    // Start nbdkit with EROFS plugin in vsock mode (podman machine container)
     let nbd_container_name = crate::nbdkit_macos::start_nbdkit_vsock(
         &machine,
         &merged_path,
@@ -344,11 +332,10 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     )?;
 
     // Verify nbdkit vsock readiness via krunkit connect socket
-    let nbd_sock = "/tmp/bcvk-nbd.sock";
-    info!("verifying nbdkit vsock via {}...", nbd_sock);
+    info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(nbd_sock) {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(NBD_VSOCK_SOCK) {
             use std::io::Read;
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
@@ -379,19 +366,36 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
+    let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
+    let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
+
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
-    // vfkit vsock socket path
-    let vm_sock = "/tmp/bcvk-vm.sock";
-    let _ = fs::remove_file(vm_sock);
+    // VZ framework NBD via bridge (fork per connection for VZ reconnection pattern)
+    let bridge_sock = "/tmp/bcvk-bridge.sock";
+    let _ = fs::remove_file(bridge_sock);
+    info!("starting NBD bridge (socat fork)...");
+    let _bridge_child = Command::new("socat")
+        .args([
+            &format!("UNIX-LISTEN:{},fork", bridge_sock),
+            &format!("UNIX-CONNECT:{}", NBD_VSOCK_SOCK),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start socat bridge")?;
+    // Wait for socat to create the listener socket
+    for _ in 0..50 {
+        if std::path::Path::new(bridge_sock).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
-    // vfkit args: direct kernel boot + virtio-vsock
-    let bootloader_arg = format!(
-        "linux,kernel={},initrd={},cmdline=\"{}\"",
-        boot_files.kernel_path.display(),
-        final_initramfs.display(),
-        cmdline,
+    let nbd_device_arg = format!(
+        "nbd,uri=nbd+unix:///export?socket={},readonly,timeout=5000,deviceId=rootfs",
+        bridge_sock
     );
 
     let mut vfkit_args = vec![
@@ -402,10 +406,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         "--bootloader".to_string(),
         bootloader_arg,
         "--device".to_string(),
-        format!(
-            "virtio-vsock,port={},socketURL={},connect",
-            VSOCK_PORT, vm_sock
-        ),
+        nbd_device_arg,
         "--device".to_string(),
         format!(
             "virtio-net,unixSocketPath={},mac={}",
@@ -460,25 +461,6 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         image: opts.image.clone(),
         vm_name: vm_name.clone(),
     };
-
-    // Wait for VM guest to start listening, then start bridge
-    info!("waiting for vsock bridge...");
-    let bridge_deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-        match crate::boot_files_macos::start_unix_bridge(vm_sock, nbd_sock) {
-            Ok(()) => {
-                info!("bridge connected");
-                break;
-            }
-            Err(e) => {
-                if std::time::Instant::now() > bridge_deadline {
-                    bail!("bridge connection timed out: {}", e);
-                }
-                debug!("bridge retry: {}", e);
-            }
-        }
-    }
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");

@@ -5,6 +5,7 @@
 //! - Boot file extraction (vmlinuz, initramfs, kernel modules) from container images
 //! - Initramfs construction with CPIO appends
 //! - Unix socket bridge for vsock relay
+#![allow(dead_code)]
 
 use color_eyre::{
     eyre::{bail, Context},
@@ -13,7 +14,7 @@ use color_eyre::{
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use cpio::newc::Builder as NewcBuilder;
@@ -127,39 +128,7 @@ fi\n";
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
 \n\
-# Check io_uring availability (RHEL/CentOS disable it by default)\n\
-IO_URING_DISABLED=$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null)\n\
-if [ \"$IO_URING_DISABLED\" = \"2\" ] || [ \"$IO_URING_DISABLED\" = \"1\" ]; then\n\
-    echo 'bcvk: io_uring disabled (RHEL/CentOS), using NBD' > /dev/kmsg\n\
-else\n\
-  if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    if /usr/bin/ublk-vsock --test 2>/dev/null; then\n\
-        echo 'bcvk: trying ublk block device' > /dev/kmsg\n\
-        /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
-        UBLK_PID=$!\n\
-        i=0\n\
-        while [ $i -lt 60 ]; do\n\
-            for ublk_dev in /dev/ublkb*; do\n\
-                if [ -b \"$ublk_dev\" ]; then\n\
-                    echo \"bcvk: ublk device ready ($ublk_dev)\" > /dev/kmsg\n\
-                    exit 0\n\
-                fi\n\
-            done\n\
-            if ! kill -0 $UBLK_PID 2>/dev/null; then\n\
-                echo 'bcvk: ublk-vsock exited, falling back to NBD' > /dev/kmsg\n\
-                break\n\
-            fi\n\
-            sleep 0.5\n\
-            i=$((i + 1))\n\
-        done\n\
-        echo 'bcvk: ublk failed, falling back to NBD' > /dev/kmsg\n\
-        kill $UBLK_PID 2>/dev/null\n\
-        wait $UBLK_PID 2>/dev/null\n\
-    else\n\
-        echo 'bcvk: ublk not available (test failed), using NBD' > /dev/kmsg\n\
-    fi\n\
-  fi\n\
-fi\n\
+# TODO: re-enable ublk after VZ framework vsock I/O investigation\n\
 echo 'bcvk: using NBD block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
@@ -561,45 +530,22 @@ pub(crate) fn start_unix_bridge(sock_a: &str, sock_b: &str) -> Result<()> {
         }
     };
 
-    // Give guest vsock transport time to fully initialize before relay starts.
-    // Without this delay, data sent through the relay may be lost because the
-    // guest's vsock transport hasn't bound to the virtio-vsock PCI device yet.
-    std::thread::sleep(Duration::from_secs(3));
+    // Drop our connections — socat will make its own
+    drop(a);
+    drop(b);
 
-    info!("bridge: {} ↔ {}", sock_a, sock_b);
+    info!("bridge: socat {} ↔ {}", sock_a, sock_b);
 
-    let mut a_read = a.try_clone()?;
-    let mut b_write = b.try_clone()?;
-    let mut b_read = b;
-    let mut a_write = a;
-
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            match std::io::Read::read(&mut a_read, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if std::io::Write::write_all(&mut b_write, &buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            match std::io::Read::read(&mut b_read, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if std::io::Write::write_all(&mut a_write, &buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    // Use socat for relay — proven to work in PoC (docs/52)
+    Command::new("socat")
+        .args([
+            &format!("UNIX-CONNECT:{}", sock_a),
+            &format!("UNIX-CONNECT:{}", sock_b),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start socat bridge")?;
 
     Ok(())
 }
