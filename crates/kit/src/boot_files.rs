@@ -464,6 +464,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do\n\
   sleep 1\n\
 done\n\
 if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
+  sysctl -w kernel.io_uring_disabled=0 2>/dev/null\n\
   if [ ! -e /dev/ublk-control ] && [ -f /sys/class/misc/ublk-control/dev ]; then\n\
     DEVNUM=$(cat /sys/class/misc/ublk-control/dev)\n\
     mknod /dev/ublk-control c ${DEVNUM%%:*} ${DEVNUM##*:}\n\
