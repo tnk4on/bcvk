@@ -61,33 +61,13 @@ mod utils;
 #[cfg(target_os = "linux")]
 mod varlink_ipc;
 
-// macOS-only modules (vfkit backend)
-#[cfg(target_os = "macos")]
-mod ephemeral_macos;
-#[cfg(target_os = "macos")]
-mod nbdkit_macos;
-#[cfg(target_os = "macos")]
-mod run_ephemeral_macos;
-#[cfg(target_os = "macos")]
-mod vfkit;
-
 // Windows-only modules (Hyper-V + NBD backend)
-#[cfg(target_os = "windows")]
-mod boot_files;
-#[cfg(target_os = "windows")]
-mod dhcp_server;
 #[cfg(target_os = "windows")]
 mod ephemeral_windows;
 #[cfg(target_os = "windows")]
-#[allow(dead_code)]
 mod hyperv;
 #[cfg(target_os = "windows")]
 mod run_ephemeral_windows;
-#[cfg(target_os = "windows")]
-mod ssh_forward;
-#[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-mod vsock_relay;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]
@@ -167,18 +147,6 @@ enum Commands {
     /// Run bootc images as stateless VMs via QEMU+Podman (no root required)
     #[clap(subcommand)]
     Ephemeral(ephemeral::EphemeralCommands),
-
-    // macOS: vfkit-based ephemeral VMs
-    #[cfg(target_os = "macos")]
-    /// Manage ephemeral VMs for bootc containers (vfkit backend)
-    #[clap(subcommand)]
-    Ephemeral(ephemeral_macos::EphemeralCommands),
-
-    // macOS: vfkit-based persistent VMs
-    #[cfg(target_os = "macos")]
-    /// Manage persistent VMs (vfkit backend)
-    #[clap(subcommand)]
-    Vm(vfkit::VmCommands),
 
     // Windows: Hyper-V + NBD backend
     #[cfg(target_os = "windows")]
@@ -330,12 +298,6 @@ fn main() -> Result<(), Report> {
 
         #[cfg(target_os = "linux")]
         Commands::Ephemeral(cmd) => cmd.run()?,
-
-        #[cfg(target_os = "macos")]
-        Commands::Ephemeral(cmd) => cmd.run()?,
-
-        #[cfg(target_os = "macos")]
-        Commands::Vm(cmd) => cmd.run()?,
 
         #[cfg(target_os = "windows")]
         Commands::Ephemeral(cmd) => cmd.run()?,

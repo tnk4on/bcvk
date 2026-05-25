@@ -2135,6 +2135,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbd-vsock"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "nbdkit-erofs-plugin"
 version = "0.1.0"
 dependencies = [
