@@ -107,7 +107,7 @@ fn cmd_ps(json: bool) -> Result<()> {
     // Check VM state and remove dead entries
     let live: Vec<_> = vms
         .into_iter()
-        .filter(|vm| match crate::hyperv::get_vm_state(&vm.vm_name) {
+        .filter(|vm| match crate::hyperv::vm::get_vm_state(&vm.vm_name) {
             Ok(state) if state.contains("Running") => true,
             _ => {
                 EphemeralVmMetadata::remove(&vm.name);
@@ -148,7 +148,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         println!("Found {} ephemeral VM(s):", vms.len());
         for vm in &vms {
             let state =
-                crate::hyperv::get_vm_state(&vm.vm_name).unwrap_or_else(|_| "unknown".to_string());
+                crate::hyperv::vm::get_vm_state(&vm.vm_name).unwrap_or_else(|_| "unknown".to_string());
             println!("  {} ({})", vm.name, state.to_lowercase());
         }
         print!("Remove all ephemeral VMs? [y/N]: ");
@@ -162,7 +162,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     }
 
     for vm in &vms {
-        let _ = crate::hyperv::remove_vm(&vm.vm_name);
+        let _ = crate::hyperv::vm::remove_vm(&vm.vm_name);
         if let Some(ref nbd) = vm.nbd_container {
             let _ = std::process::Command::new("podman")
                 .args(["rm", "-f", nbd])

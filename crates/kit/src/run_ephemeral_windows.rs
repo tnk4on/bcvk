@@ -23,13 +23,13 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 #[cfg(target_os = "windows")]
-use crate::boot_files;
+use crate::hyperv::boot_files;
 #[cfg(target_os = "windows")]
-use crate::dhcp_server::DhcpServer;
+use crate::hyperv::dhcp::DhcpServer;
 #[cfg(target_os = "windows")]
-use crate::hyperv;
+use crate::hyperv::vm;
 #[cfg(target_os = "windows")]
-use crate::ssh_forward::SshForward;
+use crate::hyperv::ssh_forward::SshForward;
 
 #[cfg(target_os = "windows")]
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
@@ -129,7 +129,7 @@ impl Drop for VmCleanup {
         if let Some(ref fwd) = self.ssh_forward {
             fwd.stop();
         }
-        let _ = hyperv::remove_vm(&self.vm_name);
+        let _ = vm::remove_vm(&self.vm_name);
         if let Some(ref name) = self.nbd_container {
             stop_nbdkit_container(name);
         }
@@ -153,7 +153,7 @@ impl Drop for VmCleanup {
                 .status();
         }
         if let Some(port) = self.vsock_port {
-            let _ = hyperv::unregister_vsock_service(port);
+            let _ = vm::unregister_vsock_service(port);
         }
         EphemeralVmMetadata::remove(&self.name);
     }
@@ -192,7 +192,7 @@ fn spawn_cleanup(c: &VmCleanup) {
             .spawn();
     }
     if let Some(port) = c.vsock_port {
-        let _ = hyperv::unregister_vsock_service(port);
+        let _ = vm::unregister_vsock_service(port);
     }
     EphemeralVmMetadata::remove(&c.name);
 }
@@ -273,7 +273,7 @@ struct RunContext {
 #[cfg(target_os = "windows")]
 impl RunContext {
     fn new(opts: &RunEphemeralOpts) -> Result<Self> {
-        if !hyperv::is_hyper_v_enabled() {
+        if !vm::is_hyper_v_enabled() {
             bail!("Hyper-V is not enabled. Run: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All");
         }
 
@@ -353,7 +353,7 @@ struct Phase0Result {
     digest_short: String,
     podman_vm_guid: String,
     merged_path: String,
-    switch_handle: Option<std::thread::JoinHandle<Result<hyperv::SwitchInfo>>>,
+    switch_handle: Option<std::thread::JoinHandle<Result<vm::SwitchInfo>>>,
     vm_handle: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
@@ -386,7 +386,7 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     let switch_handle = {
         let sn = "bcvk".to_string();
         let hi = "10.0.0.1".to_string();
-        std::thread::spawn(move || hyperv::ensure_internal_switch(&sn, &hi, 24))
+        std::thread::spawn(move || vm::ensure_internal_switch(&sn, &hi, 24))
     };
 
     let vm_handle = {
@@ -394,17 +394,17 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
         let sn = "bcvk".to_string();
         let mem = ctx.memory_mb;
         let cpu = ctx.vcpus;
-        std::thread::spawn(move || hyperv::create_gen2_vm(&vn, mem, cpu, &sn))
+        std::thread::spawn(move || vm::create_gen2_vm(&vn, mem, cpu, &sn))
     };
 
     let machine_clone = ctx.machine.clone();
     let guid_handle = std::thread::spawn(move || -> Result<String> {
-        hyperv::register_vsock_service(VSOCK_PORT)?;
+        vm::register_vsock_service(VSOCK_PORT)?;
         let vmtype = detect_podman_vmtype()?;
         info!("podman machine VM type: {}", vmtype);
         let guid = match vmtype.as_str() {
-            "wsl" => hyperv::get_wsl_vm_guid(&machine_clone)?,
-            "hyperv" => hyperv::get_vm_guid(&machine_clone)?,
+            "wsl" => vm::get_wsl_vm_guid(&machine_clone)?,
+            "hyperv" => vm::get_vm_guid(&machine_clone)?,
             other => bail!("unsupported podman machine VM type: {}", other),
         };
         info!("podman machine VM GUID: {}", guid);
@@ -570,7 +570,7 @@ fn run_phase2(
         };
     }
 
-    let ephemeral_vm_guid = hyperv::attach_and_start_vm(&ctx.vm_name, &p1.vhdx_path)?;
+    let ephemeral_vm_guid = vm::attach_and_start_vm(&ctx.vm_name, &p1.vhdx_path)?;
     elapsed!("VHDX attach + VM start");
 
     // Serial pipe reader
@@ -647,7 +647,7 @@ fn run_phase2(
         info!("VM {} started, VHDX booting...", vm_name);
         elapsed!("VM started");
 
-        let _vsock_relay = crate::vsock_relay::VsockRelay::start(
+        let _vsock_relay = crate::hyperv::vsock_relay::VsockRelay::start(
             VSOCK_PORT,
             1,
             &podman_vm_guid,

@@ -12,37 +12,14 @@ pub mod ssh_options;
 #[cfg(target_os = "linux")]
 pub mod kernel;
 
-// macOS-only modules (vfkit backend)
-#[cfg(target_os = "macos")]
-pub mod run_ephemeral_macos;
-
-#[cfg(target_os = "macos")]
-pub mod vfkit;
-
 // Windows-only modules (Hyper-V + NBD backend)
-#[cfg(target_os = "windows")]
-#[allow(missing_docs)]
-pub mod boot_files;
-#[cfg(target_os = "windows")]
-#[allow(missing_docs)]
-pub mod dhcp_server;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod ephemeral_windows;
 #[cfg(target_os = "windows")]
-#[allow(missing_docs, dead_code)]
+#[allow(missing_docs)]
 pub mod hyperv;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod run_ephemeral_windows;
-#[cfg(target_os = "windows")]
-#[allow(missing_docs)]
-pub mod ssh_forward;
-#[cfg(target_os = "windows")]
-#[allow(missing_docs, unsafe_code)]
-pub mod vsock_relay;
 
-// nbdkit module: shared between macOS and Windows
-// Contains podman machine ssh calls (OS-independent)
-#[cfg(target_os = "macos")]
-pub mod nbdkit_macos;
