@@ -183,7 +183,7 @@ pub(crate) fn start_nbdkit_vsock(
          -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
          -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
          quay.io/fedora/fedora:latest \
-         nbdkit -f --threads 4 --vsock -p {port} -r /plugin.so \
+         nbdkit -fv --threads 4 --vsock -p {port} -r /plugin.so \
          {dir} {cmdline}{ssh}",
         name = container_name,
         merged = merged_path,
