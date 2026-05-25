@@ -283,6 +283,93 @@ fn build_krun_initramfs(
     Ok(final_path)
 }
 
+// --- Unix socket bridge ---
+
+/// Bridge two Unix sockets bidirectionally.
+/// Connects to both sockets and relays data between them in two threads.
+/// Verifies NBD handshake on sock_b (nbdkit) before starting relay.
+fn start_unix_bridge(sock_a: &str, sock_b: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    // Connect to nbdkit side FIRST (krunkit, always ready)
+    let b = UnixStream::connect(sock_b)
+        .context(format!("bridge: connect to nbdkit ({}) failed", sock_b))?;
+    b.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    debug!("bridge: connected to nbdkit side");
+
+    // Connect to krun VM side with retry (guest nbd-vsock may not be listening yet)
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let a = loop {
+        match UnixStream::connect(sock_a) {
+            Ok(s) => {
+                s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                // Verify the krun side accepted by checking we can read (OP_REQUEST → guest accept)
+                let mut peek = [0u8; 1];
+                match std::io::Read::read(&mut s.try_clone()?, &mut peek) {
+                    Ok(0) => {
+                        // EOF = OP_REQUEST was RST'd (guest not ready yet)
+                        debug!("bridge: krun side not ready (RST), retrying...");
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    _ => {
+                        // Got data or would block = connection is alive
+                        debug!("bridge: krun side connected and alive");
+                        break s;
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("bridge: krun connect retry: {}", e);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("bridge: krun side connection timed out");
+        }
+    };
+
+    // Clear read timeouts for relay
+    a.set_read_timeout(None).ok();
+    b.set_read_timeout(None).ok();
+
+    info!("bridge: {} ↔ {}", sock_a, sock_b);
+
+    let mut a_read = a.try_clone()?;
+    let mut b_write = b.try_clone()?;
+    let mut b_read = b;
+    let mut a_write = a;
+
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            match std::io::Read::read(&mut a_read, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if std::io::Write::write_all(&mut b_write, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            match std::io::Read::read(&mut b_read, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if std::io::Write::write_all(&mut a_write, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 // --- RAII cleanup ---
 
 struct KrunVmCleanup {
@@ -430,8 +517,14 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
-    // vsock socket path — must match krunkit wrapper's socketURL
-    let vsock_sock_str = "/tmp/bcvk-nbd.sock".to_string();
+    // vsock socket paths:
+    // - /tmp/bcvk-nbd.sock: krunkit connect mode → podman machine vsock → nbdkit
+    // - /tmp/bcvk-krun.sock: bcvk listen=true → krun VM vsock → ublk-vsock/nbd-vsock
+    // Bridge connects them: /tmp/bcvk-krun.sock ↔ /tmp/bcvk-nbd.sock
+    let krun_sock = "/tmp/bcvk-krun.sock";
+    let nbd_sock = "/tmp/bcvk-nbd.sock";
+    let _ = fs::remove_file(krun_sock);
+    let vsock_sock_str = krun_sock.to_string();
 
     // Serial console log
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
@@ -501,7 +594,7 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
             {
                 bail!("krun_set_kernel failed");
             }
-            if krun_add_vsock_port2(ctx, VSOCK_PORT, vsock_c.as_ptr(), false) < 0 {
+            if krun_add_vsock_port2(ctx, VSOCK_PORT, vsock_c.as_ptr(), true) < 0 {
                 bail!("krun_add_vsock_port2 failed");
             }
             if krun_add_net_unixgram(
@@ -524,6 +617,40 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
         }
         Ok(())
     });
+
+    // Wait for krun VM's vsock socket to appear, then start bridge
+    info!("waiting for krun vsock socket {}...", krun_sock);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if Path::new(krun_sock).exists() {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("krun vsock socket {} did not appear", krun_sock);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Wait for krun VM's nbd-vsock to start listening, then connect bridge.
+    // The bridge must connect AFTER the guest's nbd-vsock/ublk-vsock starts
+    // listening on vsock port 1030, because krun_add_vsock_port2(listen=true)
+    // sends OP_REQUEST on connect which requires a guest listener.
+    info!("waiting for krun VM guest to start listening...");
+    let bridge_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        match start_unix_bridge(krun_sock, nbd_sock) {
+            Ok(()) => {
+                info!("bridge connected");
+                break;
+            }
+            Err(e) => {
+                if std::time::Instant::now() > bridge_deadline {
+                    bail!("bridge connection timed out: {}", e);
+                }
+                debug!("bridge retry: {}", e);
+            }
+        }
+    }
 
     // SSH port forwarding + connectivity
     if opts.ssh_keygen || !opts.execute.is_empty() {

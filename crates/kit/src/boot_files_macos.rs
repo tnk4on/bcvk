@@ -128,7 +128,7 @@ else\n\
   if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
     if /usr/bin/ublk-vsock --test 2>/dev/null; then\n\
         echo 'bcvk: trying ublk block device' > /dev/kmsg\n\
-        /usr/bin/ublk-vsock --connect /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
+        /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg &\n\
         UBLK_PID=$!\n\
         i=0\n\
         while [ $i -lt 60 ]; do\n\
@@ -153,7 +153,7 @@ else\n\
 fi\n\
 echo 'bcvk: using NBD block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
-exec /usr/bin/nbd-vsock --connect /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
+exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
         vsock_port = vsock_port
     );
     write_script(buf, "usr/lib/bcvk/block-device-setup.sh", &block_device_script)?;
