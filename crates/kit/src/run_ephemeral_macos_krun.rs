@@ -396,7 +396,27 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
         VSOCK_PORT,
         &vm_name,
     )?;
-    info!("nbdkit vsock ready on port {}", VSOCK_PORT);
+    // Wait for nbdkit to be actually ready (vsock listen + NBD protocol)
+    let vsock_sock_path = "/tmp/bcvk-nbd.sock";
+    info!("verifying nbdkit vsock via {}...", vsock_sock_path);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(vsock_sock_path) {
+            use std::io::Read;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .ok();
+            let mut buf = [0u8; 8];
+            if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
+                info!("nbdkit vsock ready (NBDMAGIC verified)");
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 
     // Start gvproxy
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
@@ -564,7 +584,7 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
 
 fn build_cmdline(user_args: &[String]) -> String {
     let mut parts: Vec<&str> = vec![
-        "root=PARTLABEL=bcvk-root",
+        "root=PARTLABEL=root",
         "rootfstype=erofs",
         "ro",
         "console=hvc0",
