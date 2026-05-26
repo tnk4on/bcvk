@@ -375,7 +375,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
 
     // VZ framework NBD via krunkit connect socket (direct, no bridge)
     let nbd_device_arg = format!(
-        "nbd,uri=nbd+unix:///export?socket={},readonly,timeout=5000,deviceId=rootfs",
+        "nbd,uri=nbd+unix:///?socket={},readonly,timeout=60000,deviceId=rootfs",
         NBD_VSOCK_SOCK
     );
 

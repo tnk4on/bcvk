@@ -339,7 +339,7 @@ static PLUGIN_MAGIC_KEY: &[u8] = b"dir\0";
 static PLUGIN: NbdkitPlugin = NbdkitPlugin {
     _struct_size: std::mem::size_of::<NbdkitPlugin>() as u64,
     _api_version: 2,
-    _thread_model: 0,
+    _thread_model: 3, // NBDKIT_THREAD_MODEL_PARALLEL
     name: PLUGIN_NAME.as_ptr() as *const c_char,
     longname: PLUGIN_LONGNAME.as_ptr() as *const c_char,
     version: PLUGIN_VERSION.as_ptr() as *const c_char,
