@@ -154,6 +154,12 @@ enum Commands {
     #[clap(subcommand)]
     Ephemeral(ephemeral_windows::EphemeralCommands),
 
+    // Windows: Hyper-V persistent VMs
+    #[cfg(target_os = "windows")]
+    /// Manage persistent VMs (Hyper-V backend)
+    #[clap(subcommand, alias = "hyperv")]
+    Vm(hyperv::HypervCommands),
+
     // Other platforms: stub
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     /// Manage ephemeral VMs for bootc containers (not available on this platform)
@@ -301,6 +307,9 @@ fn main() -> Result<(), Report> {
 
         #[cfg(target_os = "windows")]
         Commands::Ephemeral(cmd) => cmd.run()?,
+
+        #[cfg(target_os = "windows")]
+        Commands::Vm(cmd) => cmd.run()?,
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Commands::Ephemeral(_) => {
