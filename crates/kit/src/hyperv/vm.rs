@@ -217,13 +217,54 @@ pub fn get_wsl_vm_guid(_machine_name: &str) -> Result<String> {
     bail!("could not find WSL2 VM via hcsdiag. Ensure podman machine (WSL2) is running.");
 }
 
+#[allow(unsafe_code)]
 pub fn register_vsock_service(port: u32) -> Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::*;
+
     let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
-    powershell_ignore_error(&format!(
-        "New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\{}' -Force | \
-         Set-ItemProperty -Name 'ElementName' -Value 'bcvk-nbd'",
+    let key_path = format!(
+        "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\{}",
         guid
-    ));
+    );
+    let key_path_w: Vec<u16> = key_path.encode_utf16().chain(std::iter::once(0)).collect();
+    let value_name: Vec<u16> = "ElementName"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let value_data: Vec<u16> = "bcvk-nbd"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        let rc = RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_path_w.as_ptr()),
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if rc.is_err() {
+            debug!("registry write failed (may need admin): {}", guid);
+            return Ok(());
+        }
+        let data_bytes: &[u8] =
+            std::slice::from_raw_parts(value_data.as_ptr() as *const u8, value_data.len() * 2);
+        let _ = RegSetValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            REG_SZ,
+            Some(data_bytes),
+        );
+        let _ = RegCloseKey(hkey);
+    }
     debug!("registered vsock service GUID: {}", guid);
     Ok(())
 }
