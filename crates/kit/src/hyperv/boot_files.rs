@@ -462,10 +462,7 @@ fn add_shell_scripts_to_cpio(buf: &mut Vec<u8>, vsock_port: u32) -> Result<()> {
 #!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
-for i in 1 2 3 4 5 6 7 8 9 10; do\n\
-  insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break\n\
-  sleep 1\n\
-done\n\
+n=0; while [ $n -lt 10 ]; do insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break; sleep 1; n=$((n+1)); done\n\
 if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
   if [ ! -e /dev/ublk-control ] && [ -f /sys/class/misc/ublk-control/dev ]; then\n\
     DEVNUM=$(cat /sys/class/misc/ublk-control/dev)\n\
