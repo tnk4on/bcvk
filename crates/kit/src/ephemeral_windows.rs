@@ -137,8 +137,8 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     if !force {
         println!("Found {} ephemeral VM(s):", vms.len());
         for vm in &vms {
-            let state =
-                crate::hyperv::vm::get_vm_state(&vm.vm_name).unwrap_or_else(|_| "unknown".to_string());
+            let state = crate::hyperv::vm::get_vm_state(&vm.vm_name)
+                .unwrap_or_else(|_| "unknown".to_string());
             println!("  {} ({})", vm.name, state.to_lowercase());
         }
         print!("Remove all ephemeral VMs? [y/N]: ");
