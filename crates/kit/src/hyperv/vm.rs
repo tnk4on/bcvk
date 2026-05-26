@@ -90,6 +90,78 @@ fn variant_to_i32(val: &VARIANT) -> i32 {
     unsafe { val.Anonymous.Anonymous.Anonymous.lVal }
 }
 
+#[allow(unsafe_code)]
+fn wmi_request_state_change(vm_name: &str, state: u16) -> Result<()> {
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let query = format!(
+        "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
+        vm_name
+    );
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        let mut objs = [None; 1];
+        let mut returned = 0u32;
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
+            bail!("VM '{}' not found", vm_name);
+        }
+        if let Some(ref obj) = objs[0] {
+            let path_val = wmi_get_property(obj, "__PATH")?;
+            let path = variant_to_string(&path_val);
+
+            let method_name = BSTR::from("RequestStateChange");
+            let mut in_class = None;
+            services.GetObject(
+                &BSTR::from("Msvm_ComputerSystem"),
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                Some(&mut in_class),
+                None,
+            )?;
+            let in_class = in_class.ok_or_else(|| color_eyre::eyre::eyre!("GetObject failed"))?;
+            let mut in_params_class = None;
+            in_class.GetMethod(&method_name, 0, &mut in_params_class, std::ptr::null_mut())?;
+            let in_params_class =
+                in_params_class.ok_or_else(|| color_eyre::eyre::eyre!("GetMethod failed"))?;
+            let in_params = in_params_class.SpawnInstance(0)?;
+
+            let state_var = unsafe {
+                let mut v = VARIANT::default();
+                let p = &mut v as *mut VARIANT;
+                let inner = &mut (*p).Anonymous.Anonymous;
+                inner.vt = windows::Win32::System::Variant::VT_I4;
+                (*std::ptr::addr_of_mut!(inner.Anonymous)).lVal = state as i32;
+                v
+            };
+
+            let prop_w: Vec<u16> = "RequestedState"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            in_params.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &state_var, 0)?;
+
+            services.ExecMethod(
+                &BSTR::from(path),
+                &method_name,
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                &in_params,
+                None,
+                None,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct SwitchInfo {
     pub name: String,
@@ -219,16 +291,13 @@ pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
 }
 
 pub fn stop_vm(name: &str) -> Result<()> {
-    powershell_ignore_error(&format!(
-        "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue",
-        name
-    ));
+    let _ = wmi_request_state_change(name, 3);
     debug!("stopped VM: {}", name);
     Ok(())
 }
 
 pub fn start_vm(name: &str) -> Result<()> {
-    powershell(&format!("Start-VM -Name '{}'", name))?;
+    wmi_request_state_change(name, 2)?;
     debug!("started VM: {}", name);
     Ok(())
 }
