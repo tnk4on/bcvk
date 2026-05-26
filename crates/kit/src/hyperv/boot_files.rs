@@ -3,17 +3,12 @@
 //! Uses direct SSH/SCP to podman machine for fast file transfer,
 //! with local cache by image digest for instant subsequent runs.
 
-#[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
-#[cfg(target_os = "windows")]
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
-#[cfg(target_os = "windows")]
 use tracing::info;
 
 /// SSH connection info for podman machine.
-#[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct PodmanSsh {
     pub port: u16,
@@ -21,7 +16,6 @@ pub struct PodmanSsh {
     pub rootful: bool,
 }
 
-#[cfg(target_os = "windows")]
 impl PodmanSsh {
     fn user(&self) -> &str {
         if self.rootful {
@@ -118,7 +112,6 @@ impl PodmanSsh {
 }
 
 /// Get image digest (image must already exist locally).
-#[cfg(target_os = "windows")]
 pub fn get_image_digest(image: &str) -> Result<String> {
     let output = Command::new("podman")
         .args(["image", "inspect", "--format", "{{.Digest}}", image])
@@ -137,7 +130,6 @@ pub fn get_image_digest(image: &str) -> Result<String> {
 }
 
 /// Cache directory for boot files, keyed by short digest.
-#[cfg(target_os = "windows")]
 fn cache_dir_from_digest(digest_short: &str) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
@@ -147,7 +139,6 @@ fn cache_dir_from_digest(digest_short: &str) -> PathBuf {
 }
 
 /// Fetch boot files via SCP (fast, ~50MB/s) and cache locally.
-#[cfg(target_os = "windows")]
 fn fetch_boot_files(
     merged_path: &str,
     ssh: &PodmanSsh,
@@ -240,7 +231,6 @@ fn fetch_boot_files(
 
 /// Create a VHDX with FAT32 ESP containing GRUB + kernel + initramfs.
 /// Returns the path to the VHDX file.
-#[cfg(target_os = "windows")]
 pub fn create_boot_vhdx(
     digest_short: &str,
     merged_path: &str,
@@ -356,7 +346,6 @@ pub fn create_boot_vhdx(
 }
 
 /// Create CPIO with block device binaries, kernel modules, and systemd services.
-#[cfg(target_os = "windows")]
 fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result<Vec<u8>> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
@@ -387,7 +376,6 @@ fn create_nbd_vsock_cpio(vsock_port: u32, cache_dir: &std::path::Path) -> Result
     Ok(cpio::newc::trailer(buf)?)
 }
 
-#[cfg(target_os = "windows")]
 fn add_binaries_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Result<()> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
@@ -425,7 +413,6 @@ fn add_binaries_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Resul
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn add_kernel_modules_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Result<()> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
@@ -452,7 +439,6 @@ fn add_kernel_modules_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) ->
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn add_shell_scripts_to_cpio(buf: &mut Vec<u8>, vsock_port: u32) -> Result<()> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
@@ -538,7 +524,6 @@ echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn add_systemd_services_to_cpio(buf: &mut Vec<u8>) -> Result<()> {
     use cpio::newc::Builder as NewcBuilder;
     use cpio::newc::ModeFileType;
@@ -597,7 +582,6 @@ fn add_systemd_services_to_cpio(buf: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     let aligned = (initramfs.len() + 3) & !3;
     initramfs.resize(aligned, 0);

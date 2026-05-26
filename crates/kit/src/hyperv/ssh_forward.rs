@@ -2,22 +2,14 @@
 //!
 //! Equivalent to macOS gvproxy's `expose_ssh_port()`.
 
-#[cfg(target_os = "windows")]
 use color_eyre::Result;
-#[cfg(target_os = "windows")]
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
 use tokio::io::copy_bidirectional;
-#[cfg(target_os = "windows")]
 use tokio::net::TcpListener;
-#[cfg(target_os = "windows")]
 use tokio::sync::Notify;
-#[cfg(target_os = "windows")]
 use tokio::task::JoinHandle;
-#[cfg(target_os = "windows")]
 use tracing::{debug, info};
 
-#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct SshForward {
     port: u16,
@@ -25,7 +17,6 @@ pub struct SshForward {
     handle: JoinHandle<()>,
 }
 
-#[cfg(target_os = "windows")]
 impl SshForward {
     pub async fn start(vm_ip: &str) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -76,7 +67,6 @@ impl SshForward {
     }
 }
 
-#[cfg(target_os = "windows")]
 impl Drop for SshForward {
     fn drop(&mut self) {
         self.stop.notify_waiters();

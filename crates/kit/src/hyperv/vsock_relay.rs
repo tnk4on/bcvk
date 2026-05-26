@@ -24,50 +24,32 @@
 //! The prefetch thread pre-populates the cache with the first 256 MB (boot-critical
 //! regions) via a dedicated podman connection, running in parallel with relay setup.
 
-#[cfg(target_os = "windows")]
 use color_eyre::Result;
-#[cfg(target_os = "windows")]
 use std::collections::HashMap;
-#[cfg(target_os = "windows")]
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
 use tokio::sync::Notify;
-#[cfg(target_os = "windows")]
 use tokio::task::JoinHandle;
-#[cfg(target_os = "windows")]
 use tracing::{debug, info};
 
-#[cfg(target_os = "windows")]
 use std::io;
-#[cfg(target_os = "windows")]
 use std::mem;
-#[cfg(target_os = "windows")]
 use std::os::windows::io::RawSocket;
-#[cfg(target_os = "windows")]
 use std::sync::{Mutex, RwLock};
 
-#[cfg(target_os = "windows")]
 const AF_HYPERV: i32 = 34;
-#[cfg(target_os = "windows")]
 const HV_PROTOCOL_RAW: i32 = 1;
-#[cfg(target_os = "windows")]
 const SOCKET_BUF_SIZE: i32 = 4 * 1024 * 1024;
 
-#[cfg(target_os = "windows")]
 const NBD_REQUEST_MAGIC: u32 = 0x25609513;
-#[cfg(target_os = "windows")]
 const NBD_REPLY_MAGIC: u32 = 0x67446698;
-#[cfg(target_os = "windows")]
 const NBD_CMD_READ: u16 = 0;
 
-#[cfg(target_os = "windows")]
 #[repr(C)]
 struct WsaBuf {
     len: u32,
     buf: *mut u8,
 }
 
-#[cfg(target_os = "windows")]
 #[repr(C)]
 #[derive(Clone)]
 struct HvSockGuid {
@@ -77,7 +59,6 @@ struct HvSockGuid {
     data4: [u8; 8],
 }
 
-#[cfg(target_os = "windows")]
 #[repr(C)]
 struct SockaddrHv {
     family: u16,
@@ -86,7 +67,6 @@ struct SockaddrHv {
     service_id: HvSockGuid,
 }
 
-#[cfg(target_os = "windows")]
 fn vsock_service_id(port: u32) -> HvSockGuid {
     HvSockGuid {
         data1: port,
@@ -96,7 +76,6 @@ fn vsock_service_id(port: u32) -> HvSockGuid {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 {
@@ -123,19 +102,15 @@ fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
 
 // --- NBD cache ---
 
-#[cfg(target_os = "windows")]
 type NbdCache = Arc<RwLock<HashMap<u64, Vec<u8>>>>;
-#[cfg(target_os = "windows")]
 type VmSockLock = Arc<Mutex<RawSocket>>;
 
-#[cfg(target_os = "windows")]
 fn cache_new() -> NbdCache {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
 // --- Socket helpers ---
 
-#[cfg(target_os = "windows")]
 fn wsa_recv_exact(sock: RawSocket, buf: &mut [u8]) -> bool {
     let mut done: usize = 0;
     while done < buf.len() {
@@ -164,7 +139,6 @@ fn wsa_recv_exact(sock: RawSocket, buf: &mut [u8]) -> bool {
     true
 }
 
-#[cfg(target_os = "windows")]
 fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
     let mut done: usize = 0;
     while done < buf.len() {
@@ -194,10 +168,8 @@ fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
 
 // --- Prefetch: read all sectors from podman into cache ---
 
-#[cfg(target_os = "windows")]
 /// Prefetch boot-critical regions: GPT + ESP + EROFS metadata (~256 MB)
 /// Remaining sectors are cached on-demand as VM reads them.
-#[cfg(target_os = "windows")]
 fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
     // Handshake
     let mut hs = [0u8; 18];
@@ -277,16 +249,13 @@ fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
 
 // --- NBD-aware caching relay with request tracking ---
 
-#[cfg(target_os = "windows")]
 struct PendingRead {
     offset: u64,
     length: usize,
 }
 
-#[cfg(target_os = "windows")]
 type PendingMap = Arc<RwLock<HashMap<u64, PendingRead>>>;
 
-#[cfg(target_os = "windows")]
 fn relay_vm_to_podman_tracked(
     vm_sock: RawSocket,
     podman_sock: RawSocket,
@@ -363,7 +332,6 @@ fn relay_vm_to_podman_tracked(
     }
 }
 
-#[cfg(target_os = "windows")]
 fn relay_podman_to_vm_tracked(
     podman_sock: RawSocket,
     cache: NbdCache,
@@ -444,14 +412,12 @@ fn relay_podman_to_vm_tracked(
 
 // --- Public API ---
 
-#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct VsockRelay {
     stop: Arc<Notify>,
     handles: Vec<JoinHandle<()>>,
 }
 
-#[cfg(target_os = "windows")]
 impl VsockRelay {
     pub async fn start(
         vsock_port: u32,
@@ -589,7 +555,6 @@ impl VsockRelay {
     }
 }
 
-#[cfg(target_os = "windows")]
 impl Drop for VsockRelay {
     fn drop(&mut self) {
         self.stop.notify_waiters();
@@ -599,7 +564,6 @@ impl Drop for VsockRelay {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache: NbdCache) {
     let pending: PendingMap = Arc::new(RwLock::new(HashMap::new()));
     let vm_write: VmSockLock = Arc::new(Mutex::new(vm_sock));
@@ -629,7 +593,6 @@ fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache
 
 // --- Raw Windows socket operations ---
 
-#[cfg(target_os = "windows")]
 extern "system" {
     fn socket(af: i32, sock_type: i32, protocol: i32) -> RawSocket;
     fn connect(s: RawSocket, name: *const u8, namelen: i32) -> i32;
@@ -665,10 +628,8 @@ extern "system" {
     fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
 }
 
-#[cfg(target_os = "windows")]
 static WSA_INIT: std::sync::Once = std::sync::Once::new();
 
-#[cfg(target_os = "windows")]
 fn ensure_wsa() {
     WSA_INIT.call_once(|| {
         let mut data = [0u8; 408];
@@ -678,7 +639,6 @@ fn ensure_wsa() {
     });
 }
 
-#[cfg(target_os = "windows")]
 unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
     ensure_wsa();
     let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
@@ -738,7 +698,6 @@ unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
     Ok(sock)
 }
 
-#[cfg(target_os = "windows")]
 unsafe fn hvsock_connect_retry(
     vm_guid: &HvSockGuid,
     port: u32,
