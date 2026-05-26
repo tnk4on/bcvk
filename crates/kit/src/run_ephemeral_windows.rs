@@ -43,6 +43,8 @@ pub struct EphemeralVmMetadata {
     pub ssh_key: String,
     pub nbd_container: Option<String>,
     pub vsock_port: Option<u32>,
+    #[serde(default)]
+    pub subnet: u8,
     pub created: String,
 }
 
@@ -104,6 +106,7 @@ struct VmCleanup {
     vhdx_path: Option<String>,
     ssh_forward: Option<SshForward>,
     vsock_port: Option<u32>,
+    switch_name: Option<String>,
 }
 
 impl Drop for VmCleanup {
@@ -138,17 +141,27 @@ impl Drop for VmCleanup {
         if let Some(port) = self.vsock_port {
             let _ = vm::unregister_vsock_service(port);
         }
+        if let Some(ref sw) = self.switch_name {
+            vm::remove_internal_switch(sw);
+        }
         EphemeralVmMetadata::remove(&self.name);
     }
 }
 
 /// Spawn cleanup as a detached process so bcvk can exit immediately.
 fn spawn_cleanup(c: &VmCleanup) {
-    let script = format!(
+    let mut ps = format!(
         "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue; \
          Remove-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
         c.vm_name, c.vm_name
     );
+    if let Some(ref sw) = c.switch_name {
+        ps.push_str(&format!(
+            "; Remove-VMSwitch -Name '{}' -Force -ErrorAction SilentlyContinue",
+            sw
+        ));
+    }
+    let script = ps;
     let _ = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdout(Stdio::null())
@@ -246,6 +259,16 @@ struct RunContext {
     base_dir: PathBuf,
     ssh_key_path: PathBuf,
     nbd_container_name: String,
+    switch_name: String,
+    subnet: u8,
+}
+
+fn subnet_from_name(name: &str) -> u8 {
+    let mut hash: u32 = 5381;
+    for b in name.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    ((hash % 127) + 1) as u8
 }
 
 impl RunContext {
@@ -308,6 +331,8 @@ impl RunContext {
         std::fs::create_dir_all(&base_dir)?;
         let ssh_key_path = base_dir.join(format!("{}-key", name));
         let nbd_container_name = format!("bcvk-nbd-{}", name);
+        let switch_name = vm_name.clone();
+        let subnet = subnet_from_name(&name);
 
         Ok(Self {
             machine,
@@ -320,6 +345,8 @@ impl RunContext {
             base_dir,
             ssh_key_path,
             nbd_container_name,
+            switch_name,
+            subnet,
         })
     }
 }
@@ -358,14 +385,14 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     });
 
     let switch_handle = {
-        let sn = "bcvk".to_string();
-        let hi = "10.0.0.1".to_string();
+        let sn = ctx.switch_name.clone();
+        let hi = format!("10.0.{}.1", ctx.subnet);
         std::thread::spawn(move || vm::ensure_internal_switch(&sn, &hi, 24))
     };
 
     let vm_handle = {
         let vn = ctx.vm_name.clone();
-        let sn = "bcvk".to_string();
+        let sn = ctx.switch_name.clone();
         let mem = ctx.memory_mb;
         let cpu = ctx.vcpus;
         std::thread::spawn(move || vm::create_gen2_vm(&vn, mem, cpu, &sn))
@@ -597,6 +624,7 @@ fn run_phase2(
         vhdx_path: Some(p1.vhdx_path.clone()),
         ssh_forward: None,
         vsock_port: Some(VSOCK_PORT),
+        switch_name: Some(ctx.switch_name.clone()),
     };
 
     info!("ephemeral VM GUID: {}", ephemeral_vm_guid);
@@ -611,9 +639,12 @@ fn run_phase2(
     let gui = opts.gui;
     let execute = opts.execute.clone();
     let ssh_pubkey = p0.ssh_pubkey.clone();
+    let subnet = ctx.subnet;
 
     rt.block_on(async move {
-        let dhcp = DhcpServer::new("10.0.0.1", "10.0.0.100")?;
+        let server_ip = format!("10.0.{}.1", subnet);
+        let client_ip = format!("10.0.{}.100", subnet);
+        let dhcp = DhcpServer::new(&server_ip, &client_ip)?;
         let dhcp_handle = dhcp.start_background();
         info!("VM {} started, VHDX booting...", vm_name);
         elapsed!("VM started");
@@ -636,7 +667,7 @@ fn run_phase2(
 
         info!("serial log: {}", serial_log_path.display());
 
-        let vm_ip = "10.0.0.100".to_string();
+        let vm_ip = client_ip;
         info!("VM IP: {}", vm_ip);
 
         let ssh_fwd = SshForward::start(&vm_ip).await?;
@@ -652,6 +683,7 @@ fn run_phase2(
             ssh_key: ssh_key_path.to_string_lossy().to_string(),
             nbd_container: Some(nbd_container.clone()),
             vsock_port: Some(VSOCK_PORT),
+            subnet,
             created: chrono::Utc::now().to_rfc3339(),
         };
         metadata.save()?;
@@ -792,13 +824,14 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         name: vm_name.clone(),
         image: opts.image.clone(),
         vm_name: format!("{}{}", VM_PREFIX, vm_name),
-        ssh_port: 0, // Will be updated by child process once SSH is ready
+        ssh_port: 0,
         ssh_key: base
             .join(format!("{}-key", vm_name))
             .to_string_lossy()
             .to_string(),
-        nbd_container: None, // Will be set by child process
+        nbd_container: None,
         vsock_port: Some(1030),
+        subnet: 0,
         created: chrono::Utc::now().to_rfc3339(),
     };
     metadata.save()?;
@@ -951,6 +984,7 @@ mod tests {
             ssh_key: "/tmp/test-key".to_string(),
             nbd_container: Some("bcvk-nbd-test".to_string()),
             vsock_port: Some(1030),
+            subnet: 1,
             created: "2026-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&meta).unwrap();

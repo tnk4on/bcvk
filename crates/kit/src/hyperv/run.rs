@@ -27,10 +27,6 @@ pub struct HypervRunOpts {
     #[clap(long, default_value = "4096")]
     pub memory: u32,
 
-    /// Hyper-V virtual switch name
-    #[clap(long, default_value = "Default Switch")]
-    pub switch: String,
-
     /// Path to an existing SSH private key
     #[clap(long)]
     pub ssh_key: Option<String>,
@@ -102,7 +98,20 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
 
     info!("creating persistent VM: {} (disk: {})", name, opts.disk);
 
-    vm::create_gen2_vm(&vm_name, opts.memory, opts.cpus, &opts.switch)?;
+    // Per-VM internal switch with unique subnet (hash of name)
+    let switch_name = vm_name.clone();
+    let subnet = {
+        let mut hash: u32 = 5381;
+        for b in name.bytes() {
+            hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+        }
+        ((hash % 127) + 128) as u8
+    };
+    let host_ip = format!("10.0.{}.1", subnet);
+    vm::ensure_internal_switch(&switch_name, &host_ip, 24)?;
+    info!("Internal Switch: {} ({})", switch_name, host_ip);
+
+    vm::create_gen2_vm(&vm_name, opts.memory, opts.cpus, &switch_name)?;
 
     let vhdx_abs = std::fs::canonicalize(disk_path)?
         .to_string_lossy()
@@ -126,6 +135,8 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         vcpus: opts.cpus,
         memory_mb: opts.memory,
         vhdx_path: vhdx_abs.clone(),
+        switch_name: switch_name.clone(),
+        subnet,
         created: chrono::Utc::now().to_rfc3339(),
     };
     meta.save()?;
