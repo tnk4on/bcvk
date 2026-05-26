@@ -125,7 +125,7 @@ pub fn create_initramfs_units_cpio() -> io::Result<Vec<u8>> {
 
 /// Create a CPIO archive with SSH setup for Windows Hyper-V.
 #[cfg(target_os = "windows")]
-pub fn create_windows_ssh_cpio(pubkey: &str, password_hash: &str) -> io::Result<Vec<u8>> {
+pub fn create_windows_ssh_cpio(pubkey: &str) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
 
     write_directory(&mut buf, "usr")?;
@@ -144,9 +144,8 @@ pub fn create_windows_ssh_cpio(pubkey: &str, password_hash: &str) -> io::Result<
          chmod 700 /sysroot/var/roothome/.ssh\n\
          echo '{}' > /sysroot/var/roothome/.ssh/authorized_keys\n\
          chmod 600 /sysroot/var/roothome/.ssh/authorized_keys\n\
-         chown -R 0:0 /sysroot/var/roothome/.ssh\n\
-         sed -i 's|^root:[^:]*:|root:{}:|' /sysroot/etc/shadow\n",
-        pubkey, password_hash
+         chown -R 0:0 /sysroot/var/roothome/.ssh\n",
+        pubkey
     );
     write_file_exec(
         &mut buf,
