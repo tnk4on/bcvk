@@ -302,12 +302,98 @@ pub fn start_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
 pub fn remove_vm(name: &str) -> Result<()> {
-    stop_vm(name)?;
-    powershell_ignore_error(&format!(
-        "Remove-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
+    let _ = stop_vm(name);
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let query = format!(
+        "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
         name
-    ));
+    );
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        let mut objs = [None; 1];
+        let mut returned = 0u32;
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
+            debug!("VM '{}' not found, nothing to remove", name);
+            return Ok(());
+        }
+        if let Some(ref vm_obj) = objs[0] {
+            let vm_path_val = wmi_get_property(vm_obj, "__PATH")?;
+            let vm_path = variant_to_string(&vm_path_val);
+
+            let mgmt_query = "SELECT * FROM Msvm_VirtualSystemManagementService";
+            let mgmt_enum = services.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from(mgmt_query),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            )?;
+            let mut mgmt_objs = [None; 1];
+            let mut mgmt_ret = 0u32;
+            let _ = mgmt_enum.Next(WBEM_INFINITE, &mut mgmt_objs, &mut mgmt_ret);
+
+            if let Some(ref mgmt) = mgmt_objs[0] {
+                let mgmt_path_val = wmi_get_property(mgmt, "__PATH")?;
+                let mgmt_path = variant_to_string(&mgmt_path_val);
+
+                let mut in_class = None;
+                services.GetObject(
+                    &BSTR::from("Msvm_VirtualSystemManagementService"),
+                    WBEM_GENERIC_FLAG_TYPE(0),
+                    None,
+                    Some(&mut in_class),
+                    None,
+                )?;
+                let in_class = in_class.unwrap();
+                let mut in_params_class = None;
+                in_class.GetMethod(
+                    &BSTR::from("DestroySystem"),
+                    0,
+                    &mut in_params_class,
+                    std::ptr::null_mut(),
+                )?;
+                let in_params = in_params_class.unwrap().SpawnInstance(0)?;
+
+                let vm_path_var = unsafe {
+                    let mut v = VARIANT::default();
+                    let p = &mut v as *mut VARIANT;
+                    let inner = &mut (*p).Anonymous.Anonymous;
+                    inner.vt = windows::Win32::System::Variant::VT_BSTR;
+                    std::ptr::write(
+                        std::ptr::addr_of_mut!(inner.Anonymous.bstrVal),
+                        std::mem::ManuallyDrop::new(BSTR::from(&vm_path)),
+                    );
+                    v
+                };
+
+                let prop_w: Vec<u16> = "AffectedSystem"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                in_params.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &vm_path_var, 0)?;
+
+                let _ = services.ExecMethod(
+                    &BSTR::from(mgmt_path),
+                    &BSTR::from("DestroySystem"),
+                    WBEM_GENERIC_FLAG_TYPE(0),
+                    None,
+                    &in_params,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
     debug!("removed VM: {}", name);
     Ok(())
 }
