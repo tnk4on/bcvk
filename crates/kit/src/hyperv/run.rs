@@ -104,8 +104,12 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
 
     vm::create_gen2_vm(&vm_name, opts.memory, opts.cpus, &opts.switch)?;
 
-    let vhdx_abs = std::fs::canonicalize(disk_path)?;
-    vm::attach_vhdx(&vm_name, &vhdx_abs.to_string_lossy())?;
+    let vhdx_abs = std::fs::canonicalize(disk_path)?
+        .to_string_lossy()
+        .to_string()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    vm::attach_vhdx(&vm_name, &vhdx_abs)?;
 
     let ssh_port = opts.ssh_port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -121,7 +125,7 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         ssh_key,
         vcpus: opts.cpus,
         memory_mb: opts.memory,
-        vhdx_path: vhdx_abs.to_string_lossy().to_string(),
+        vhdx_path: vhdx_abs.clone(),
         created: chrono::Utc::now().to_rfc3339(),
     };
     meta.save()?;
