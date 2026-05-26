@@ -120,6 +120,12 @@ pub fn stop_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn start_vm(name: &str) -> Result<()> {
+    powershell(&format!("Start-VM -Name '{}'", name))?;
+    debug!("started VM: {}", name);
+    Ok(())
+}
+
 pub fn remove_vm(name: &str) -> Result<()> {
     stop_vm(name)?;
     powershell_ignore_error(&format!(
