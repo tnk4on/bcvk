@@ -218,7 +218,26 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         erofs_layout.total_size,
     ) {
         Ok(disk) => {
-            state.regions = disk.regions;
+            // Pre-read all File regions into memory to eliminate per-pread I/O.
+            // Memory usage = overlay data size (typically 1-2 GB).
+            let mut regions = disk.regions;
+            let mut preread_bytes: u64 = 0;
+            for region in &mut regions {
+                if let regions::RegionType::File { handle, .. } = &region.region_type {
+                    use std::io::Read;
+                    let mut data = vec![0u8; region.len as usize];
+                    let mut f = handle.as_ref();
+                    if f.read_exact(&mut data).is_ok() {
+                        preread_bytes += region.len;
+                        region.region_type = regions::RegionType::Data(std::sync::Arc::new(data));
+                    }
+                }
+            }
+            log_error(&format!(
+                "pre-read {} MB of file data into memory",
+                preread_bytes / (1024 * 1024)
+            ));
+            state.regions = regions;
             state.total_size = disk.total_size;
         }
         Err(e) => {
