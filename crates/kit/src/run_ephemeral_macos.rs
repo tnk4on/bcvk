@@ -1,11 +1,12 @@
-//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS plugin.
+//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS over vsock.
 //!
 //! Boot flow (fully diskless):
 //! 1. Mount container image overlay (`podman image mount`)
-//! 2. Start nbdkit with erofs plugin (dynamically generates GPT + ESP + EROFS)
-//! 3. Launch vfkit with EFI boot via NBD + virtio-net (gvproxy)
+//! 2. Start nbdkit with erofs plugin in vsock mode (via krunkit connect)
+//! 3. Launch vfkit with EFI boot via NBD Unix socket + virtio-net (gvproxy)
 //! 4. Wait for SSH and execute commands
 //!
+//! Requires libkrun-efi >= 1.18.1 (PR #656: peer_buf_alloc fix).
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
 use std::fs;
@@ -219,6 +220,9 @@ impl Drop for VmCleanup {
 
 // --- Main entry point ---
 
+const VSOCK_PORT: u32 = 1030;
+const NBD_VSOCK_SOCK: &str = "/tmp/bcvk-nbd.sock";
+
 /// Run an ephemeral VM from a container image using vfkit + EROFS over NBD.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
@@ -298,18 +302,35 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    // Start nbdkit with erofs plugin (dynamic EROFS + ESP + GPT from overlay dir)
-    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
-    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+    // Start nbdkit with erofs plugin in vsock mode (via krunkit connect)
+    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_vsock(
         &machine,
         &merged_path,
         &cmdline,
         &ssh_pubkey,
-        nbd_port,
+        VSOCK_PORT,
         &vm_name,
     )?;
-    std::thread::sleep(Duration::from_millis(500));
-    info!("nbdkit ready on port {}", nbd_port);
+
+    // Verify nbdkit readiness via krunkit connect socket
+    info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(NBD_VSOCK_SOCK) {
+            use std::io::Read;
+            stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+            let mut buf = [0u8; 8];
+            if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
+                drop(stream);
+                info!("nbdkit vsock ready (NBDMAGIC verified)");
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 
     // gvproxy + vfkit (EFI boot)
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
@@ -340,8 +361,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         bootloader_arg,
         "--device".to_string(),
         format!(
-            "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
-            nbd_port
+            "nbd,uri=nbd+unix:///?socket={},readonly,timeout=5000,deviceId=rootfs",
+            NBD_VSOCK_SOCK
         ),
         "--device".to_string(),
         format!(
@@ -386,7 +407,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         log_path: None,
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: Some(nbd_container_name.clone()),
-        nbd_port: Some(nbd_port),
+        nbd_port: None,
     };
     metadata.save()?;
 
