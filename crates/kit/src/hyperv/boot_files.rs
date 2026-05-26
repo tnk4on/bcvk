@@ -12,10 +12,6 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
 use tracing::info;
 
-#[cfg(target_os = "windows")]
-const PASSWORD_HASH: &str =
-    "$6$bcvksalt$2g2axTGKGM92b6AvQiSXWoYYU3x6nqdhaMJWfCO6iKn0.fTA6DI5sXk.G86OYvNgXXbrYByeMOIMyLcUUA8/1.";
-
 /// SSH connection info for podman machine.
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
@@ -274,7 +270,7 @@ pub fn create_boot_vhdx(
     append_cpio(&mut initramfs, &overlay_cpio);
 
     if !ssh_pubkey.is_empty() {
-        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim(), PASSWORD_HASH)?;
+        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim())?;
         append_cpio(&mut initramfs, &ssh_cpio);
     }
 
