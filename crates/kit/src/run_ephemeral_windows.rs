@@ -18,8 +18,8 @@ use tracing::{debug, info};
 
 use crate::hyperv::boot_files;
 use crate::hyperv::dhcp::DhcpServer;
-use crate::hyperv::vm;
 use crate::hyperv::ssh_forward::SshForward;
+use crate::hyperv::vm;
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
 

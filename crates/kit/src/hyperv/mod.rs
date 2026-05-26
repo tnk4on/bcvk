@@ -18,13 +18,13 @@ pub(crate) mod vm;
 pub(crate) mod vsock_relay;
 
 // Persistent VM subcommands (TBD)
-#[allow(dead_code)]
+#[allow(dead_code, clippy::todo)]
 mod list;
-#[allow(dead_code)]
+#[allow(dead_code, clippy::todo)]
 mod rm;
-#[allow(dead_code)]
+#[allow(dead_code, clippy::todo)]
 mod run;
-#[allow(dead_code)]
+#[allow(dead_code, clippy::todo)]
 mod ssh;
 
 /// Subcommands for persistent VM management via Hyper-V.
