@@ -1,16 +1,11 @@
 //! Windows ephemeral VM commands (Hyper-V backend).
 
-#[cfg(target_os = "windows")]
 use clap::Subcommand;
-#[cfg(target_os = "windows")]
 use color_eyre::Result;
-#[cfg(target_os = "windows")]
 use std::io::Write;
 
-#[cfg(target_os = "windows")]
 use crate::run_ephemeral_windows::{self, EphemeralVmMetadata, RunEphemeralOpts};
 
-#[cfg(target_os = "windows")]
 #[derive(clap::Parser, Debug)]
 pub struct RunSshOpts {
     #[command(flatten)]
@@ -21,7 +16,6 @@ pub struct RunSshOpts {
     pub ssh_args: Vec<String>,
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Debug, Subcommand)]
 pub enum EphemeralCommands {
     /// Run bootc containers as ephemeral Hyper-V VMs
@@ -60,7 +54,6 @@ pub enum EphemeralCommands {
     },
 }
 
-#[cfg(target_os = "windows")]
 impl EphemeralCommands {
     pub fn run(self) -> Result<()> {
         match self {
@@ -81,7 +74,6 @@ impl EphemeralCommands {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     let vm = EphemeralVmMetadata::load(name)?;
 
@@ -100,7 +92,6 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn cmd_ps(json: bool) -> Result<()> {
     let vms = EphemeralVmMetadata::list_all()?;
 
@@ -136,7 +127,6 @@ fn cmd_ps(json: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn cmd_rm_all(force: bool) -> Result<()> {
     let vms = EphemeralVmMetadata::list_all()?;
     if vms.is_empty() {

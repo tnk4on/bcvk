@@ -1,27 +1,21 @@
 //! Hyper-V VM lifecycle management via PowerShell commands.
 
-#[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
-#[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
-#[cfg(target_os = "windows")]
 use tracing::{debug, info};
 
-#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct SwitchInfo {
     pub name: String,
     pub host_ip: String,
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct VmInfo {
     pub name: String,
     pub state: String,
 }
 
-#[cfg(target_os = "windows")]
 fn powershell(script: &str) -> Result<String> {
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -41,7 +35,6 @@ fn powershell(script: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg(target_os = "windows")]
 fn powershell_ignore_error(script: &str) {
     let _ = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -50,7 +43,6 @@ fn powershell_ignore_error(script: &str) {
         .status();
 }
 
-#[cfg(target_os = "windows")]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
     let subnet = format!(
         "{}/{}",
@@ -83,7 +75,6 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     })
 }
 
-#[cfg(target_os = "windows")]
 pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> Result<()> {
     let memory_bytes = (memory_mb as u64) * 1024 * 1024;
     let script = format!(
@@ -107,7 +98,6 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
 }
 
 /// Attach VHDX, set boot device, start VM, return VM GUID — all in 1 PowerShell call.
-#[cfg(target_os = "windows")]
 pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
     let script = format!(
         "Add-VMHardDiskDrive -VMName '{name}' -Path '{vhdx}' -ControllerType SCSI; \
@@ -121,7 +111,6 @@ pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
     Ok(guid.trim().to_string())
 }
 
-#[cfg(target_os = "windows")]
 pub fn stop_vm(name: &str) -> Result<()> {
     powershell_ignore_error(&format!(
         "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue",
@@ -131,7 +120,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 pub fn remove_vm(name: &str) -> Result<()> {
     stop_vm(name)?;
     powershell_ignore_error(&format!(
@@ -142,7 +130,6 @@ pub fn remove_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 pub fn get_vm_state(name: &str) -> Result<String> {
     powershell(&format!(
         "$v = Get-VM -Name '{}' -ErrorAction SilentlyContinue; if ($v) {{ Write-Host $v.State }}; exit 0",
@@ -150,7 +137,6 @@ pub fn get_vm_state(name: &str) -> Result<String> {
     ))
 }
 
-#[cfg(target_os = "windows")]
 pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
     let output = powershell(&format!(
         "$vms = Get-VM -Name '{}*' -ErrorAction SilentlyContinue; if ($vms) {{ $vms | ForEach-Object {{ \"$($_.Name)|$($_.State)\" }} }}; exit 0",
@@ -168,7 +154,6 @@ pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
     Ok(vms)
 }
 
-#[cfg(target_os = "windows")]
 pub fn is_hyper_v_enabled() -> bool {
     powershell(
         "Write-Host (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State",
@@ -177,7 +162,6 @@ pub fn is_hyper_v_enabled() -> bool {
     .unwrap_or(false)
 }
 
-#[cfg(target_os = "windows")]
 pub fn get_vm_guid(vm_name: &str) -> Result<String> {
     powershell(&format!(
         "Write-Host (Get-VM -Name '{}').VMId.Guid",
@@ -185,7 +169,6 @@ pub fn get_vm_guid(vm_name: &str) -> Result<String> {
     ))
 }
 
-#[cfg(target_os = "windows")]
 pub fn get_wsl_vm_guid(_machine_name: &str) -> Result<String> {
     // WSL2 VMs are HCS utility VMs, invisible to Get-VM.
     // Use hcsdiag to find the WSL VM GUID.
@@ -207,7 +190,6 @@ pub fn get_wsl_vm_guid(_machine_name: &str) -> Result<String> {
     bail!("could not find WSL2 VM via hcsdiag. Ensure podman machine (WSL2) is running.");
 }
 
-#[cfg(target_os = "windows")]
 pub fn register_vsock_service(port: u32) -> Result<()> {
     let guid = format!("{:08X}-FACB-11E6-BD58-64006A7986D3", port);
     powershell_ignore_error(&format!(
@@ -219,7 +201,6 @@ pub fn register_vsock_service(port: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 pub fn unregister_vsock_service(_port: u32) -> Result<()> {
     // GUID is kept permanently. Deleting it caused re-registration failures
     // because powershell_ignore_error silently swallowed HKLM write errors.

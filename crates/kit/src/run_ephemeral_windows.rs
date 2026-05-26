@@ -6,40 +6,27 @@
 //! 3. Hyper-V Gen2 VM boots → standard nbd.ko + nbd-vsock (socketpair relay) → EROFS rootfs
 //! 4. Supports WSL2 (default) and Hyper-V podman machine backends
 
-#[cfg(target_os = "windows")]
 use color_eyre::{
     eyre::{bail, eyre},
     Result,
 };
-#[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
-#[cfg(target_os = "windows")]
 use std::time::Duration;
-#[cfg(target_os = "windows")]
 use tracing::{debug, info};
 
-#[cfg(target_os = "windows")]
 use crate::hyperv::boot_files;
-#[cfg(target_os = "windows")]
 use crate::hyperv::dhcp::DhcpServer;
-#[cfg(target_os = "windows")]
 use crate::hyperv::vm;
-#[cfg(target_os = "windows")]
 use crate::hyperv::ssh_forward::SshForward;
 
-#[cfg(target_os = "windows")]
 const SSH_TIMEOUT: Duration = Duration::from_secs(240);
 
-#[cfg(target_os = "windows")]
 const VM_PREFIX: &str = "bcvk-ephemeral-";
 
 // --- Metadata ---
 
-#[cfg(target_os = "windows")]
 pub fn ephemeral_base_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
@@ -47,7 +34,6 @@ pub fn ephemeral_base_dir() -> PathBuf {
         .join("ephemeral")
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EphemeralVmMetadata {
     pub name: String,
@@ -60,7 +46,6 @@ pub struct EphemeralVmMetadata {
     pub created: String,
 }
 
-#[cfg(target_os = "windows")]
 impl EphemeralVmMetadata {
     pub fn vms_dir() -> PathBuf {
         ephemeral_base_dir().join("vms")
@@ -111,7 +96,6 @@ impl EphemeralVmMetadata {
 
 // --- Cleanup ---
 
-#[cfg(target_os = "windows")]
 struct VmCleanup {
     vm_name: String,
     nbd_container: Option<String>,
@@ -122,7 +106,6 @@ struct VmCleanup {
     vsock_port: Option<u32>,
 }
 
-#[cfg(target_os = "windows")]
 impl Drop for VmCleanup {
     fn drop(&mut self) {
         debug!("cleaning up VM...");
@@ -160,7 +143,6 @@ impl Drop for VmCleanup {
 }
 
 /// Spawn cleanup as a detached process so bcvk can exit immediately.
-#[cfg(target_os = "windows")]
 fn spawn_cleanup(c: &VmCleanup) {
     let script = format!(
         "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue; \
@@ -199,7 +181,6 @@ fn spawn_cleanup(c: &VmCleanup) {
 
 // --- Options ---
 
-#[cfg(target_os = "windows")]
 #[derive(clap::Parser, Debug)]
 pub struct RunEphemeralOpts {
     /// Container image to boot
@@ -234,7 +215,6 @@ pub struct RunEphemeralOpts {
 }
 
 /// Parse memory specification string (e.g. "4G", "2048M") to megabytes.
-#[cfg(target_os = "windows")]
 pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
@@ -246,7 +226,6 @@ pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn default_vcpus() -> u32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as u32)
@@ -256,7 +235,6 @@ fn default_vcpus() -> u32 {
 
 // --- Main entry point ---
 
-#[cfg(target_os = "windows")]
 struct RunContext {
     machine: String,
     podman_ssh: boot_files::PodmanSsh,
@@ -270,7 +248,6 @@ struct RunContext {
     nbd_container_name: String,
 }
 
-#[cfg(target_os = "windows")]
 impl RunContext {
     fn new(opts: &RunEphemeralOpts) -> Result<Self> {
         if !vm::is_hyper_v_enabled() {
@@ -347,7 +324,6 @@ impl RunContext {
     }
 }
 
-#[cfg(target_os = "windows")]
 struct Phase0Result {
     ssh_pubkey: String,
     digest_short: String,
@@ -357,10 +333,8 @@ struct Phase0Result {
     vm_handle: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
-#[cfg(target_os = "windows")]
 const VSOCK_PORT: u32 = 1030;
 
-#[cfg(target_os = "windows")]
 fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result> {
     let need_ssh = opts.ssh_keygen || !opts.execute.is_empty();
     let ssh_key_path = ctx.ssh_key_path.clone();
@@ -475,13 +449,11 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     })
 }
 
-#[cfg(target_os = "windows")]
 struct Phase1Result {
     vhdx_path: String,
     nbdkit_handle: Option<std::thread::JoinHandle<Result<Vec<u8>>>>,
 }
 
-#[cfg(target_os = "windows")]
 fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
     let mut ssh_param_str = String::new();
     if !p0.ssh_pubkey.is_empty() {
@@ -552,7 +524,6 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
     })
 }
 
-#[cfg(target_os = "windows")]
 fn run_phase2(
     ctx: &RunContext,
     p0: &Phase0Result,
@@ -713,7 +684,6 @@ fn run_phase2(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together");
@@ -776,7 +746,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
 // --- Detached mode ---
 
-#[cfg(target_os = "windows")]
 fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     let base = ephemeral_base_dir();
     std::fs::create_dir_all(&base)?;
@@ -840,7 +809,6 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn stop_nbdkit_container(name: &str) {
     let _ = Command::new("podman")
         .args(["rm", "-f", name])
@@ -851,7 +819,6 @@ fn stop_nbdkit_container(name: &str) {
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---
 
-#[cfg(target_os = "windows")]
 pub fn detect_machine_name() -> Result<String> {
     let output = Command::new("podman")
         .args(["machine", "info", "--format", "{{.Host.CurrentMachine}}"])
@@ -863,7 +830,6 @@ pub fn detect_machine_name() -> Result<String> {
     Ok(name)
 }
 
-#[cfg(target_os = "windows")]
 pub fn detect_podman_vmtype() -> Result<String> {
     let output = Command::new("podman")
         .args(["machine", "info", "--format", "{{.Host.VMType}}"])
@@ -877,7 +843,6 @@ pub fn detect_podman_vmtype() -> Result<String> {
     Ok(vmtype)
 }
 
-#[cfg(target_os = "windows")]
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     use crate::ssh_options::CommonSshOptions;
     let ssh_opts = CommonSshOptions::default();
@@ -911,7 +876,6 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "windows")]
 pub fn run_ssh_command(
     port: u16,
     key_path: &Path,
@@ -932,7 +896,6 @@ pub fn run_ssh_command(
         .map_err(|e| eyre!("ssh failed: {}", e))
 }
 
-#[cfg(target_os = "windows")]
 pub fn run_ssh_interactive(
     port: u16,
     key_path: &Path,

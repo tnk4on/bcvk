@@ -2,18 +2,12 @@
 //!
 //! Single-client. Runs as an async task within bcvk.exe.
 
-#[cfg(target_os = "windows")]
 use color_eyre::{eyre::bail, Result};
-#[cfg(target_os = "windows")]
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
 use tokio::net::UdpSocket;
-#[cfg(target_os = "windows")]
 use tokio::sync::Notify;
-#[cfg(target_os = "windows")]
 use tracing::{info, warn};
 
-#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct DhcpServer {
     server_ip: [u8; 4],
@@ -21,7 +15,6 @@ pub struct DhcpServer {
     stop: Arc<Notify>,
 }
 
-#[cfg(target_os = "windows")]
 impl DhcpServer {
     pub fn new(server_ip: &str, client_ip: &str) -> Result<Self> {
         Ok(Self {
@@ -47,7 +40,6 @@ impl DhcpServer {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn parse_ip(s: &str) -> Result<[u8; 4]> {
     let parts: Vec<u8> = s
         .split('.')
@@ -59,7 +51,6 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
     Ok([parts[0], parts[1], parts[2], parts[3]])
 }
 
-#[cfg(target_os = "windows")]
 async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> Result<()> {
     let bind_addr = format!(
         "{}.{}.{}.{}:67",
@@ -97,7 +88,6 @@ async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> 
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn build_dhcp_response(
     xid: &[u8],
     chaddr: &[u8],
@@ -141,7 +131,6 @@ fn build_dhcp_response(
     resp
 }
 
-#[cfg(target_os = "windows")]
 fn find_dhcp_option(data: &[u8], option: u8) -> Option<Vec<u8>> {
     let mut i = 240;
     while i < data.len() && data[i] != 255 {
