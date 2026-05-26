@@ -91,12 +91,70 @@ fn variant_to_i32(val: &VARIANT) -> i32 {
 }
 
 #[allow(unsafe_code)]
-fn wmi_request_state_change(vm_name: &str, state: u16) -> Result<()> {
-    let services = wmi_connect("root\\virtualization\\v2")?;
-    let query = format!(
-        "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
-        vm_name
-    );
+fn wmi_put_bstr(obj: &IWbemClassObject, name: &str, value: &str) -> Result<()> {
+    let prop_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let mut v = VARIANT::default();
+        let p = &mut v as *mut VARIANT;
+        let inner = &mut (*p).Anonymous.Anonymous;
+        inner.vt = windows::Win32::System::Variant::VT_BSTR;
+        std::ptr::write(
+            std::ptr::addr_of_mut!(inner.Anonymous.bstrVal),
+            std::mem::ManuallyDrop::new(BSTR::from(value)),
+        );
+        obj.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &v, 0)?;
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_put_i32(obj: &IWbemClassObject, name: &str, value: i32) -> Result<()> {
+    let prop_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let mut v = VARIANT::default();
+        let p = &mut v as *mut VARIANT;
+        let inner = &mut (*p).Anonymous.Anonymous;
+        inner.vt = windows::Win32::System::Variant::VT_I4;
+        (*std::ptr::addr_of_mut!(inner.Anonymous)).lVal = value;
+        obj.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &v, 0)?;
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_put_bstr_array(obj: &IWbemClassObject, name: &str, values: &[&str]) -> Result<()> {
+    use windows::Win32::System::Ole::{
+        SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement,
+    };
+    use windows::Win32::System::Variant::{VT_ARRAY, VT_BSTR};
+
+    let prop_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let sa = SafeArrayCreateVector(VT_BSTR, 0, values.len() as u32);
+        if sa.is_null() {
+            bail!("SafeArrayCreateVector failed");
+        }
+        for (i, s) in values.iter().enumerate() {
+            let bstr = BSTR::from(*s);
+            let idx = i as i32;
+            if let Err(e) = SafeArrayPutElement(sa, &idx, bstr.as_ptr() as *const _) {
+                SafeArrayDestroy(sa).ok();
+                return Err(e.into());
+            }
+        }
+        let mut v = VARIANT::default();
+        let p = &mut v as *mut VARIANT;
+        let inner = &mut (*p).Anonymous.Anonymous;
+        inner.vt = windows::Win32::System::Variant::VARENUM(VT_BSTR.0 | VT_ARRAY.0);
+        (*std::ptr::addr_of_mut!(inner.Anonymous)).parray = sa;
+        obj.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &v, 0)?;
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_get_mgmt_service(services: &IWbemServices) -> Result<(IWbemClassObject, String)> {
+    let query = "SELECT * FROM Msvm_VirtualSystemManagementService";
     unsafe {
         let enumerator = services.ExecQuery(
             &BSTR::from("WQL"),
@@ -111,53 +169,244 @@ fn wmi_request_state_change(vm_name: &str, state: u16) -> Result<()> {
             .is_err()
             || returned == 0
         {
-            bail!("VM '{}' not found", vm_name);
+            bail!("Msvm_VirtualSystemManagementService not found");
         }
-        if let Some(ref obj) = objs[0] {
-            let path_val = wmi_get_property(obj, "__PATH")?;
-            let path = variant_to_string(&path_val);
+        let obj = objs[0]
+            .take()
+            .ok_or_else(|| color_eyre::eyre::eyre!("no mgmt service"))?;
+        let path_val = wmi_get_property(&obj, "__PATH")?;
+        let path = variant_to_string(&path_val);
+        Ok((obj, path))
+    }
+}
 
-            let method_name = BSTR::from("RequestStateChange");
-            let mut in_class = None;
+#[allow(unsafe_code)]
+fn wmi_get_method_in_params(
+    services: &IWbemServices,
+    class_name: &str,
+    method_name: &str,
+) -> Result<IWbemClassObject> {
+    unsafe {
+        let mut class_obj = None;
+        services.GetObject(
+            &BSTR::from(class_name),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            Some(&mut class_obj),
+            None,
+        )?;
+        let class_obj =
+            class_obj.ok_or_else(|| color_eyre::eyre::eyre!("GetObject({}) failed", class_name))?;
+        let mut in_params_class = None;
+        class_obj.GetMethod(
+            &BSTR::from(method_name),
+            0,
+            &mut in_params_class,
+            std::ptr::null_mut(),
+        )?;
+        let in_params_class = in_params_class
+            .ok_or_else(|| color_eyre::eyre::eyre!("GetMethod({}) failed", method_name))?;
+        Ok(in_params_class.SpawnInstance(0)?)
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_check_result(services: &IWbemServices, out_params: &IWbemClassObject) -> Result<()> {
+    let rv = wmi_get_property(out_params, "ReturnValue")?;
+    let rv_val = variant_to_i32(&rv);
+    match rv_val {
+        0 => Ok(()),
+        4096 => {
+            let job_val = wmi_get_property(out_params, "Job")?;
+            let job_path = variant_to_string(&job_val);
+            wmi_wait_for_job(services, &job_path)
+        }
+        _ => bail!("WMI method failed with ReturnValue={}", rv_val),
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_wait_for_job(services: &IWbemServices, job_path: &str) -> Result<()> {
+    loop {
+        unsafe {
+            let mut job_obj = None;
             services.GetObject(
-                &BSTR::from("Msvm_ComputerSystem"),
+                &BSTR::from(job_path),
                 WBEM_GENERIC_FLAG_TYPE(0),
                 None,
-                Some(&mut in_class),
+                Some(&mut job_obj),
                 None,
             )?;
-            let in_class = in_class.ok_or_else(|| color_eyre::eyre::eyre!("GetObject failed"))?;
-            let mut in_params_class = None;
-            in_class.GetMethod(&method_name, 0, &mut in_params_class, std::ptr::null_mut())?;
-            let in_params_class =
-                in_params_class.ok_or_else(|| color_eyre::eyre::eyre!("GetMethod failed"))?;
-            let in_params = in_params_class.SpawnInstance(0)?;
-
-            let state_var = unsafe {
-                let mut v = VARIANT::default();
-                let p = &mut v as *mut VARIANT;
-                let inner = &mut (*p).Anonymous.Anonymous;
-                inner.vt = windows::Win32::System::Variant::VT_I4;
-                (*std::ptr::addr_of_mut!(inner.Anonymous)).lVal = state as i32;
-                v
-            };
-
-            let prop_w: Vec<u16> = "RequestedState"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            in_params.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &state_var, 0)?;
-
-            services.ExecMethod(
-                &BSTR::from(path),
-                &method_name,
-                WBEM_GENERIC_FLAG_TYPE(0),
-                None,
-                &in_params,
-                None,
-                None,
-            )?;
+            let job_obj =
+                job_obj.ok_or_else(|| color_eyre::eyre::eyre!("Job object not found"))?;
+            let state_val = wmi_get_property(&job_obj, "JobState")?;
+            let state = variant_to_i32(&state_val);
+            match state {
+                7 => return Ok(()),                       // Completed
+                10 | 11 => bail!("WMI job failed (state={})", state), // Exception or Service
+                2 | 3 | 4 => {
+                    // New, Starting, Running — keep waiting
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                _ => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
         }
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_define_system(name: &str) -> Result<()> {
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
+    let in_params =
+        wmi_get_method_in_params(&services, "Msvm_VirtualSystemManagementService", "DefineSystem")?;
+
+    let system_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_VirtualSystemSettingData\">\
+         <PROPERTY NAME=\"ElementName\" TYPE=\"string\"><VALUE>{name}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"VirtualSystemSubType\" TYPE=\"string\">\
+         <VALUE>Microsoft:Hyper-V:SubType:2</VALUE></PROPERTY></INSTANCE>"
+    );
+    wmi_put_bstr(&in_params, "SystemSettings", &system_xml)?;
+
+    unsafe {
+        let mut out_params = None;
+        services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("DefineSystem"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        )?;
+        let out_params =
+            out_params.ok_or_else(|| color_eyre::eyre::eyre!("DefineSystem returned no output"))?;
+        wmi_check_result(&services, &out_params)?;
+    }
+    debug!("DefineSystem succeeded for '{}'", name);
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_query_first_string(
+    services: &IWbemServices,
+    query: &str,
+    property: &str,
+) -> Result<String> {
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        let mut objs = [None; 1];
+        let mut returned = 0u32;
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
+            bail!("WMI query returned no results: {}", query);
+        }
+        let obj = objs[0]
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("no object"))?;
+        let val = wmi_get_property(obj, property)?;
+        Ok(variant_to_string(&val))
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_modify_resource_settings(
+    services: &IWbemServices,
+    mgmt_path: &str,
+    resource_xmls: &[&str],
+) -> Result<()> {
+    let in_params = wmi_get_method_in_params(
+        services,
+        "Msvm_VirtualSystemManagementService",
+        "ModifyResourceSettings",
+    )?;
+    wmi_put_bstr_array(&in_params, "ResourceSettings", resource_xmls)?;
+
+    unsafe {
+        let mut out_params = None;
+        services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("ModifyResourceSettings"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        )?;
+        let out_params = out_params
+            .ok_or_else(|| color_eyre::eyre::eyre!("ModifyResourceSettings returned no output"))?;
+        wmi_check_result(services, &out_params)?;
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_modify_system_settings(
+    services: &IWbemServices,
+    mgmt_path: &str,
+    settings_xml: &str,
+) -> Result<()> {
+    let in_params = wmi_get_method_in_params(
+        services,
+        "Msvm_VirtualSystemManagementService",
+        "ModifySystemSettings",
+    )?;
+    wmi_put_bstr(&in_params, "SystemSettings", settings_xml)?;
+
+    unsafe {
+        let mut out_params = None;
+        services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("ModifySystemSettings"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        )?;
+        let out_params = out_params
+            .ok_or_else(|| color_eyre::eyre::eyre!("ModifySystemSettings returned no output"))?;
+        wmi_check_result(services, &out_params)?;
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn wmi_request_state_change(vm_name: &str, state: u16) -> Result<()> {
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let vm_path = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
+            vm_name
+        ),
+        "__PATH",
+    )?;
+    let in_params =
+        wmi_get_method_in_params(&services, "Msvm_ComputerSystem", "RequestStateChange")?;
+    wmi_put_i32(&in_params, "RequestedState", state as i32)?;
+
+    unsafe {
+        services.ExecMethod(
+            &BSTR::from(vm_path),
+            &BSTR::from("RequestStateChange"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            None,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -242,21 +491,98 @@ pub fn remove_internal_switch(name: &str) {
     debug!("removed switch: {}", name);
 }
 
+#[allow(unsafe_code)]
 pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> Result<()> {
-    let memory_bytes = (memory_mb as u64) * 1024 * 1024;
+    let _ = remove_vm(name);
+
+    // Step 1: Create Gen2 VM via WMI DefineSystem
+    wmi_define_system(name)?;
+
+    // Step 2: Configure memory, CPU, and SecureBoot via WMI
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
+
+    let vm_guid = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT ConfigurationID FROM Msvm_VirtualSystemSettingData \
+             WHERE ElementName='{}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'",
+            name
+        ),
+        "ConfigurationID",
+    )?;
+
+    let mem_instance_id = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT InstanceID FROM Msvm_MemorySettingData \
+             WHERE InstanceID LIKE 'Microsoft:{}%'",
+            vm_guid
+        ),
+        "InstanceID",
+    )?;
+
+    let proc_instance_id = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT InstanceID FROM Msvm_ProcessorSettingData \
+             WHERE InstanceID LIKE 'Microsoft:{}%'",
+            vm_guid
+        ),
+        "InstanceID",
+    )?;
+
+    let mem_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_MemorySettingData\">\
+         <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"VirtualQuantity\" TYPE=\"uint64\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"Reservation\" TYPE=\"uint64\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"Limit\" TYPE=\"uint64\"><VALUE>{}</VALUE></PROPERTY>\
+         </INSTANCE>",
+        mem_instance_id, memory_mb, memory_mb, memory_mb,
+    );
+
+    let cpu_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_ProcessorSettingData\">\
+         <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"VirtualQuantity\" TYPE=\"uint64\"><VALUE>{}</VALUE></PROPERTY>\
+         </INSTANCE>",
+        proc_instance_id, vcpus,
+    );
+
+    wmi_modify_resource_settings(&services, &mgmt_path, &[&mem_xml, &cpu_xml])?;
+
+    let vssd_instance_id = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT InstanceID FROM Msvm_VirtualSystemSettingData \
+             WHERE ElementName='{}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'",
+            name
+        ),
+        "InstanceID",
+    )?;
+
+    let vssd_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_VirtualSystemSettingData\">\
+         <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"SecureBootEnabled\" TYPE=\"boolean\"><VALUE>FALSE</VALUE></PROPERTY>\
+         </INSTANCE>",
+        vssd_instance_id,
+    );
+    wmi_modify_system_settings(&services, &mgmt_path, &vssd_xml)?;
+
+    // Step 3: Remaining settings via PowerShell (NIC, checkpoint, COM port, GSI)
     let script = format!(
-        "Stop-VM -Name '{name}' -Force -EA SilentlyContinue; \
-         Remove-VM -Name '{name}' -Force -EA SilentlyContinue; \
-         New-VM -Name '{name}' -Generation 2 -MemoryStartupBytes {mem} -NoVHD -SwitchName '{sw}' | Out-Null; \
-         Set-VMProcessor -VMName '{name}' -Count {cpu}; \
-         Set-VMFirmware -VMName '{name}' -EnableSecureBoot Off; \
-         Enable-VMIntegrationService -VMName '{name}' -Name 'Guest Service Interface' -EA SilentlyContinue; \
+        "Add-VMNetworkAdapter -VMName '{name}' -SwitchName '{sw}'; \
          Set-VM -Name '{name}' -CheckpointType Disabled; \
          Set-VMComPort -VMName '{name}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{name}'; \
-         Write-Host 'OK'",
-        name = name, mem = memory_bytes, cpu = vcpus, sw = switch,
+         Get-VMIntegrationService -VMName '{name}' | Where-Object {{ -not $_.Enabled }} | \
+         Enable-VMIntegrationService -EA SilentlyContinue",
+        name = name,
+        sw = switch,
     );
     powershell(&script)?;
+
     info!(
         "created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)",
         name, vcpus, memory_mb
@@ -306,92 +632,43 @@ pub fn start_vm(name: &str) -> Result<()> {
 pub fn remove_vm(name: &str) -> Result<()> {
     let _ = stop_vm(name);
     let services = wmi_connect("root\\virtualization\\v2")?;
-    let query = format!(
-        "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
-        name
-    );
-    unsafe {
-        let enumerator = services.ExecQuery(
-            &BSTR::from("WQL"),
-            &BSTR::from(query),
-            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-            None,
-        )?;
-        let mut objs = [None; 1];
-        let mut returned = 0u32;
-        if enumerator
-            .Next(WBEM_INFINITE, &mut objs, &mut returned)
-            .is_err()
-            || returned == 0
-        {
+
+    let vm_path = match wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_ComputerSystem WHERE ElementName='{}'",
+            name
+        ),
+        "__PATH",
+    ) {
+        Ok(p) => p,
+        Err(_) => {
             debug!("VM '{}' not found, nothing to remove", name);
             return Ok(());
         }
-        if let Some(ref vm_obj) = objs[0] {
-            let vm_path_val = wmi_get_property(vm_obj, "__PATH")?;
-            let vm_path = variant_to_string(&vm_path_val);
+    };
 
-            let mgmt_query = "SELECT * FROM Msvm_VirtualSystemManagementService";
-            let mgmt_enum = services.ExecQuery(
-                &BSTR::from("WQL"),
-                &BSTR::from(mgmt_query),
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                None,
-            )?;
-            let mut mgmt_objs = [None; 1];
-            let mut mgmt_ret = 0u32;
-            let _ = mgmt_enum.Next(WBEM_INFINITE, &mut mgmt_objs, &mut mgmt_ret);
+    let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
+    let in_params = wmi_get_method_in_params(
+        &services,
+        "Msvm_VirtualSystemManagementService",
+        "DestroySystem",
+    )?;
+    wmi_put_bstr(&in_params, "AffectedSystem", &vm_path)?;
 
-            if let Some(ref mgmt) = mgmt_objs[0] {
-                let mgmt_path_val = wmi_get_property(mgmt, "__PATH")?;
-                let mgmt_path = variant_to_string(&mgmt_path_val);
-
-                let mut in_class = None;
-                services.GetObject(
-                    &BSTR::from("Msvm_VirtualSystemManagementService"),
-                    WBEM_GENERIC_FLAG_TYPE(0),
-                    None,
-                    Some(&mut in_class),
-                    None,
-                )?;
-                let in_class = in_class.unwrap();
-                let mut in_params_class = None;
-                in_class.GetMethod(
-                    &BSTR::from("DestroySystem"),
-                    0,
-                    &mut in_params_class,
-                    std::ptr::null_mut(),
-                )?;
-                let in_params = in_params_class.unwrap().SpawnInstance(0)?;
-
-                let vm_path_var = unsafe {
-                    let mut v = VARIANT::default();
-                    let p = &mut v as *mut VARIANT;
-                    let inner = &mut (*p).Anonymous.Anonymous;
-                    inner.vt = windows::Win32::System::Variant::VT_BSTR;
-                    std::ptr::write(
-                        std::ptr::addr_of_mut!(inner.Anonymous.bstrVal),
-                        std::mem::ManuallyDrop::new(BSTR::from(&vm_path)),
-                    );
-                    v
-                };
-
-                let prop_w: Vec<u16> = "AffectedSystem"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                in_params.Put(windows::core::PCWSTR(prop_w.as_ptr()), 0, &vm_path_var, 0)?;
-
-                let _ = services.ExecMethod(
-                    &BSTR::from(mgmt_path),
-                    &BSTR::from("DestroySystem"),
-                    WBEM_GENERIC_FLAG_TYPE(0),
-                    None,
-                    &in_params,
-                    None,
-                    None,
-                );
-            }
+    unsafe {
+        let mut out_params = None;
+        let _ = services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("DestroySystem"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        );
+        if let Some(ref out) = out_params {
+            let _ = wmi_check_result(&services, out);
         }
     }
     debug!("removed VM: {}", name);
@@ -596,4 +873,65 @@ pub fn unregister_vsock_service(_port: u32) -> Result<()> {
     // because powershell_ignore_error silently swallowed HKLM write errors.
     // The key only permits vsock on one port — no cleanup needed.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires Hyper-V"]
+    fn test_create_gen2_vm_wmi() {
+        let name = "bcvk-wmi-test";
+        let _ = remove_vm(name);
+
+        create_gen2_vm(name, 2048, 2, "bcvk").expect("create_gen2_vm failed");
+
+        let state = get_vm_state(name).expect("get_vm_state failed");
+        assert_eq!(state, "Off", "VM should be in Off state after creation");
+
+        let guid = get_vm_guid(name).expect("get_vm_guid failed");
+        assert!(!guid.is_empty(), "VM GUID should not be empty");
+
+        let _ = remove_vm(name);
+        let state_after = get_vm_state(name).expect("get_vm_state after remove");
+        assert!(state_after.is_empty(), "VM should not exist after remove");
+    }
+
+    #[test]
+    #[ignore = "requires Hyper-V"]
+    fn test_simultaneous_vm_creation() {
+        let names = ["bcvk-sim-test-1", "bcvk-sim-test-2"];
+        for name in &names {
+            let _ = remove_vm(name);
+        }
+
+        let handles: Vec<_> = names
+            .iter()
+            .map(|name| {
+                let n = name.to_string();
+                std::thread::spawn(move || create_gen2_vm(&n, 1024, 1, "bcvk"))
+            })
+            .collect();
+
+        for (i, h) in handles.into_iter().enumerate() {
+            h.join()
+                .expect("thread panicked")
+                .unwrap_or_else(|e| panic!("VM {} creation failed: {:?}", names[i], e));
+        }
+
+        let vms = list_vms("bcvk-sim-test-").expect("list_vms failed");
+        assert_eq!(vms.len(), 2, "should find exactly 2 VMs");
+        for vm in &vms {
+            assert_eq!(vm.state, "Off");
+        }
+
+        let guid1 = get_vm_guid(names[0]).expect("guid1");
+        let guid2 = get_vm_guid(names[1]).expect("guid2");
+        assert_ne!(guid1, guid2, "GUIDs must differ");
+
+        for name in &names {
+            let _ = remove_vm(name);
+        }
+    }
 }
