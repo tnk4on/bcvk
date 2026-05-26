@@ -84,6 +84,10 @@ pub struct VmMetadata {
     pub vcpus: u32,
     pub memory_mb: u32,
     pub vhdx_path: String,
+    #[serde(default)]
+    pub switch_name: String,
+    #[serde(default)]
+    pub subnet: u8,
     pub created: String,
 }
 

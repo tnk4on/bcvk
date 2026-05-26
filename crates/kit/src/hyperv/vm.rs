@@ -75,6 +75,15 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     })
 }
 
+pub fn remove_internal_switch(name: &str) {
+    powershell_ignore_error(&format!(
+        "Remove-NetNat -Name '{name}-nat' -Confirm:$false -EA SilentlyContinue; \
+         Remove-VMSwitch -Name '{name}' -Force -EA SilentlyContinue",
+        name = name,
+    ));
+    debug!("removed switch: {}", name);
+}
+
 pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> Result<()> {
     let memory_bytes = (memory_mb as u64) * 1024 * 1024;
     let script = format!(

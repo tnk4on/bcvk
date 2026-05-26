@@ -42,6 +42,10 @@ pub fn run(opts: HypervRmOpts) -> Result<()> {
     let pub_path = std::path::PathBuf::from(format!("{}.pub", meta.ssh_key));
     let _ = std::fs::remove_file(pub_path);
 
+    if !meta.switch_name.is_empty() {
+        vm::remove_internal_switch(&meta.switch_name);
+    }
+
     VmMetadata::remove(&opts.name);
     println!("Removed VM '{}'", opts.name);
     Ok(())
