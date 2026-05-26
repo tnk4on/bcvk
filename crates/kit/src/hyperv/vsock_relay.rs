@@ -7,10 +7,9 @@
 //! ## Architecture: Host-initiated connections
 //!
 //! The relay initiates connections FROM the Host TO both VMs (podman + ephemeral).
-//! This is required because Hyper-V hv_sock only supports Host-initiated connections
-//! for reliable VMBus channel setup. Guest-initiated connections to the Host would
-//! require pre-registering listener services, and the ephemeral VM may not be ready
-//! at relay start time. Host-initiated connections with retry handle this naturally.
+//! This is critical for performance: Hyper-V hv_sock has a ~10x throughput asymmetry
+//! based on connection direction (Guest-initiated ~120 MB/s vs Host-initiated ~1 GB/s)
+//! due to VMBus ring buffer handling differences. See docs/62 and docs/65 for details.
 //!
 //! ## Data path
 //!
