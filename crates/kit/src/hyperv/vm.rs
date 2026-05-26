@@ -111,6 +111,18 @@ pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
     Ok(guid.trim().to_string())
 }
 
+pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
+    powershell(&format!(
+        "Add-VMHardDiskDrive -VMName '{name}' -Path '{vhdx}' -ControllerType SCSI; \
+         Set-VMFirmware -VMName '{name}' -FirstBootDevice \
+         (Get-VMHardDiskDrive -VMName '{name}' | Select-Object -First 1)",
+        name = name,
+        vhdx = vhdx_path,
+    ))?;
+    debug!("attached VHDX to VM {}: {}", name, vhdx_path);
+    Ok(())
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     powershell_ignore_error(&format!(
         "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue",

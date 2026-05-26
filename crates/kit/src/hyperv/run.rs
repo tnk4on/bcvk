@@ -1,6 +1,6 @@
-//! hyperv run — Create and start a persistent VM from a bootc image.
+//! hyperv run — Start a persistent VM from a disk image (VHDX).
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use clap::Parser;
 use color_eyre::{eyre::bail, Result};
@@ -12,10 +12,10 @@ use super::VmMetadata;
 /// Options for `vm run`.
 #[derive(Parser, Debug)]
 pub struct HypervRunOpts {
-    /// Container image reference
-    pub image: String,
+    /// Disk image path (.vhdx)
+    pub disk: String,
 
-    /// VM name (default: derived from image)
+    /// VM name (default: derived from disk filename)
     #[clap(long, short)]
     pub name: Option<String>,
 
@@ -30,6 +30,14 @@ pub struct HypervRunOpts {
     /// Hyper-V virtual switch name
     #[clap(long, default_value = "Default Switch")]
     pub switch: String,
+
+    /// Path to an existing SSH private key
+    #[clap(long)]
+    pub ssh_key: Option<String>,
+
+    /// SSH port (default: auto-allocate)
+    #[clap(long)]
+    pub ssh_port: Option<u16>,
 }
 
 pub fn run(opts: HypervRunOpts) -> Result<()> {
@@ -37,12 +45,17 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         bail!("Hyper-V is not enabled on this system");
     }
 
+    let disk_path = Path::new(&opts.disk);
+    if !disk_path.exists() {
+        bail!("disk image not found: {}", opts.disk);
+    }
+
     let name = opts.name.unwrap_or_else(|| {
-        opts.image
-            .rsplit('/')
-            .next()
+        disk_path
+            .file_stem()
+            .and_then(|s| s.to_str())
             .unwrap_or("vm")
-            .replace(':', "-")
+            .to_string()
     });
 
     let vm_name = format!("bcvk-{}", name);
@@ -50,65 +63,78 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
     if let Ok(state) = vm::get_vm_state(&vm_name) {
         if !state.is_empty() {
             bail!(
-                "VM '{}' already exists (state: {})",
+                "VM '{}' already exists (state: {}). Remove it first with 'bcvk vm rm {}'",
                 name,
-                state.to_lowercase()
+                state.to_lowercase(),
+                name
             );
         }
     }
 
-    info!("creating persistent VM: {} ({})", name, opts.image);
-
     let vms_dir = VmMetadata::vms_dir();
     std::fs::create_dir_all(&vms_dir)?;
 
-    let ssh_key_path = vms_dir.join(format!("{}-key", name));
-    let pub_path = PathBuf::from(format!("{}.pub", ssh_key_path.display()));
-    let _ = std::fs::remove_file(&ssh_key_path);
-    let _ = std::fs::remove_file(&pub_path);
+    let ssh_key = match &opts.ssh_key {
+        Some(p) => {
+            if !Path::new(p).exists() {
+                bail!("SSH key not found: {}", p);
+            }
+            p.clone()
+        }
+        None => {
+            let key_path = vms_dir.join(format!("{}-key", name));
+            if !key_path.exists() {
+                info!("generating SSH keypair...");
+                let pub_path = std::path::PathBuf::from(format!("{}.pub", key_path.display()));
+                let _ = std::fs::remove_file(&key_path);
+                let _ = std::fs::remove_file(&pub_path);
+                let status = std::process::Command::new("ssh-keygen")
+                    .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+                    .arg(&key_path)
+                    .status()?;
+                if !status.success() {
+                    bail!("ssh-keygen failed");
+                }
+            }
+            key_path.to_string_lossy().to_string()
+        }
+    };
 
-    let status = std::process::Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-q", "-f"])
-        .arg(&ssh_key_path)
-        .status()?;
-    if !status.success() {
-        bail!("ssh-keygen failed");
-    }
+    info!("creating persistent VM: {} (disk: {})", name, opts.disk);
 
     vm::create_gen2_vm(&vm_name, opts.memory, opts.cpus, &opts.switch)?;
-    info!(
-        "created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)",
-        vm_name, opts.cpus, opts.memory
-    );
 
-    let ssh_port = std::net::TcpListener::bind("127.0.0.1:0")
-        .map(|l| l.local_addr().unwrap().port())
-        .unwrap_or(2222);
+    let vhdx_abs = std::fs::canonicalize(disk_path)?;
+    vm::attach_vhdx(&vm_name, &vhdx_abs.to_string_lossy())?;
+
+    let ssh_port = opts.ssh_port.unwrap_or_else(|| {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .map(|l| l.local_addr().unwrap().port())
+            .unwrap_or(2222)
+    });
 
     let meta = VmMetadata {
         name: name.clone(),
-        image: opts.image,
-        vm_name,
+        image: String::new(),
+        vm_name: vm_name.clone(),
         ssh_port,
-        ssh_key: ssh_key_path.to_string_lossy().to_string(),
+        ssh_key,
         vcpus: opts.cpus,
         memory_mb: opts.memory,
-        vhdx_path: String::new(),
+        vhdx_path: vhdx_abs.to_string_lossy().to_string(),
         created: chrono::Utc::now().to_rfc3339(),
     };
     meta.save()?;
 
-    println!(
-        "VM '{}' created. Use 'bcvk vm ssh {}' to connect.",
-        name, name
+    vm::start_vm(&vm_name)?;
+    info!(
+        "started VM: {} ({} vCPUs, {}MB)",
+        vm_name, opts.cpus, opts.memory
     );
-    println!("Note: persistent VM boot with bootc image is not yet implemented.");
-    println!(
-        "VM metadata saved to: {}",
-        VmMetadata::vms_dir()
-            .join(format!("{}.json", name))
-            .display()
-    );
+
+    println!("VM '{}' started from {}", name, opts.disk);
+    println!("Use 'bcvk vm ssh {}' to connect.", name);
+    println!("Use 'bcvk vm stop {}' to stop.", name);
 
     Ok(())
 }
