@@ -36,6 +36,9 @@ use std::mem;
 use std::os::windows::io::RawSocket;
 use std::sync::{Mutex, RwLock};
 
+use windows::core::GUID;
+use windows::Win32::Networking::WinSock as ws;
+
 const AF_HYPERV: i32 = 34;
 const HV_PROTOCOL_RAW: i32 = 1;
 const SOCKET_BUF_SIZE: i32 = 4 * 1024 * 1024;
@@ -45,30 +48,15 @@ const NBD_REPLY_MAGIC: u32 = 0x67446698;
 const NBD_CMD_READ: u16 = 0;
 
 #[repr(C)]
-struct WsaBuf {
-    len: u32,
-    buf: *mut u8,
-}
-
-#[repr(C)]
-#[derive(Clone)]
-struct HvSockGuid {
-    data1: u32,
-    data2: u16,
-    data3: u16,
-    data4: [u8; 8],
-}
-
-#[repr(C)]
 struct SockaddrHv {
     family: u16,
     reserved: u16,
-    vm_id: HvSockGuid,
-    service_id: HvSockGuid,
+    vm_id: GUID,
+    service_id: GUID,
 }
 
-fn vsock_service_id(port: u32) -> HvSockGuid {
-    HvSockGuid {
+fn vsock_service_id(port: u32) -> GUID {
+    GUID {
         data1: port,
         data2: 0xFACB,
         data3: 0x11E6,
@@ -76,7 +64,7 @@ fn vsock_service_id(port: u32) -> HvSockGuid {
     }
 }
 
-fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
+fn parse_vm_guid(s: &str) -> Result<GUID> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 {
         color_eyre::eyre::bail!("invalid VM GUID: {}", s);
@@ -92,12 +80,16 @@ fn parse_vm_guid(s: &str) -> Result<HvSockGuid> {
     for i in 0..6 {
         data4[2 + i] = u8::from_str_radix(&lo_hex[i * 2..i * 2 + 2], 16)?;
     }
-    Ok(HvSockGuid {
+    Ok(GUID {
         data1,
         data2,
         data3,
         data4,
     })
+}
+
+fn to_socket(sock: RawSocket) -> ws::SOCKET {
+    ws::SOCKET(sock as usize)
 }
 
 // --- NBD cache ---
@@ -114,27 +106,11 @@ fn cache_new() -> NbdCache {
 fn wsa_recv_exact(sock: RawSocket, buf: &mut [u8]) -> bool {
     let mut done: usize = 0;
     while done < buf.len() {
-        let mut bytes_recv: u32 = 0;
-        let mut flags: u32 = 0;
-        let mut wsa_buf = WsaBuf {
-            len: (buf.len() - done) as u32,
-            buf: buf.as_mut_ptr().wrapping_add(done),
-        };
-        let rc = unsafe {
-            WSARecv(
-                sock,
-                &mut wsa_buf,
-                1,
-                &mut bytes_recv,
-                &mut flags,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != 0 || bytes_recv == 0 {
+        let n = unsafe { ws::recv(to_socket(sock), &mut buf[done..], ws::MSG_WAITALL) };
+        if n <= 0 {
             return false;
         }
-        done += bytes_recv as usize;
+        done += n as usize;
     }
     true
 }
@@ -142,26 +118,11 @@ fn wsa_recv_exact(sock: RawSocket, buf: &mut [u8]) -> bool {
 fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
     let mut done: usize = 0;
     while done < buf.len() {
-        let mut bytes_sent: u32 = 0;
-        let mut wsa_buf = WsaBuf {
-            len: (buf.len() - done) as u32,
-            buf: buf.as_ptr().wrapping_add(done) as *mut u8,
-        };
-        let rc = unsafe {
-            WSASend(
-                sock,
-                &mut wsa_buf,
-                1,
-                &mut bytes_sent,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if rc != 0 || bytes_sent == 0 {
+        let n = unsafe { ws::send(to_socket(sock), &buf[done..], ws::SEND_RECV_FLAGS(0)) };
+        if n <= 0 {
             return false;
         }
-        done += bytes_sent as usize;
+        done += n as usize;
     }
     true
 }
@@ -243,7 +204,7 @@ fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
     );
 
     unsafe {
-        closesocket(podman_sock);
+        ws::closesocket(to_socket(podman_sock));
     }
 }
 
@@ -480,7 +441,7 @@ impl VsockRelay {
                             Err(e) => {
                                 info!("vsock relay[{}]: VM connect failed: {}", i, e);
                                 unsafe {
-                                    closesocket(podman_sock);
+                                    ws::closesocket(to_socket(podman_sock));
                                 }
                                 return None;
                             }
@@ -518,7 +479,7 @@ impl VsockRelay {
                                     Err(e) => {
                                         info!("vsock relay[{}]: VM reconnect failed: {}", idx, e);
                                         unsafe {
-                                            closesocket(new_podman);
+                                            ws::closesocket(to_socket(new_podman));
                                         }
                                         return;
                                     }
@@ -586,120 +547,87 @@ fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache
     let _ = t2.join();
 
     unsafe {
-        closesocket(vm_sock);
-        closesocket(podman_sock);
+        ws::closesocket(to_socket(vm_sock));
+        ws::closesocket(to_socket(podman_sock));
     }
 }
 
-// --- Raw Windows socket operations ---
-
-extern "system" {
-    fn socket(af: i32, sock_type: i32, protocol: i32) -> RawSocket;
-    fn connect(s: RawSocket, name: *const u8, namelen: i32) -> i32;
-    fn setsockopt(s: RawSocket, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
-    fn closesocket(s: RawSocket) -> i32;
-    fn WSARecv(
-        s: RawSocket,
-        bufs: *mut WsaBuf,
-        buf_count: u32,
-        bytes_recv: *mut u32,
-        flags: *mut u32,
-        overlapped: *mut u8,
-        completion: *mut u8,
-    ) -> i32;
-    fn WSASend(
-        s: RawSocket,
-        bufs: *mut WsaBuf,
-        buf_count: u32,
-        bytes_sent: *mut u32,
-        flags: u32,
-        overlapped: *mut u8,
-        completion: *mut u8,
-    ) -> i32;
-    fn WSAGetLastError() -> i32;
-    fn ioctlsocket(s: RawSocket, cmd: i32, argp: *mut u32) -> i32;
-    fn select(
-        nfds: i32,
-        readfds: *mut u8,
-        writefds: *mut u8,
-        exceptfds: *mut u8,
-        timeout: *const [i64; 2],
-    ) -> i32;
-    fn WSAStartup(version: u16, data: *mut [u8; 408]) -> i32;
-}
+// --- Windows socket operations (via `windows` crate) ---
 
 static WSA_INIT: std::sync::Once = std::sync::Once::new();
 
 fn ensure_wsa() {
     WSA_INIT.call_once(|| {
-        let mut data = [0u8; 408];
+        let mut data = ws::WSADATA::default();
         unsafe {
-            WSAStartup(0x0202, &mut data);
+            ws::WSAStartup(0x0202, &mut data);
         }
     });
 }
 
-unsafe fn hvsock_connect(vm_guid: &HvSockGuid, port: u32) -> Result<RawSocket> {
+unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
     ensure_wsa();
-    let sock = socket(AF_HYPERV, 1, HV_PROTOCOL_RAW);
-    if sock == u64::MAX as RawSocket {
-        return Err(io::Error::from_raw_os_error(WSAGetLastError()).into());
-    }
-    // Set non-blocking for connect with timeout
+    let sock = ws::socket(AF_HYPERV, ws::SOCK_STREAM, HV_PROTOCOL_RAW)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let raw = sock.0 as RawSocket;
+
     let mut nonblock: u32 = 1;
-    ioctlsocket(sock, 0x8004667E_u32 as i32, &mut nonblock); // FIONBIO
+    ws::ioctlsocket(sock, ws::FIONBIO as i32, &mut nonblock);
 
     let addr = SockaddrHv {
         family: AF_HYPERV as u16,
         reserved: 0,
-        vm_id: vm_guid.clone(),
+        vm_id: *vm_guid,
         service_id: vsock_service_id(port),
     };
-    let rc = connect(
+    let rc = ws::connect(
         sock,
-        &addr as *const SockaddrHv as *const u8,
+        &addr as *const SockaddrHv as *const ws::SOCKADDR,
         mem::size_of::<SockaddrHv>() as i32,
     );
     if rc != 0 {
-        let err = WSAGetLastError();
+        let err = ws::WSAGetLastError();
         const WSAEWOULDBLOCK: i32 = 10035;
-        if err != WSAEWOULDBLOCK {
-            closesocket(sock);
-            return Err(io::Error::from_raw_os_error(err).into());
+        if err.0 != WSAEWOULDBLOCK {
+            ws::closesocket(sock);
+            return Err(io::Error::from_raw_os_error(err.0).into());
         }
-        // Wait for connect with 1s timeout using select(writefds)
-        // fd_set: first u32 = count, then socket handles (up to 64)
-        let mut wfds = [0u8; 264]; // fd_set = u32 count + 64 * SOCKET
-        let count_ptr = wfds.as_mut_ptr() as *mut u32;
-        *count_ptr = 1;
-        let sock_ptr = wfds.as_mut_ptr().add(mem::size_of::<usize>()) as *mut RawSocket;
-        *sock_ptr = sock;
-        let timeout: [i64; 2] = [1, 0]; // 1 second, 0 microseconds
-        let n = select(
-            0,
-            std::ptr::null_mut(),
-            wfds.as_mut_ptr(),
-            std::ptr::null_mut(),
-            &timeout,
-        );
+        let mut wfds = ws::FD_SET::default();
+        wfds.fd_count = 1;
+        wfds.fd_array[0] = sock;
+        let timeout = ws::TIMEVAL {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        let n = ws::select(0, None, Some(&mut wfds), None, Some(&timeout));
         if n <= 0 {
-            closesocket(sock);
+            ws::closesocket(sock);
             return Err(color_eyre::eyre::eyre!("connect timed out (1s)"));
         }
     }
 
-    // Restore blocking mode
     let mut blocking: u32 = 0;
-    ioctlsocket(sock, 0x8004667E_u32 as i32, &mut blocking);
+    ws::ioctlsocket(sock, ws::FIONBIO as i32, &mut blocking);
 
     let sockbuf: i32 = SOCKET_BUF_SIZE;
-    setsockopt(sock, 0xFFFF, 0x1001, &sockbuf as *const i32 as *const u8, 4);
-    setsockopt(sock, 0xFFFF, 0x1002, &sockbuf as *const i32 as *const u8, 4);
-    Ok(sock)
+    let buf_bytes = sockbuf.to_ne_bytes();
+    ws::setsockopt(
+        sock,
+        ws::SOL_SOCKET as i32,
+        ws::SO_RCVBUF as i32,
+        Some(&buf_bytes),
+    );
+    ws::setsockopt(
+        sock,
+        ws::SOL_SOCKET as i32,
+        ws::SO_SNDBUF as i32,
+        Some(&buf_bytes),
+    );
+    Ok(raw)
 }
 
 unsafe fn hvsock_connect_retry(
-    vm_guid: &HvSockGuid,
+    vm_guid: &GUID,
     port: u32,
     max_attempts: u32,
     interval_ms: u64,
