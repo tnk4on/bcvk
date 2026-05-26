@@ -1,8 +1,94 @@
-//! Hyper-V VM lifecycle management via PowerShell commands.
+//! Hyper-V VM lifecycle management.
+//!
+//! VM state queries use WMI (root\virtualization\v2) via the MS official
+//! `windows` crate. Remaining operations use PowerShell pending migration.
 
 use color_eyre::{eyre::bail, Result};
 use std::process::{Command, Stdio};
+use std::sync::Once;
 use tracing::{debug, info};
+
+use windows::core::BSTR;
+use windows::Win32::System::Com::*;
+use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::System::Wmi::*;
+
+const RPC_C_AUTHN_WINNT: u32 = 10;
+const RPC_C_AUTHZ_NONE: u32 = 0;
+
+static COM_INIT: Once = Once::new();
+
+#[allow(unsafe_code)]
+fn com_init() {
+    COM_INIT.call_once(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = CoInitializeSecurity(
+            None,
+            -1,
+            None,
+            None,
+            RPC_C_AUTHN_LEVEL_DEFAULT,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_NONE,
+            None,
+        );
+    });
+}
+
+#[allow(unsafe_code)]
+fn wmi_connect(namespace: &str) -> Result<IWbemServices> {
+    com_init();
+    unsafe {
+        let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)?;
+        let services = locator.ConnectServer(
+            &BSTR::from(namespace),
+            &BSTR::new(),
+            &BSTR::new(),
+            &BSTR::new(),
+            0,
+            &BSTR::new(),
+            None,
+        )?;
+        CoSetProxyBlanket(
+            &services,
+            RPC_C_AUTHN_WINNT,
+            RPC_C_AUTHZ_NONE,
+            None,
+            RPC_C_AUTHN_LEVEL_CALL,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_NONE,
+        )?;
+        Ok(services)
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_get_property(obj: &IWbemClassObject, name: &str) -> Result<VARIANT> {
+    let prop_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let prop = windows::core::PCWSTR(prop_w.as_ptr());
+    let mut val = VARIANT::default();
+    unsafe { obj.Get(prop, 0, &mut val, None, None)? };
+    Ok(val)
+}
+
+#[allow(unsafe_code)]
+fn variant_to_string(val: &VARIANT) -> String {
+    unsafe {
+        let inner = &val.Anonymous.Anonymous;
+        if inner.vt == windows::Win32::System::Variant::VT_BSTR {
+            inner.Anonymous.bstrVal.to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn variant_to_i32(val: &VARIANT) -> i32 {
+    unsafe { val.Anonymous.Anonymous.Anonymous.lVal }
+}
 
 #[derive(Debug)]
 pub struct SwitchInfo {
@@ -157,43 +243,124 @@ pub fn remove_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
 pub fn get_vm_state(name: &str) -> Result<String> {
-    powershell(&format!(
-        "$v = Get-VM -Name '{}' -ErrorAction SilentlyContinue; if ($v) {{ Write-Host $v.State }}; exit 0",
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let query = format!(
+        "SELECT EnabledState FROM Msvm_ComputerSystem WHERE ElementName='{}'",
         name
-    ))
+    );
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        let mut objs = [None; 1];
+        let mut returned = 0u32;
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
+            return Ok(String::new());
+        }
+        if let Some(ref obj) = objs[0] {
+            let val = wmi_get_property(obj, "EnabledState")?;
+            let state: i32 = variant_to_i32(&val);
+            return Ok(match state {
+                2 => "Running".to_string(),
+                3 => "Off".to_string(),
+                6 => "Saved".to_string(),
+                9 => "Paused".to_string(),
+                _ => format!("Unknown({})", state),
+            });
+        }
+    }
+    Ok(String::new())
 }
 
+#[allow(unsafe_code)]
 pub fn list_vms(prefix: &str) -> Result<Vec<VmInfo>> {
-    let output = powershell(&format!(
-        "$vms = Get-VM -Name '{}*' -ErrorAction SilentlyContinue; if ($vms) {{ $vms | ForEach-Object {{ \"$($_.Name)|$($_.State)\" }} }}; exit 0",
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let query = format!(
+        "SELECT ElementName, EnabledState FROM Msvm_ComputerSystem WHERE ElementName LIKE '{}%'",
         prefix
-    ))?;
+    );
     let mut vms = Vec::new();
-    for line in output.lines() {
-        if let Some((name, state)) = line.split_once('|') {
-            vms.push(VmInfo {
-                name: name.to_string(),
-                state: state.to_string(),
-            });
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        loop {
+            let mut objs = [None; 1];
+            let mut returned = 0u32;
+            if enumerator
+                .Next(WBEM_INFINITE, &mut objs, &mut returned)
+                .is_err()
+                || returned == 0
+            {
+                break;
+            }
+            if let Some(ref obj) = objs[0] {
+                let name_v = wmi_get_property(obj, "ElementName")?;
+                let state_v = wmi_get_property(obj, "EnabledState")?;
+                let name = variant_to_string(&name_v);
+                let state_i: i32 = variant_to_i32(&state_v);
+                let state = match state_i {
+                    2 => "Running",
+                    3 => "Off",
+                    6 => "Saved",
+                    9 => "Paused",
+                    _ => "Unknown",
+                };
+                vms.push(VmInfo {
+                    name,
+                    state: state.to_string(),
+                });
+            }
         }
     }
     Ok(vms)
 }
 
 pub fn is_hyper_v_enabled() -> bool {
-    powershell(
-        "Write-Host (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State",
-    )
-    .map(|s| s.contains("Enabled"))
-    .unwrap_or(false)
+    wmi_connect("root\\virtualization\\v2").is_ok()
 }
 
+#[allow(unsafe_code)]
 pub fn get_vm_guid(vm_name: &str) -> Result<String> {
-    powershell(&format!(
-        "Write-Host (Get-VM -Name '{}').VMId.Guid",
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let query = format!(
+        "SELECT Name FROM Msvm_ComputerSystem WHERE ElementName='{}'",
         vm_name
-    ))
+    );
+    unsafe {
+        let enumerator = services.ExecQuery(
+            &BSTR::from("WQL"),
+            &BSTR::from(query),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            None,
+        )?;
+        let mut objs = [None; 1];
+        let mut returned = 0u32;
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
+            bail!("VM '{}' not found", vm_name);
+        }
+        if let Some(ref obj) = objs[0] {
+            let val = wmi_get_property(obj, "Name")?;
+            return Ok(variant_to_string(&val));
+        }
+    }
+    bail!("VM '{}' not found", vm_name)
 }
 
 pub fn get_wsl_vm_guid(_machine_name: &str) -> Result<String> {
