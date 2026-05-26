@@ -9,7 +9,7 @@
 //! The relay initiates connections FROM the Host TO both VMs (podman + ephemeral).
 //! This is critical for performance: Hyper-V hv_sock has a ~10x throughput asymmetry
 //! based on connection direction (Guest-initiated ~120 MB/s vs Host-initiated ~1 GB/s)
-//! due to VMBus ring buffer handling differences. See docs/62 and docs/65 for details.
+//! due to VMBus ring buffer handling differences.
 //!
 //! ## Data path
 //!
