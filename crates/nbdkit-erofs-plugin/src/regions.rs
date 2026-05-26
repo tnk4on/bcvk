@@ -7,7 +7,10 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum RegionType {
     Data(Arc<Vec<u8>>),
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+        handle: Arc<std::fs::File>,
+    },
     Zero,
 }
 
@@ -61,10 +64,9 @@ pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result
                 let start = region_offset as usize;
                 buf[buf_offset..buf_offset + len].copy_from_slice(&data[start..start + len]);
             }
-            RegionType::File { path } => {
+            RegionType::File { handle, .. } => {
                 use std::os::unix::fs::FileExt;
-                let f = std::fs::File::open(path)?;
-                f.read_exact_at(&mut buf[buf_offset..buf_offset + len], region_offset)?;
+                handle.read_exact_at(&mut buf[buf_offset..buf_offset + len], region_offset)?;
             }
             RegionType::Zero => {
                 buf[buf_offset..buf_offset + len].fill(0);

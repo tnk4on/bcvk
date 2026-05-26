@@ -349,10 +349,15 @@ pub fn build_esp_regions(
         for part in &f.regions {
             match part {
                 FileDataRegion::FromFile { path, len } => {
+                    let handle = std::fs::File::open(path)
+                        .unwrap_or_else(|e| panic!("failed to open {}: {}", path.display(), e));
                     regions.push(Region {
                         start: offset,
                         len: *len,
-                        region_type: RegionType::File { path: path.clone() },
+                        region_type: RegionType::File {
+                            path: path.clone(),
+                            handle: std::sync::Arc::new(handle),
+                        },
                     });
                     offset += len;
                     file_offset += len;

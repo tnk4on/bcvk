@@ -224,6 +224,7 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
     let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
+<<<<<<< Updated upstream
     // vsock socket paths:
     // - /tmp/bcvk-nbd.sock: krunkit connect mode → podman machine vsock → nbdkit
     // - /tmp/bcvk-krun.sock: bcvk listen=true → krun VM vsock → ublk-vsock/nbd-vsock
@@ -232,6 +233,10 @@ pub fn run_krun(opts: RunEphemeralOpts) -> Result<()> {
     let nbd_sock = "/tmp/bcvk-nbd.sock";
     let _ = fs::remove_file(krun_sock);
     let vsock_sock_str = krun_sock.to_string();
+=======
+    // vsock socket path — must match krunkit wrapper's socketURL
+    let vsock_sock_str = "/tmp/bcvk-nbd.sock".to_string();
+>>>>>>> Stashed changes
 
     // Serial console log
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
