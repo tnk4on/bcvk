@@ -638,7 +638,20 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
             }
         }
         // Wait for vEthernet adapter to appear
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let check = Command::new("netsh")
+                .args(["interface", "ipv4", "show", "interfaces"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output();
+            if let Ok(out) = check {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.contains(name) {
+                    break;
+                }
+            }
+        }
     }
 
     // IP address via netsh (idempotent — ignores error if already set)
@@ -661,6 +674,28 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    // Wait for IP assignment to take effect
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let check = Command::new("netsh")
+            .args([
+                "interface",
+                "ip",
+                "show",
+                "address",
+                &adapter_name,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        if let Ok(out) = check {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.contains(host_ip) {
+                break;
+            }
+        }
+    }
 
     // NAT via WMI (root\standardcimv2)
     let nat_name = format!("{}-nat", name);
