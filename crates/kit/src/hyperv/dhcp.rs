@@ -52,11 +52,27 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
 }
 
 async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> Result<()> {
-    let sock = UdpSocket::bind("0.0.0.0:67").await?;
     let bind_addr = format!(
         "{}.{}.{}.{}:67",
         server_ip[0], server_ip[1], server_ip[2], server_ip[3]
     );
+
+    // Try server IP first; fall back to 0.0.0.0 if vEthernet adapter isn't ready
+    let mut sock = None;
+    for _ in 0..120 {
+        if let Ok(s) = UdpSocket::bind(&bind_addr).await {
+            sock = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let sock = match sock {
+        Some(s) => s,
+        None => {
+            tracing::warn!("DHCP: bind to {} failed after retries", bind_addr);
+            UdpSocket::bind(&bind_addr).await?
+        }
+    };
     sock.set_broadcast(true)?;
     info!("DHCP listening on {}", bind_addr);
 
@@ -76,7 +92,8 @@ async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> 
                 if msg_type == 1 || msg_type == 3 {
                     let resp_type = if msg_type == 1 { 2u8 } else { 5u8 };
                     let resp = build_dhcp_response(xid, chaddr, &server_ip, &client_ip, resp_type);
-                    sock.send_to(&resp, "255.255.255.255:68").await?;
+                    let bcast = format!("{}.{}.{}.255:68", server_ip[0], server_ip[1], server_ip[2]);
+                    sock.send_to(&resp, &bcast).await?;
                     let mac = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                         chaddr[0], chaddr[1], chaddr[2], chaddr[3], chaddr[4], chaddr[5]);
                     let type_name = if msg_type == 1 { "OFFER" } else { "ACK" };

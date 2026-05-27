@@ -980,6 +980,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         ),
         "__PATH",
     )?;
+    debug!("NIC: switch_path={}", switch_path);
 
     let nic_xml = "<INSTANCE CLASSNAME=\"Msvm_SyntheticEthernetPortSettingData\">\
          <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
@@ -988,6 +989,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
          </INSTANCE>";
     let nic_paths =
         wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[nic_xml])?;
+    debug!("NIC: nic_paths={:?}", nic_paths);
 
     if let Some(nic_path) = nic_paths.first() {
         let conn_xml = format!(
@@ -1001,7 +1003,10 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
              </INSTANCE>",
             nic_path, switch_path,
         );
-        let _ = wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&conn_xml]);
+        match wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&conn_xml]) {
+            Ok(paths) => debug!("NIC connection OK: {:?}", paths),
+            Err(e) => info!("NIC connection FAILED: {}", e),
+        }
     }
 
     // Step 5: Enable Guest Service Interface
