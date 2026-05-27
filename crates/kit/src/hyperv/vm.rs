@@ -537,6 +537,7 @@ fn powershell_ignore_error(script: &str) {
         .status();
 }
 
+#[allow(unsafe_code)]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
     let subnet = format!(
         "{}/{}",
@@ -546,35 +547,303 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
             .unwrap_or_default(),
         prefix_len
     );
-    let script = format!(
-        "$ErrorActionPreference = 'SilentlyContinue'; \
-         $sw = Get-VMSwitch -Name '{name}' -EA SilentlyContinue; \
-         if (-not $sw) {{ New-VMSwitch -Name '{name}' -SwitchType Internal | Out-Null }}; \
-         $idx = (Get-NetAdapter -Name 'vEthernet ({name})').ifIndex; \
-         $existing = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -EA SilentlyContinue; \
-         if (-not ($existing | Where-Object {{ $_.IPAddress -eq '{ip}' }})) {{ \
-             New-NetIPAddress -InterfaceIndex $idx -IPAddress {ip} -PrefixLength {pl} -EA SilentlyContinue | Out-Null \
-         }}; \
-         New-NetNat -Name '{name}-nat' -InternalIPInterfaceAddressPrefix '{subnet}' -EA SilentlyContinue | Out-Null; \
-         New-NetFirewallRule -DisplayName 'bcvk-dhcp' -Direction Inbound -Protocol UDP -LocalPort 67 -Action Allow -EA SilentlyContinue | Out-Null; \
-         Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -EA SilentlyContinue; \
-         Disable-VMSwitchExtension -VMSwitchName '{name}' -Name 'Microsoft NDIS Capture' -EA SilentlyContinue; \
-         Write-Host 'OK'",
-        name = name, ip = host_ip, pl = prefix_len, subnet = subnet,
-    );
-    powershell(&script)?;
+
+    let services = wmi_connect("root\\virtualization\\v2")?;
+
+    // Check if switch already exists
+    let switch_exists = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_VirtualEthernetSwitch WHERE ElementName='{}'",
+            name
+        ),
+        "Name",
+    )
+    .is_ok();
+
+    if !switch_exists {
+        // Create switch via DefineSystem on VirtualEthernetSwitchManagementService
+        let sw_mgmt_query = "SELECT * FROM Msvm_VirtualEthernetSwitchManagementService";
+        unsafe {
+            let enumerator = services.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from(sw_mgmt_query),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            )?;
+            let mut objs = [None; 1];
+            let mut returned = 0u32;
+            let _ = enumerator.Next(WBEM_INFINITE, &mut objs, &mut returned);
+            let sw_mgmt = objs[0]
+                .take()
+                .ok_or_else(|| color_eyre::eyre::eyre!("switch mgmt service not found"))?;
+            let sw_mgmt_path = variant_to_string(&wmi_get_property(&sw_mgmt, "__PATH")?);
+
+            let in_params = wmi_get_method_in_params(
+                &services,
+                "Msvm_VirtualEthernetSwitchManagementService",
+                "DefineSystem",
+            )?;
+            let sw_xml = format!(
+                "<INSTANCE CLASSNAME=\"Msvm_VirtualEthernetSwitchSettingData\">\
+                 <PROPERTY NAME=\"ElementName\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+                 </INSTANCE>",
+                name
+            );
+            wmi_put_bstr(&in_params, "SystemSettings", &sw_xml)?;
+
+            let mut out_params = None;
+            services.ExecMethod(
+                &BSTR::from(&sw_mgmt_path),
+                &BSTR::from("DefineSystem"),
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                &in_params,
+                Some(&mut out_params),
+                None,
+            )?;
+            if let Some(ref out) = out_params {
+                wmi_check_result(&services, out)?;
+            }
+
+            // Add internal port (makes it an Internal switch)
+            let host_name = std::env::var("COMPUTERNAME").unwrap_or_default();
+            let host_path = wmi_query_first_string(
+                &services,
+                &format!(
+                    "SELECT * FROM Msvm_ComputerSystem WHERE Name='{}'",
+                    host_name
+                ),
+                "__PATH",
+            )?;
+
+            let sw_vssd_path = wmi_query_first_string(
+                &services,
+                &format!(
+                    "SELECT * FROM Msvm_VirtualEthernetSwitchSettingData \
+                     WHERE ElementName='{}'",
+                    name
+                ),
+                "__PATH",
+            )?;
+
+            let port_xml = format!(
+                "<INSTANCE CLASSNAME=\"Msvm_EthernetPortAllocationSettingData\">\
+                 <PROPERTY.ARRAY NAME=\"HostResource\" TYPE=\"string\">\
+                 <VALUE.ARRAY><VALUE>{}</VALUE></VALUE.ARRAY></PROPERTY.ARRAY>\
+                 <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+                 <VALUE>Microsoft:Hyper-V:Ethernet Connection</VALUE></PROPERTY>\
+                 <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>33</VALUE></PROPERTY>\
+                 </INSTANCE>",
+                host_path
+            );
+
+            let add_params = wmi_get_method_in_params(
+                &services,
+                "Msvm_VirtualEthernetSwitchManagementService",
+                "AddResourceSettings",
+            )?;
+            wmi_put_bstr(&add_params, "AffectedConfiguration", &sw_vssd_path)?;
+            wmi_put_bstr_array(&add_params, "ResourceSettings", &[&port_xml])?;
+
+            let mut add_out = None;
+            services.ExecMethod(
+                &BSTR::from(&sw_mgmt_path),
+                &BSTR::from("AddResourceSettings"),
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                &add_params,
+                Some(&mut add_out),
+                None,
+            )?;
+            if let Some(ref out) = add_out {
+                wmi_check_result(&services, out)?;
+            }
+        }
+        // Wait for vEthernet adapter to appear
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // IP address via netsh (idempotent — ignores error if already set)
+    let mask = match prefix_len {
+        24 => "255.255.255.0",
+        16 => "255.255.0.0",
+        _ => "255.255.255.0",
+    };
+    let adapter_name = format!("vEthernet ({})", name);
+    let _ = Command::new("netsh")
+        .args([
+            "interface",
+            "ip",
+            "add",
+            "address",
+            &adapter_name,
+            host_ip,
+            mask,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // NAT via WMI (root\standardcimv2)
+    let nat_name = format!("{}-nat", name);
+    unsafe {
+        if let Ok(nat_services) = wmi_connect("root\\standardcimv2") {
+            let mut nat_class = None;
+            let _ = nat_services.GetObject(
+                &BSTR::from("MSFT_NetNat"),
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                Some(&mut nat_class),
+                None,
+            );
+            if let Some(ref cls) = nat_class {
+                if let Ok(nat_inst) = cls.SpawnInstance(0) {
+                    let _ = wmi_put_bstr(&nat_inst, "Name", &nat_name);
+                    let _ = wmi_put_bstr(
+                        &nat_inst,
+                        "InternalIPInterfaceAddressPrefix",
+                        &subnet,
+                    );
+                    let _ = nat_services.PutInstance(
+                        &nat_inst,
+                        WBEM_GENERIC_FLAG_TYPE(WBEM_FLAG_CREATE_OR_UPDATE.0 as i32),
+                        None,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    // Firewall via netsh
+    let _ = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            "name=bcvk-dhcp",
+            "dir=in",
+            "action=allow",
+            "protocol=UDP",
+            "localport=67",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let _ = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "set",
+            "allprofiles",
+            "state",
+            "off",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    debug!("ensured internal switch: {} ({})", name, host_ip);
     Ok(SwitchInfo {
         name: name.to_string(),
         host_ip: host_ip.to_string(),
     })
 }
 
+#[allow(unsafe_code)]
 pub fn remove_internal_switch(name: &str) {
-    powershell_ignore_error(&format!(
-        "Remove-NetNat -Name '{name}-nat' -Confirm:$false -EA SilentlyContinue; \
-         Remove-VMSwitch -Name '{name}' -Force -EA SilentlyContinue",
-        name = name,
-    ));
+    // Remove NAT via WMI (root\standardcimv2)
+    let nat_name = format!("{}-nat", name);
+    unsafe {
+        if let Ok(nat_services) = wmi_connect("root\\standardcimv2") {
+            let query = format!("SELECT * FROM MSFT_NetNat WHERE Name='{}'", nat_name);
+            if let Ok(enumerator) = nat_services.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from(query),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            ) {
+                let mut objs = [None; 1];
+                let mut returned = 0u32;
+                if enumerator
+                    .Next(WBEM_INFINITE, &mut objs, &mut returned)
+                    .is_ok()
+                    && returned > 0
+                {
+                    if let Some(ref nat_obj) = objs[0] {
+                        let path = variant_to_string(
+                            &wmi_get_property(nat_obj, "__PATH").unwrap_or_default(),
+                        );
+                        if !path.is_empty() {
+                            let _ = nat_services.DeleteInstance(
+                                &BSTR::from(path),
+                                WBEM_GENERIC_FLAG_TYPE(0),
+                                None,
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove switch via WMI DestroySystem
+    if let Ok(services) = wmi_connect("root\\virtualization\\v2") {
+        let switch_path = wmi_query_first_string(
+            &services,
+            &format!(
+                "SELECT * FROM Msvm_VirtualEthernetSwitch WHERE ElementName='{}'",
+                name
+            ),
+            "__PATH",
+        );
+        if let Ok(sw_path) = switch_path {
+            unsafe {
+                let sw_mgmt_query =
+                    "SELECT * FROM Msvm_VirtualEthernetSwitchManagementService";
+                if let Ok(enumerator) = services.ExecQuery(
+                    &BSTR::from("WQL"),
+                    &BSTR::from(sw_mgmt_query),
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                    None,
+                ) {
+                    let mut objs = [None; 1];
+                    let mut returned = 0u32;
+                    if enumerator
+                        .Next(WBEM_INFINITE, &mut objs, &mut returned)
+                        .is_ok()
+                        && returned > 0
+                    {
+                        if let Some(ref sw_mgmt) = objs[0] {
+                            let mgmt_path = variant_to_string(
+                                &wmi_get_property(sw_mgmt, "__PATH").unwrap_or_default(),
+                            );
+                            if let Ok(in_params) = wmi_get_method_in_params(
+                                &services,
+                                "Msvm_VirtualEthernetSwitchManagementService",
+                                "DestroySystem",
+                            ) {
+                                let _ = wmi_put_bstr(&in_params, "AffectedSystem", &sw_path);
+                                let _ = services.ExecMethod(
+                                    &BSTR::from(mgmt_path),
+                                    &BSTR::from("DestroySystem"),
+                                    WBEM_GENERIC_FLAG_TYPE(0),
+                                    None,
+                                    &in_params,
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     debug!("removed switch: {}", name);
 }
 
