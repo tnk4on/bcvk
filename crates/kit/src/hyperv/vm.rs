@@ -747,28 +747,101 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
     Ok(())
 }
 
-/// Attach VHDX, set boot device, start VM, return VM GUID — all in 1 PowerShell call.
 pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
-    let script = format!(
-        "Add-VMHardDiskDrive -VMName '{name}' -Path '{vhdx}' -ControllerType SCSI; \
-         Set-VMFirmware -VMName '{name}' -FirstBootDevice (Get-VMHardDiskDrive -VMName '{name}' | Select-Object -First 1); \
-         Start-VM -Name '{name}'; \
-         (Get-VM -Name '{name}').Id.ToString()",
-        name = name, vhdx = vhdx_path,
-    );
-    let guid = powershell(&script)?;
-    info!("started VM: {} (GUID: {})", name, guid.trim());
-    Ok(guid.trim().to_string())
+    attach_vhdx(name, vhdx_path)?;
+    start_vm(name)?;
+    let guid = get_vm_guid(name)?;
+    info!("started VM: {} (GUID: {})", name, guid);
+    Ok(guid)
 }
 
+#[allow(unsafe_code)]
 pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
-    powershell(&format!(
-        "Add-VMHardDiskDrive -VMName '{name}' -Path '{vhdx}' -ControllerType SCSI; \
-         Set-VMFirmware -VMName '{name}' -FirstBootDevice \
-         (Get-VMHardDiskDrive -VMName '{name}' | Select-Object -First 1)",
-        name = name,
-        vhdx = vhdx_path,
-    ))?;
+    let services = wmi_connect("root\\virtualization\\v2")?;
+    let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
+
+    let vssd_path = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_VirtualSystemSettingData \
+             WHERE ElementName='{}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'",
+            name
+        ),
+        "__PATH",
+    )?;
+
+    let vm_guid = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT ConfigurationID FROM Msvm_VirtualSystemSettingData \
+             WHERE ElementName='{}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'",
+            name
+        ),
+        "ConfigurationID",
+    )?;
+
+    // Ensure SCSI controller exists; add one if missing
+    let scsi_path = match wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_ResourceAllocationSettingData \
+             WHERE InstanceID LIKE 'Microsoft:{}%' \
+             AND ResourceSubType='Microsoft:Hyper-V:Synthetic SCSI Controller'",
+            vm_guid
+        ),
+        "__PATH",
+    ) {
+        Ok(p) => p,
+        Err(_) => {
+            let scsi_xml = "<INSTANCE CLASSNAME=\"Msvm_ResourceAllocationSettingData\">\
+                 <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+                 <VALUE>Microsoft:Hyper-V:Synthetic SCSI Controller</VALUE></PROPERTY>\
+                 <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>6</VALUE></PROPERTY>\
+                 </INSTANCE>";
+            let paths =
+                wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[scsi_xml])?;
+            paths
+                .into_iter()
+                .next()
+                .ok_or_else(|| color_eyre::eyre::eyre!("AddResourceSettings returned no SCSI path"))?
+        }
+    };
+
+    // Add synthetic disk drive on SCSI slot 0
+    let drive_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_ResourceAllocationSettingData\">\
+         <PROPERTY NAME=\"Parent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"AddressOnParent\" TYPE=\"string\"><VALUE>0</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+         <VALUE>Microsoft:Hyper-V:Synthetic Disk Drive</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>17</VALUE></PROPERTY>\
+         </INSTANCE>",
+        scsi_path,
+    );
+    let drive_paths =
+        wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&drive_xml])?;
+    let drive_path = drive_paths
+        .into_iter()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("AddResourceSettings returned no drive path"))?;
+
+    // Attach VHDX to the drive
+    let vhd_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_StorageAllocationSettingData\">\
+         <PROPERTY NAME=\"Parent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY.ARRAY NAME=\"HostResource\" TYPE=\"string\">\
+         <VALUE.ARRAY><VALUE>{}</VALUE></VALUE.ARRAY></PROPERTY.ARRAY>\
+         <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+         <VALUE>Microsoft:Hyper-V:Virtual Hard Disk</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>31</VALUE></PROPERTY>\
+         </INSTANCE>",
+        drive_path, vhdx_path,
+    );
+    wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&vhd_xml])?;
+
+        // DefineSystem-created VMs have disk as sole boot source after attach,
+    // so boot order is already correct (no reordering needed).
+
     debug!("attached VHDX to VM {}: {}", name, vhdx_path);
     Ok(())
 }
