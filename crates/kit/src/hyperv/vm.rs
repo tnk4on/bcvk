@@ -352,6 +352,93 @@ fn wmi_modify_resource_settings(
 }
 
 #[allow(unsafe_code)]
+fn wmi_add_resource_settings(
+    services: &IWbemServices,
+    mgmt_path: &str,
+    affected_config: &str,
+    resource_xmls: &[&str],
+) -> Result<Vec<String>> {
+    let in_params = wmi_get_method_in_params(
+        services,
+        "Msvm_VirtualSystemManagementService",
+        "AddResourceSettings",
+    )?;
+    wmi_put_bstr(&in_params, "AffectedConfiguration", affected_config)?;
+    wmi_put_bstr_array(&in_params, "ResourceSettings", resource_xmls)?;
+
+    unsafe {
+        let mut out_params = None;
+        services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("AddResourceSettings"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        )?;
+        let out_params = out_params
+            .ok_or_else(|| color_eyre::eyre::eyre!("AddResourceSettings returned no output"))?;
+        wmi_check_result(services, &out_params)?;
+
+        let result_val = wmi_get_property(&out_params, "ResultingResourceSettings")?;
+        let inner = &result_val.Anonymous.Anonymous;
+        if inner.vt
+            == windows::Win32::System::Variant::VARENUM(
+                windows::Win32::System::Variant::VT_BSTR.0
+                    | windows::Win32::System::Variant::VT_ARRAY.0,
+            )
+        {
+            use windows::Win32::System::Ole::{
+                SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+            };
+            let sa = inner.Anonymous.parray;
+            let lb = SafeArrayGetLBound(sa, 1)?;
+            let ub = SafeArrayGetUBound(sa, 1)?;
+            let mut paths = Vec::new();
+            for i in lb..=ub {
+                let mut bstr = BSTR::default();
+                SafeArrayGetElement(sa, &i, &mut bstr as *mut _ as *mut _)?;
+                paths.push(bstr.to_string());
+            }
+            return Ok(paths);
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[allow(unsafe_code)]
+fn wmi_modify_guest_service_settings(
+    services: &IWbemServices,
+    mgmt_path: &str,
+    settings_xmls: &[&str],
+) -> Result<()> {
+    let in_params = wmi_get_method_in_params(
+        services,
+        "Msvm_VirtualSystemManagementService",
+        "ModifyGuestServiceSettings",
+    )?;
+    wmi_put_bstr_array(&in_params, "GuestServiceSettings", settings_xmls)?;
+
+    unsafe {
+        let mut out_params = None;
+        services.ExecMethod(
+            &BSTR::from(mgmt_path),
+            &BSTR::from("ModifyGuestServiceSettings"),
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            &in_params,
+            Some(&mut out_params),
+            None,
+        )?;
+        if let Some(ref out) = out_params {
+            let _ = wmi_check_result(services, out);
+        }
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
 fn wmi_modify_system_settings(
     services: &IWbemServices,
     mgmt_path: &str,
@@ -498,7 +585,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
     // Step 1: Create Gen2 VM via WMI DefineSystem
     wmi_define_system(name)?;
 
-    // Step 2: Configure memory, CPU, and SecureBoot via WMI
+    // Step 2: Configure memory, CPU, SecureBoot, and checkpoints via WMI
     let services = wmi_connect("root\\virtualization\\v2")?;
     let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
 
@@ -566,22 +653,92 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
         "<INSTANCE CLASSNAME=\"Msvm_VirtualSystemSettingData\">\
          <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
          <PROPERTY NAME=\"SecureBootEnabled\" TYPE=\"boolean\"><VALUE>FALSE</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"UserSnapshotType\" TYPE=\"uint16\"><VALUE>2</VALUE></PROPERTY>\
          </INSTANCE>",
         vssd_instance_id,
     );
     wmi_modify_system_settings(&services, &mgmt_path, &vssd_xml)?;
 
-    // Step 3: Remaining settings via PowerShell (NIC, checkpoint, COM port, GSI)
-    let script = format!(
-        "Add-VMNetworkAdapter -VMName '{name}' -SwitchName '{sw}'; \
-         Set-VM -Name '{name}' -CheckpointType Disabled; \
-         Set-VMComPort -VMName '{name}' -Number 1 -Path '\\\\.\\pipe\\bcvk-serial-{name}'; \
-         Get-VMIntegrationService -VMName '{name}' | Where-Object {{ -not $_.Enabled }} | \
-         Enable-VMIntegrationService -EA SilentlyContinue",
-        name = name,
-        sw = switch,
+    // Step 3: COM port
+    let serial_instance_id = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT InstanceID FROM Msvm_SerialPortSettingData \
+             WHERE InstanceID LIKE 'Microsoft:{}%' AND InstanceID LIKE '%\\\\0'",
+            vm_guid
+        ),
+        "InstanceID",
+    )?;
+
+    let com_xml = format!(
+        "<INSTANCE CLASSNAME=\"Msvm_SerialPortSettingData\">\
+         <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+         <PROPERTY.ARRAY NAME=\"Connection\" TYPE=\"string\">\
+         <VALUE.ARRAY><VALUE>\\\\.\\pipe\\bcvk-serial-{}</VALUE></VALUE.ARRAY>\
+         </PROPERTY.ARRAY></INSTANCE>",
+        serial_instance_id, name,
     );
-    powershell(&script)?;
+    wmi_modify_resource_settings(&services, &mgmt_path, &[&com_xml])?;
+
+    // Step 4: Add NIC connected to switch
+    let vssd_path = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_VirtualSystemSettingData \
+             WHERE ElementName='{}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'",
+            name
+        ),
+        "__PATH",
+    )?;
+
+    let switch_path = wmi_query_first_string(
+        &services,
+        &format!(
+            "SELECT * FROM Msvm_VirtualEthernetSwitch WHERE ElementName='{}'",
+            switch
+        ),
+        "__PATH",
+    )?;
+
+    let nic_xml = "<INSTANCE CLASSNAME=\"Msvm_SyntheticEthernetPortSettingData\">\
+         <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+         <VALUE>Microsoft:Hyper-V:Synthetic Ethernet Port</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>10</VALUE></PROPERTY>\
+         </INSTANCE>";
+    let nic_paths =
+        wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[nic_xml])?;
+
+    if let Some(nic_path) = nic_paths.first() {
+        let conn_xml = format!(
+            "<INSTANCE CLASSNAME=\"Msvm_EthernetPortAllocationSettingData\">\
+             <PROPERTY NAME=\"Parent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+             <PROPERTY.ARRAY NAME=\"HostResource\" TYPE=\"string\">\
+             <VALUE.ARRAY><VALUE>{}</VALUE></VALUE.ARRAY></PROPERTY.ARRAY>\
+             <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
+             <VALUE>Microsoft:Hyper-V:Ethernet Connection</VALUE></PROPERTY>\
+             <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>33</VALUE></PROPERTY>\
+             </INSTANCE>",
+            nic_path, switch_path,
+        );
+        let _ = wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&conn_xml]);
+    }
+
+    // Step 5: Enable Guest Service Interface
+    let gsi_query = format!(
+        "SELECT InstanceID FROM Msvm_GuestServiceInterfaceComponentSettingData \
+         WHERE InstanceID LIKE 'Microsoft:{}%'",
+        vm_guid
+    );
+    if let Ok(gsi_id) = wmi_query_first_string(&services, &gsi_query, "InstanceID") {
+        let gsi_xml = format!(
+            "<INSTANCE CLASSNAME=\"Msvm_GuestServiceInterfaceComponentSettingData\">\
+             <PROPERTY NAME=\"InstanceID\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
+             <PROPERTY NAME=\"EnabledState\" TYPE=\"uint16\"><VALUE>2</VALUE></PROPERTY>\
+             </INSTANCE>",
+            gsi_id,
+        );
+        let _ = wmi_modify_guest_service_settings(&services, &mgmt_path, &[&gsi_xml]);
+    }
 
     info!(
         "created Hyper-V Gen2 VM: {} ({} vCPUs, {}MB)",
