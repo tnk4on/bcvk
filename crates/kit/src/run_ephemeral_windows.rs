@@ -344,8 +344,7 @@ struct Phase0Result {
     digest_short: String,
     podman_vm_guid: String,
     merged_path: String,
-    switch_handle: Option<std::thread::JoinHandle<Result<vm::SwitchInfo>>>,
-    vm_handle: Option<std::thread::JoinHandle<Result<()>>>,
+    switch_vm_handle: Option<std::thread::JoinHandle<Result<(vm::SwitchInfo, ())>>>,
 }
 
 const VSOCK_PORT: u32 = 1030;
@@ -372,18 +371,18 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
         }
     });
 
+    // Switch must be ready before VM creation (NIC needs the switch)
     let switch_handle = {
         let sn = ctx.switch_name.clone();
-        let hi = format!("10.0.{}.1", ctx.subnet);
-        std::thread::spawn(move || vm::ensure_internal_switch(&sn, &hi, 24))
-    };
-
-    let vm_handle = {
         let vn = ctx.vm_name.clone();
-        let sn = ctx.switch_name.clone();
         let mem = ctx.memory_mb;
         let cpu = ctx.vcpus;
-        std::thread::spawn(move || vm::create_gen2_vm(&vn, mem, cpu, &sn))
+        let hi = format!("10.0.{}.1", ctx.subnet);
+        std::thread::spawn(move || -> Result<(vm::SwitchInfo, ())> {
+            let sw = vm::ensure_internal_switch(&sn, &hi, 24)?;
+            let vm = vm::create_gen2_vm(&vn, mem, cpu, &sn)?;
+            Ok((sw, vm))
+        })
     };
 
     let machine_clone = ctx.machine.clone();
@@ -459,8 +458,7 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
         digest_short,
         podman_vm_guid,
         merged_path,
-        switch_handle: Some(switch_handle),
-        vm_handle: Some(vm_handle),
+        switch_vm_handle: Some(switch_handle),
     })
 }
 
@@ -732,20 +730,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let phase1 = run_phase1(&ctx, &phase0)?;
     elapsed!("VHDX created");
 
-    let switch = phase0
-        .switch_handle
+    let (switch, _) = phase0
+        .switch_vm_handle
         .take()
         .unwrap()
         .join()
-        .map_err(|_| eyre!("switch panicked"))??;
+        .map_err(|_| eyre!("switch+VM panicked"))??;
     info!("Internal Switch: {} ({})", switch.name, switch.host_ip);
     elapsed!("switch ready");
-    phase0
-        .vm_handle
-        .take()
-        .unwrap()
-        .join()
-        .map_err(|_| eyre!("VM panicked"))??;
     elapsed!("VM created");
 
     let mut phase1 = phase1;
