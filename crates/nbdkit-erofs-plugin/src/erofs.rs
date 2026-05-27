@@ -1,5 +1,5 @@
 use crate::dir_walk::{ChildRef, DirInfo, WalkResult};
-use crate::regions::{Region, RegionType};
+use crate::regions::{MmapRegion, Region, RegionType};
 use std::sync::Arc;
 
 const EROFS_MAGIC: u32 = 0xE0F5E1E2;
@@ -457,13 +457,18 @@ pub fn build_erofs_regions(layout: &ErofsLayout, walk: &WalkResult) -> Vec<Regio
             let path = files[fr.file_index].host_path.clone();
             let handle = std::fs::File::open(&path)
                 .unwrap_or_else(|e| panic!("failed to open {}: {}", path.display(), e));
-            regions.push(Region {
-                start: fr.offset_in_erofs,
-                len: fr.size,
-                region_type: RegionType::File {
+            let mmap = MmapRegion::new(&handle, fr.size as usize, path.clone());
+            let region_type = match mmap {
+                Ok(m) => RegionType::Mmap(std::sync::Arc::new(m)),
+                Err(_) => RegionType::File {
                     path,
                     handle: std::sync::Arc::new(handle),
                 },
+            };
+            regions.push(Region {
+                start: fr.offset_in_erofs,
+                len: fr.size,
+                region_type,
             });
         } else {
             // Symlink target: inline data

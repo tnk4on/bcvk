@@ -4,7 +4,7 @@
 //! Metadata (BPB, FAT tables, directory entries) are in-memory Data regions.
 //! File data uses File regions for lazy pread from source files.
 
-use crate::regions::{Region, RegionType};
+use crate::regions::{MmapRegion, Region, RegionType};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -351,13 +351,18 @@ pub fn build_esp_regions(
                 FileDataRegion::FromFile { path, len } => {
                     let handle = std::fs::File::open(path)
                         .unwrap_or_else(|e| panic!("failed to open {}: {}", path.display(), e));
-                    regions.push(Region {
-                        start: offset,
-                        len: *len,
-                        region_type: RegionType::File {
+                    let mmap = MmapRegion::new(&handle, *len as usize, path.clone());
+                    let region_type = match mmap {
+                        Ok(m) => RegionType::Mmap(std::sync::Arc::new(m)),
+                        Err(_) => RegionType::File {
                             path: path.clone(),
                             handle: std::sync::Arc::new(handle),
                         },
+                    };
+                    regions.push(Region {
+                        start: offset,
+                        len: *len,
+                        region_type,
                     });
                     offset += len;
                     file_offset += len;
