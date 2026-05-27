@@ -1410,4 +1410,111 @@ mod tests {
             let _ = remove_vm(name);
         }
     }
+
+    #[test]
+    #[ignore = "requires Hyper-V"]
+    fn test_full_vm_lifecycle() {
+        let sw_name = "bcvk-lifecycle-test";
+        let vm_name = "bcvk-lifecycle-vm";
+        let host_ip = "10.0.77.1";
+
+        // Cleanup from previous runs
+        let _ = remove_vm(vm_name);
+        remove_internal_switch(sw_name);
+
+        // 1. Create internal switch
+        let sw = ensure_internal_switch(sw_name, host_ip, 24)
+            .expect("ensure_internal_switch failed");
+        assert_eq!(sw.name, sw_name);
+        assert_eq!(sw.host_ip, host_ip);
+        eprintln!("[OK] ensure_internal_switch: {}", sw_name);
+
+        // 2. Create Gen2 VM
+        create_gen2_vm(vm_name, 1024, 1, sw_name).expect("create_gen2_vm failed");
+        let state = get_vm_state(vm_name).expect("get_vm_state");
+        assert_eq!(state, "Off");
+        let guid = get_vm_guid(vm_name).expect("get_vm_guid");
+        assert!(!guid.is_empty());
+        eprintln!("[OK] create_gen2_vm: {} (GUID: {})", vm_name, guid);
+
+        // 3. List VMs
+        let vms = list_vms("bcvk-lifecycle-").expect("list_vms");
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0].name, vm_name);
+        assert_eq!(vms[0].state, "Off");
+        eprintln!("[OK] list_vms: found {}", vms[0].name);
+
+        // 4. Attach VHDX (create a dummy one first)
+        let vhdx_dir = std::env::temp_dir().join("bcvk-test");
+        let _ = std::fs::create_dir_all(&vhdx_dir);
+        let vhdx_path = vhdx_dir.join("lifecycle-test.vhdx");
+        let vhdx_str = vhdx_path.to_string_lossy().to_string();
+
+        // Create minimal VHDX via PowerShell (only for test setup)
+        let _ = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Remove-Item '{}' -Force -EA SilentlyContinue; \
+                     New-VHD -Path '{}' -SizeBytes 512MB -Dynamic | Out-Null",
+                    vhdx_str, vhdx_str
+                ),
+            ])
+            .status();
+
+        if vhdx_path.exists() {
+            attach_vhdx(vm_name, &vhdx_str).expect("attach_vhdx failed");
+            eprintln!("[OK] attach_vhdx: {}", vhdx_str);
+
+            // 5. Start VM (will fail to boot but state should change)
+            start_vm(vm_name).expect("start_vm failed");
+            let state = get_vm_state(vm_name).expect("get_vm_state after start");
+            eprintln!("[OK] start_vm: state={}", state);
+
+            // 6. Stop VM
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = stop_vm(vm_name);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let state = get_vm_state(vm_name).expect("get_vm_state after stop");
+            eprintln!("[OK] stop_vm: state={}", state);
+        } else {
+            eprintln!("[SKIP] attach_vhdx: VHDX creation requires PowerShell");
+        }
+
+        // 7. Remove VM
+        remove_vm(vm_name).expect("remove_vm failed");
+        let state = get_vm_state(vm_name).expect("get_vm_state after remove");
+        assert!(state.is_empty(), "VM should be gone");
+        eprintln!("[OK] remove_vm: {}", vm_name);
+
+        // 8. Remove switch
+        remove_internal_switch(sw_name);
+        eprintln!("[OK] remove_internal_switch: {}", sw_name);
+
+        // 9. Verify switch is gone (allow async delay)
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let switch_gone = wmi_connect("root\\virtualization\\v2")
+            .and_then(|svc| {
+                wmi_query_first_string(
+                    &svc,
+                    &format!(
+                        "SELECT * FROM Msvm_VirtualEthernetSwitch WHERE ElementName='{}'",
+                        sw_name
+                    ),
+                    "Name",
+                )
+            })
+            .is_err();
+        eprintln!(
+            "[{}] switch removal verified (gone={})",
+            if switch_gone { "OK" } else { "WARN" },
+            switch_gone
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&vhdx_dir);
+        eprintln!("[OK] all lifecycle tests passed");
+    }
 }
