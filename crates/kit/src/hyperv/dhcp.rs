@@ -52,11 +52,11 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
 }
 
 async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> Result<()> {
+    let sock = UdpSocket::bind("0.0.0.0:67").await?;
     let bind_addr = format!(
         "{}.{}.{}.{}:67",
         server_ip[0], server_ip[1], server_ip[2], server_ip[3]
     );
-    let sock = UdpSocket::bind(&bind_addr).await?;
     sock.set_broadcast(true)?;
     info!("DHCP listening on {}", bind_addr);
 
