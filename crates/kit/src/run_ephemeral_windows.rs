@@ -150,23 +150,11 @@ impl Drop for VmCleanup {
 
 /// Spawn cleanup as a detached process so bcvk can exit immediately.
 fn spawn_cleanup(c: &VmCleanup) {
-    let mut ps = format!(
-        "Stop-VM -Name '{}' -TurnOff -Force -ErrorAction SilentlyContinue; \
-         Remove-VM -Name '{}' -Force -ErrorAction SilentlyContinue",
-        c.vm_name, c.vm_name
-    );
+    let _ = vm::stop_vm(&c.vm_name);
+    let _ = vm::remove_vm(&c.vm_name);
     if let Some(ref sw) = c.switch_name {
-        ps.push_str(&format!(
-            "; Remove-VMSwitch -Name '{}' -Force -ErrorAction SilentlyContinue",
-            sw
-        ));
+        vm::remove_internal_switch(sw);
     }
-    let script = ps;
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
     if let Some(ref name) = c.nbd_container {
         let _ = Command::new("podman")
             .args(["rm", "-f", name])
