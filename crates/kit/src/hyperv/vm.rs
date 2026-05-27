@@ -510,32 +510,9 @@ pub struct VmInfo {
     pub state: String,
 }
 
-fn powershell(script: &str) -> Result<String> {
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!(
-            "PowerShell failed ({}): stderr={} stdout={}",
-            script.chars().take(80).collect::<String>(),
-            stderr.trim(),
-            stdout.trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
 
-fn powershell_ignore_error(script: &str) {
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
+
+
 
 #[allow(unsafe_code)]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
