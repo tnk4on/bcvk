@@ -268,7 +268,10 @@ fn main() {
             .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
             .build()
         {
-            Ok(_ctrl) => std::process::exit(0),
+            Ok(ctrl) => {
+                    drop(ctrl);
+                    std::process::exit(0);
+                }
             Err(e) => {
                 eprintln!("ublk test failed: {:?}", e);
                 std::process::exit(1);
@@ -320,6 +323,22 @@ fn main() {
 
     let export_size = connections.lock().unwrap()[0].1;
 
+    // Enter new PID namespace so switch_root's kill(-1, SIGKILL) can't reach us.
+    // Parent stays as systemd's main PID; child does the real work.
+    unsafe {
+        if libc::unshare(libc::CLONE_NEWPID) == 0 {
+            let pid = libc::fork();
+            if pid > 0 {
+                loop { libc::pause(); }
+            }
+            if pid < 0 {
+                msg!("fork failed, continuing without PID namespace");
+            }
+        } else {
+            msg!("unshare failed, continuing without PID namespace");
+        }
+    }
+
     let ctrl = UblkCtrlBuilder::default()
         .name("bcvk")
         .nr_queues(num_queues)
@@ -347,7 +366,6 @@ fn main() {
         unsafe {
             libc::signal(libc::SIGTERM, libc::SIG_IGN);
         }
-        move_to_root_cgroup();
     });
 
     if let Err(e) = res {
