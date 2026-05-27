@@ -473,6 +473,21 @@ fn main() {
     unsafe { libc::close(lsock); }
     msg!("{} connection(s), export size={} bytes", num_conns, export_size);
 
+    // Enter new PID namespace so switch_root's kill(-1, SIGKILL) can't reach us.
+    unsafe {
+        if libc::unshare(libc::CLONE_NEWPID) == 0 {
+            let pid = libc::fork();
+            if pid > 0 {
+                loop { libc::pause(); }
+            }
+            if pid < 0 {
+                msg!("fork failed, continuing without PID namespace");
+            }
+        } else {
+            msg!("unshare failed, continuing without PID namespace");
+        }
+    }
+
     let nl = nl_open().expect("netlink socket failed");
     let family_id = genl_resolve_family(nl, "nbd").unwrap_or_else(|e| {
         msg!("nbd genl family: {}", e);
@@ -489,7 +504,6 @@ fn main() {
     sd_notify_ready();
 
     unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
-    move_to_root_cgroup();
 
     for h in relay_handles {
         let _ = h.join();
