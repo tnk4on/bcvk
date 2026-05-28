@@ -68,6 +68,8 @@ mod ephemeral_windows;
 mod hyperv;
 #[cfg(target_os = "windows")]
 mod run_ephemeral_windows;
+#[cfg(target_os = "windows")]
+mod to_disk_windows;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]
@@ -159,6 +161,12 @@ enum Commands {
     /// Manage persistent VMs (Hyper-V backend)
     #[clap(subcommand, alias = "hyperv")]
     Vm(hyperv::HypervCommands),
+
+    // Windows: to-disk
+    #[cfg(target_os = "windows")]
+    /// Install bootc images to VHDX disk images
+    #[clap(name = "to-disk")]
+    ToDisk(to_disk_windows::ToDiskWindowsOpts),
 
     // Other platforms: stub
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -310,6 +318,9 @@ fn main() -> Result<(), Report> {
 
         #[cfg(target_os = "windows")]
         Commands::Vm(cmd) => cmd.run()?,
+
+        #[cfg(target_os = "windows")]
+        Commands::ToDisk(opts) => to_disk_windows::run(opts)?,
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Commands::Ephemeral(_) => {
