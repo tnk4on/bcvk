@@ -30,6 +30,7 @@ pub fn run(opts: HypervRmOpts) -> Result<()> {
         );
     }
 
+    super::kill_vm_service(&meta);
     vm::remove_vm(&meta.vm_name)?;
     info!("removed Hyper-V VM: {}", meta.vm_name);
 
