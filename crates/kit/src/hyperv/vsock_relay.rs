@@ -226,9 +226,11 @@ fn relay_vm_to_podman_tracked(
 ) {
     let mut handshake = [0u8; 20];
     if !wsa_recv_exact(vm_sock, &mut handshake) {
+        tracing::warn!("vsock relay: NBD handshake recv from VM failed");
         return;
     }
     if !wsa_send_all(podman_sock, &handshake) {
+        tracing::warn!("vsock relay: NBD handshake send to podman failed");
         return;
     }
 
@@ -455,37 +457,40 @@ impl VsockRelay {
                     Some(tokio::spawn(async move {
                         let relay_task = tokio::task::spawn_blocking(move || {
                             relay_one_connection_cached(vm_sock, podman_sock, cc.clone());
-                            // Connection dropped — attempt one reconnect (ublk→NBD failover)
-                            info!(
-                                "vsock relay[{}]: connection closed, attempting reconnect",
-                                idx
-                            );
-                            let new_podman =
-                                match unsafe { hvsock_connect_retry(&pod_g2, vsock_port, 30, 200) }
-                                {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        info!(
-                                            "vsock relay[{}]: podman reconnect failed: {}",
-                                            idx, e
-                                        );
-                                        return;
-                                    }
-                                };
-                            let new_vm =
-                                match unsafe { hvsock_connect_retry(&eph_g2, vsock_port, 50, 200) }
-                                {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        info!("vsock relay[{}]: VM reconnect failed: {}", idx, e);
-                                        unsafe {
-                                            ws::closesocket(to_socket(new_podman));
+                            // Connection dropped — retry with reconnect
+                            for retry in 0..3u32 {
+                                info!(
+                                    "vsock relay[{}]: connection closed, reconnect attempt {}/3",
+                                    idx, retry + 1
+                                );
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                                let new_podman =
+                                    match unsafe { hvsock_connect_retry(&pod_g2, vsock_port, 75, 200) }
+                                    {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            info!(
+                                                "vsock relay[{}]: podman reconnect failed: {}",
+                                                idx, e
+                                            );
+                                            break;
                                         }
-                                        return;
-                                    }
-                                };
-                            info!("vsock relay[{}]: reconnected (failover)", idx);
-                            relay_one_connection_cached(new_vm, new_podman, cc);
+                                    };
+                                let new_vm =
+                                    match unsafe { hvsock_connect_retry(&eph_g2, vsock_port, 150, 200) }
+                                    {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            info!("vsock relay[{}]: VM reconnect failed: {}", idx, e);
+                                            unsafe {
+                                                ws::closesocket(to_socket(new_podman));
+                                            }
+                                            break;
+                                        }
+                                    };
+                                info!("vsock relay[{}]: reconnected (attempt {})", idx, retry + 1);
+                                relay_one_connection_cached(new_vm, new_podman, cc.clone());
+                            }
                         });
                         tokio::select! {
                             _ = sc.notified() => { debug!("vsock relay[{}]: stop requested", idx); }

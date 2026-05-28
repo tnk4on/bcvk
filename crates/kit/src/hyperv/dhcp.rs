@@ -1,25 +1,32 @@
 //! Minimal DHCP server for ephemeral VM IP assignment on Windows.
 //!
 //! Single-client. Runs as an async task within bcvk.exe.
+//! Uses IP_UNICAST_IF to bind outgoing broadcast to the correct vEthernet adapter.
 
 use color_eyre::{eyre::bail, Result};
+use std::os::windows::io::AsRawSocket;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tracing::{info, warn};
+use windows::Win32::Networking::WinSock as ws;
+
+const IP_UNICAST_IF: i32 = 31;
 
 #[derive(Debug)]
 pub struct DhcpServer {
     server_ip: [u8; 4],
     client_ip: [u8; 4],
+    adapter_name: String,
     stop: Arc<Notify>,
 }
 
 impl DhcpServer {
-    pub fn new(server_ip: &str, client_ip: &str) -> Result<Self> {
+    pub fn new(server_ip: &str, client_ip: &str, switch_name: &str) -> Result<Self> {
         Ok(Self {
             server_ip: parse_ip(server_ip)?,
             client_ip: parse_ip(client_ip)?,
+            adapter_name: format!("vEthernet ({})", switch_name),
             stop: Arc::new(Notify::new()),
         })
     }
@@ -27,9 +34,10 @@ impl DhcpServer {
     pub fn start_background(&self) -> tokio::task::JoinHandle<()> {
         let sip = self.server_ip;
         let cip = self.client_ip;
+        let adapter = self.adapter_name.clone();
         let stop = self.stop.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_dhcp(sip, cip, stop).await {
+            if let Err(e) = run_dhcp(sip, cip, adapter, stop).await {
                 warn!("DHCP server error: {}", e);
             }
         })
@@ -51,29 +59,92 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
     Ok([parts[0], parts[1], parts[2], parts[3]])
 }
 
-async fn run_dhcp(server_ip: [u8; 4], client_ip: [u8; 4], stop: Arc<Notify>) -> Result<()> {
+#[allow(unsafe_code)]
+fn get_interface_index(adapter_name: &str) -> Result<u32> {
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex,
+    };
+    use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = adapter_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut luid = NET_LUID_LH::default();
+    unsafe {
+        let ret = ConvertInterfaceAliasToLuid(PCWSTR(wide.as_ptr()), &mut luid);
+        if ret != NO_ERROR {
+            bail!("ConvertInterfaceAliasToLuid failed: {:?}", ret);
+        }
+        let mut index = 0u32;
+        let ret = ConvertInterfaceLuidToIndex(&luid, &mut index);
+        if ret != NO_ERROR {
+            bail!("ConvertInterfaceLuidToIndex failed: {:?}", ret);
+        }
+        Ok(index)
+    }
+}
+
+async fn run_dhcp(
+    server_ip: [u8; 4],
+    client_ip: [u8; 4],
+    adapter_name: String,
+    stop: Arc<Notify>,
+) -> Result<()> {
     let bind_addr = format!(
         "{}.{}.{}.{}:67",
         server_ip[0], server_ip[1], server_ip[2], server_ip[3]
     );
 
-    // Try server IP first; fall back to 0.0.0.0 if vEthernet adapter isn't ready
-    let mut sock = None;
+    // Bind with retry (vEthernet adapter may not be ready yet)
+    let mut std_sock = None;
     for _ in 0..120 {
-        if let Ok(s) = UdpSocket::bind(&bind_addr).await {
-            sock = Some(s);
+        if let Ok(s) = std::net::UdpSocket::bind(&bind_addr) {
+            std_sock = Some(s);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    let sock = match sock {
+    let std_sock = match std_sock {
         Some(s) => s,
         None => {
-            tracing::warn!("DHCP: bind to {} failed after retries", bind_addr);
-            UdpSocket::bind(&bind_addr).await?
+            warn!("DHCP: bind to {} failed after retries", bind_addr);
+            std::net::UdpSocket::bind(&bind_addr)?
         }
     };
-    sock.set_broadcast(true)?;
+    std_sock.set_broadcast(true)?;
+
+    // Bind outgoing broadcast to the correct vEthernet adapter via IP_UNICAST_IF
+    #[allow(unsafe_code)]
+    match get_interface_index(&adapter_name) {
+        Ok(if_index) => {
+            let optval = if_index.to_be_bytes();
+            unsafe {
+                ws::setsockopt(
+                    ws::SOCKET(std_sock.as_raw_socket() as usize),
+                    0, // IPPROTO_IP
+                    IP_UNICAST_IF,
+                    Some(&optval),
+                );
+            }
+            info!(
+                "DHCP: bound to interface '{}' (index {})",
+                adapter_name, if_index
+            );
+        }
+        Err(e) => {
+            warn!(
+                "DHCP: failed to get interface index for '{}': {}, broadcast may go to wrong interface",
+                adapter_name, e
+            );
+        }
+    }
+
+    // Convert to async tokio socket
+    std_sock.set_nonblocking(true)?;
+    let sock = UdpSocket::from_std(std_sock)?;
     info!("DHCP listening on {}", bind_addr);
 
     let mut buf = vec![0u8; 1500];
@@ -134,6 +205,12 @@ fn build_dhcp_response(
     resp[i + 1] = 4;
     resp[i + 2..i + 6].copy_from_slice(server_ip);
     i += 6;
+    // Option 6: DNS (Google Public DNS)
+    resp[i] = 6;
+    resp[i + 1] = 8;
+    resp[i + 2..i + 6].copy_from_slice(&[8, 8, 8, 8]);
+    resp[i + 6..i + 10].copy_from_slice(&[8, 8, 4, 4]);
+    i += 10;
     resp[i] = 54;
     resp[i + 1] = 4;
     resp[i + 2..i + 6].copy_from_slice(server_ip);
@@ -144,7 +221,8 @@ fn build_dhcp_response(
     i += 6;
     resp[i] = 255;
     i += 1;
-    resp.truncate(i);
+    // Pad to BOOTP minimum (300 bytes)
+    resp.truncate(i.max(300));
     resp
 }
 

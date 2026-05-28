@@ -496,7 +496,6 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
                    printf 'FROM quay.io/fedora/fedora:latest\\nRUN dnf install -y nbdkit && dnf clean all\\n' | \
                    {run} build -t localhost/bcvk-nbdkit:latest -f - /tmp; \
                  fi; \
-                 for c in $({run} ps -a --filter name=bcvk-nbd- --format '{{{{.Names}}}}' 2>/dev/null); do {run} rm -f -t 0 $c 2>/dev/null; done; \
                  {run} rm -f -t 0 {name} 2>/dev/null; \
                  {run} run -d --name {name} --privileged \
                  --network=host --device /dev/vsock \
@@ -529,7 +528,7 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
         })
     };
 
-    let vhdx_vm = ctx.base_dir.join("esp.vhdx");
+    let vhdx_vm = ctx.base_dir.join(format!("esp-{}.vhdx", ctx.name));
     let vhdx_path = boot_files::create_boot_vhdx(
         &p0.digest_short,
         &p0.merged_path,
@@ -638,7 +637,7 @@ fn run_phase2(
     rt.block_on(async move {
         let server_ip = format!("10.0.{}.1", subnet);
         let client_ip = format!("10.0.{}.100", subnet);
-        let dhcp = DhcpServer::new(&server_ip, &client_ip)?;
+        let dhcp = DhcpServer::new(&server_ip, &client_ip, &vm_name)?;
         let dhcp_handle = dhcp.start_background();
         info!("VM {} started, VHDX booting...", vm_name);
         elapsed!("VM started");

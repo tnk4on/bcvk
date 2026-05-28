@@ -243,7 +243,13 @@ fn wmi_wait_for_job(services: &IWbemServices, job_path: &str) -> Result<()> {
             let state = variant_to_i32(&state_val);
             match state {
                 7 => return Ok(()),                       // Completed
-                10 | 11 => bail!("WMI job failed (state={})", state), // Exception or Service
+                10 | 11 => {
+                    let desc = wmi_get_property(&job_obj, "ErrorDescription")
+                        .ok()
+                        .map(|v| variant_to_string(&v))
+                        .unwrap_or_default();
+                    bail!("WMI job failed (state={}): {}", state, desc);
+                }
                 2 | 3 | 4 => {
                     // New, Starting, Running — keep waiting
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1114,14 +1120,33 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
 
 pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
     attach_vhdx(name, vhdx_path)?;
+    set_boot_order_disk_first(name);
     start_vm(name)?;
     let guid = get_vm_guid(name)?;
     info!("started VM: {} (GUID: {})", name, guid);
     Ok(guid)
 }
 
+pub fn set_boot_order_disk_first(name: &str) {
+    let ps_cmd = format!(
+        "$hd = Get-VMHardDiskDrive -VMName '{}'; \
+         if ($hd) {{ Set-VMFirmware -VMName '{}' -FirstBootDevice $hd }}",
+        name, name
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps_cmd])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 #[allow(unsafe_code)]
 pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
+    attach_vhdx_at_slot(name, vhdx_path, 0)
+}
+
+#[allow(unsafe_code)]
+pub fn attach_vhdx_at_slot(name: &str, vhdx_path: &str, slot: u32) -> Result<()> {
     let services = wmi_connect("root\\virtualization\\v2")?;
     let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
 
@@ -1172,16 +1197,15 @@ pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
         }
     };
 
-    // Add synthetic disk drive on SCSI slot 0
     let drive_xml = format!(
         "<INSTANCE CLASSNAME=\"Msvm_ResourceAllocationSettingData\">\
          <PROPERTY NAME=\"Parent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
-         <PROPERTY NAME=\"AddressOnParent\" TYPE=\"string\"><VALUE>0</VALUE></PROPERTY>\
+         <PROPERTY NAME=\"AddressOnParent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
          <PROPERTY NAME=\"ResourceSubType\" TYPE=\"string\">\
          <VALUE>Microsoft:Hyper-V:Synthetic Disk Drive</VALUE></PROPERTY>\
          <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>17</VALUE></PROPERTY>\
          </INSTANCE>",
-        scsi_path,
+        scsi_path, slot,
     );
     let drive_paths =
         wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&drive_xml])?;
@@ -1190,7 +1214,6 @@ pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
         .next()
         .ok_or_else(|| color_eyre::eyre::eyre!("AddResourceSettings returned no drive path"))?;
 
-    // Attach VHDX to the drive
     let vhd_xml = format!(
         "<INSTANCE CLASSNAME=\"Msvm_StorageAllocationSettingData\">\
          <PROPERTY NAME=\"Parent\" TYPE=\"string\"><VALUE>{}</VALUE></PROPERTY>\
@@ -1204,10 +1227,7 @@ pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
     );
     wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&vhd_xml])?;
 
-        // DefineSystem-created VMs have disk as sole boot source after attach,
-    // so boot order is already correct (no reordering needed).
-
-    debug!("attached VHDX to VM {}: {}", name, vhdx_path);
+    debug!("attached VHDX to VM {} at slot {}: {}", name, slot, vhdx_path);
     Ok(())
 }
 
