@@ -249,6 +249,7 @@ struct RunContext {
     nbd_container_name: String,
     switch_name: String,
     subnet: u8,
+    vsock_port: u32,
 }
 
 fn subnet_from_name(name: &str) -> u8 {
@@ -321,6 +322,7 @@ impl RunContext {
         let nbd_container_name = format!("bcvk-nbd-{}", name);
         let switch_name = vm_name.clone();
         let subnet = subnet_from_name(&name);
+        let vsock_port = VSOCK_PORT_BASE + subnet as u32;
 
         Ok(Self {
             machine,
@@ -335,6 +337,7 @@ impl RunContext {
             nbd_container_name,
             switch_name,
             subnet,
+            vsock_port,
         })
     }
 }
@@ -347,7 +350,7 @@ struct Phase0Result {
     switch_vm_handle: Option<std::thread::JoinHandle<Result<(vm::SwitchInfo, ())>>>,
 }
 
-const VSOCK_PORT: u32 = 1030;
+const VSOCK_PORT_BASE: u32 = 1030;
 
 fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result> {
     let need_ssh = opts.ssh_keygen || !opts.execute.is_empty();
@@ -386,8 +389,9 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     };
 
     let machine_clone = ctx.machine.clone();
+    let vsock_port_for_reg = ctx.vsock_port;
     let guid_handle = std::thread::spawn(move || -> Result<String> {
-        vm::register_vsock_service(VSOCK_PORT)?;
+        vm::register_vsock_service(vsock_port_for_reg)?;
         let vmtype = detect_podman_vmtype()?;
         info!("podman machine VM type: {}", vmtype);
         let guid = match vmtype.as_str() {
@@ -483,6 +487,7 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
         let merged = p0.merged_path.clone();
         let ssh = ssh_param_str.clone();
         let run_str = run_cmd.to_string();
+        let vsock_port = ctx.vsock_port;
         let container_name = nbd_name.clone();
         std::thread::spawn(move || -> Result<Vec<u8>> {
             let nbdkit_script = format!(
@@ -498,12 +503,13 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
                  -v {merged}:{merged}:ro \
                  -v /var/tmp/bcvk:/bcvk:z,exec \
                  localhost/bcvk-nbdkit:latest \
-                 nbdkit -fv --threads 4 --vsock -p 1030 -r /bcvk/libnbdkit_erofs_plugin.so \
+                 nbdkit -fv --threads 4 --vsock -p {port} -r /bcvk/libnbdkit_erofs_plugin.so \
                  dir={merged} \
                  'cmdline=root=PARTLABEL=bcvk-root ro rootfstype=erofs'{ssh}",
                 run = run_str,
                 name = nbd_name,
                 merged = merged,
+                port = vsock_port,
                 ssh = ssh,
             );
             let result = ps.ssh_cmd(&nbdkit_script)?;
@@ -523,12 +529,14 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
         })
     };
 
+    let vhdx_vm = ctx.base_dir.join("esp.vhdx");
     let vhdx_path = boot_files::create_boot_vhdx(
         &p0.digest_short,
         &p0.merged_path,
         &ctx.podman_ssh,
         &p0.ssh_pubkey,
-        VSOCK_PORT,
+        ctx.vsock_port,
+        &vhdx_vm,
     )?;
 
     Ok(Phase1Result {
@@ -609,7 +617,7 @@ fn run_phase2(
         image: opts.image.clone(),
         vhdx_path: Some(p1.vhdx_path.clone()),
         ssh_forward: None,
-        vsock_port: Some(VSOCK_PORT),
+        vsock_port: Some(ctx.vsock_port),
         switch_name: Some(ctx.switch_name.clone()),
     };
 
@@ -636,13 +644,13 @@ fn run_phase2(
         elapsed!("VM started");
 
         let _vsock_relay = crate::hyperv::vsock_relay::VsockRelay::start(
-            VSOCK_PORT,
+            ctx.vsock_port,
             1,
             &podman_vm_guid,
             &ephemeral_vm_guid,
         )
         .await?;
-        info!("vsock relay connected (port {})", VSOCK_PORT);
+        info!("vsock relay connected (port {})", ctx.vsock_port);
         elapsed!("relay connected");
 
         if gui {
@@ -668,7 +676,7 @@ fn run_phase2(
             ssh_port,
             ssh_key: ssh_key_path.to_string_lossy().to_string(),
             nbd_container: Some(nbd_container.clone()),
-            vsock_port: Some(VSOCK_PORT),
+            vsock_port: Some(ctx.vsock_port),
             subnet,
             created: chrono::Utc::now().to_rfc3339(),
         };
