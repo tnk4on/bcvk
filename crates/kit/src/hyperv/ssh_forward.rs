@@ -20,6 +20,15 @@ pub struct SshForward {
 impl SshForward {
     pub async fn start(vm_ip: &str) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::start_with_listener(listener, vm_ip).await
+    }
+
+    pub async fn start_on_port(vm_ip: &str, port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+        Self::start_with_listener(listener, vm_ip).await
+    }
+
+    async fn start_with_listener(listener: TcpListener, vm_ip: &str) -> Result<Self> {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(Notify::new());
         let vm_addr = format!("{}:22", vm_ip);

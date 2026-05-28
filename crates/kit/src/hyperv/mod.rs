@@ -88,6 +88,10 @@ pub struct VmMetadata {
     pub switch_name: String,
     #[serde(default)]
     pub subnet: u8,
+    #[serde(default)]
+    pub service_pid: u32,
+    #[serde(default)]
+    pub state: String,
     pub created: String,
 }
 
@@ -141,7 +145,7 @@ impl VmMetadata {
 // --- Stop / Start (inline, simple enough to not need separate files) ---
 
 fn stop(name: &str) -> Result<()> {
-    let meta = VmMetadata::load(name)?;
+    let mut meta = VmMetadata::load(name)?;
     let state = vm::get_vm_state(&meta.vm_name)?;
     if !state.contains("Running") {
         println!(
@@ -151,19 +155,88 @@ fn stop(name: &str) -> Result<()> {
         );
         return Ok(());
     }
+    kill_vm_service(&meta);
     vm::stop_vm(&meta.vm_name)?;
+    meta.state = "stopped".into();
+    meta.service_pid = 0;
+    meta.save()?;
     println!("Stopped VM '{}'", name);
     Ok(())
 }
 
 fn start(name: &str) -> Result<()> {
-    let meta = VmMetadata::load(name)?;
+    let mut meta = VmMetadata::load(name)?;
     let state = vm::get_vm_state(&meta.vm_name)?;
     if state.contains("Running") {
         println!("VM '{}' is already running", name);
         return Ok(());
     }
     vm::start_vm(&meta.vm_name)?;
+    spawn_vm_service(name, &mut meta)?;
     println!("Started VM '{}'", name);
+    println!("Use 'bcvk vm ssh {}' to connect.", name);
+    Ok(())
+}
+
+pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let vms_dir = VmMetadata::vms_dir();
+    let log_path = vms_dir.join(format!("{}.log", name));
+    let log_file = std::fs::File::create(&log_path)?;
+
+    let child = std::process::Command::new(exe)
+        .args(["vm", "run", ".", "--_internal", name])
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    meta.service_pid = child.id();
+    meta.state = "running".into();
+    meta.save()?;
+    tracing::info!("service process started (PID {}), log: {}", child.id(), log_path.display());
+    Ok(())
+}
+
+pub(crate) fn kill_vm_service(meta: &VmMetadata) {
+    if meta.service_pid == 0 {
+        return;
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &meta.service_pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+pub(crate) fn run_vm_service(name: &str) -> Result<()> {
+    let meta = VmMetadata::load(name)?;
+    let server_ip = format!("10.0.{}.1", meta.subnet);
+    let client_ip = format!("10.0.{}.100", meta.subnet);
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let dhcp = dhcp::DhcpServer::new(&server_ip, &client_ip, &meta.switch_name)?;
+        let _dhcp_handle = dhcp.start_background();
+        tracing::info!("persistent VM '{}': DHCP started on {}", name, server_ip);
+
+        let _ssh_fwd = ssh_forward::SshForward::start_on_port(&client_ip, meta.ssh_port).await?;
+        tracing::info!("persistent VM '{}': SSH forward on port {}", name, meta.ssh_port);
+
+        let key_path = std::path::Path::new(&meta.ssh_key);
+        crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+        tracing::info!("persistent VM '{}': SSH ready", name);
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let state = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
+            if !state.contains("Running") {
+                tracing::info!("persistent VM '{}': VM stopped, exiting service", name);
+                break;
+            }
+        }
+        dhcp.stop();
+        Ok::<(), color_eyre::Report>(())
+    })?;
     Ok(())
 }
