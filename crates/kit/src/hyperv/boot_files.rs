@@ -237,6 +237,7 @@ pub fn create_boot_vhdx(
     ssh: &PodmanSsh,
     ssh_pubkey: &str,
     vsock_port: u32,
+    output_path: &std::path::Path,
 ) -> Result<String> {
     info!("creating boot VHDX from {}", merged_path);
 
@@ -278,11 +279,16 @@ pub fn create_boot_vhdx(
     let grub_cfg_path = cache_dir.join("grub.cfg");
     std::fs::write(&grub_cfg_path, grub_cfg)?;
 
-    // Create or update VHDX
-    let vhdx_path = cache_dir.join("esp.vhdx");
-    let vhdx_str = vhdx_path.to_string_lossy().to_string();
+    // Create or update VHDX at output_path (per-VM, avoids cache lock)
+    let vhdx_str = output_path.to_string_lossy().to_string();
+    let cache_vhdx = cache_dir.join("esp.vhdx");
 
-    let ps_script = if vhdx_path.exists() {
+    // Copy cached VHDX as starting point if available
+    if cache_vhdx.exists() && !output_path.exists() {
+        let _ = std::fs::copy(&cache_vhdx, output_path);
+    }
+
+    let ps_script = if output_path.exists() {
         // Cache hit: VHDX exists, only update initramfs (0.8s vs 8s)
         info!("VHDX cache hit, updating initramfs only");
         format!(
@@ -335,6 +341,11 @@ pub fn create_boot_vhdx(
     if !stdout.contains("VHDX_OK") {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("VHDX creation failed: {} {}", stderr.trim(), stdout.trim());
+    }
+
+    // Save to cache for future reuse (best-effort, ignore lock errors)
+    if output_path != cache_vhdx {
+        let _ = std::fs::copy(output_path, &cache_vhdx);
     }
 
     // Cleanup temp initramfs
