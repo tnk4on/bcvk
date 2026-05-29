@@ -61,12 +61,12 @@ fn parse_ip(s: &str) -> Result<[u8; 4]> {
 
 #[allow(unsafe_code)]
 fn get_interface_index(adapter_name: &str) -> Result<u32> {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::{
         ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex,
     };
     use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-    use windows::core::PCWSTR;
 
     let wide: Vec<u16> = adapter_name
         .encode_utf16()

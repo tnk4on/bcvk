@@ -194,7 +194,11 @@ pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> 
     meta.service_pid = child.id();
     meta.state = "running".into();
     meta.save()?;
-    tracing::info!("service process started (PID {}), log: {}", child.id(), log_path.display());
+    tracing::info!(
+        "service process started (PID {}), log: {}",
+        child.id(),
+        log_path.display()
+    );
     Ok(())
 }
 
@@ -221,7 +225,11 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         tracing::info!("persistent VM '{}': DHCP started on {}", name, server_ip);
 
         let _ssh_fwd = ssh_forward::SshForward::start_on_port(&client_ip, meta.ssh_port).await?;
-        tracing::info!("persistent VM '{}': SSH forward on port {}", name, meta.ssh_port);
+        tracing::info!(
+            "persistent VM '{}': SSH forward on port {}",
+            name,
+            meta.ssh_port
+        );
 
         let key_path = std::path::Path::new(&meta.ssh_key);
         crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
