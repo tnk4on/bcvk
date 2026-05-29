@@ -266,7 +266,11 @@ pub fn create_boot_vhdx(
     }
 
     // Write initramfs with CPIOs to temp file
-    let initramfs_tmp = cache_dir.join("initramfs-final.img");
+    let vhdx_stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default");
+    let initramfs_tmp = cache_dir.join(format!("initramfs-{}.img", vhdx_stem));
     std::fs::write(&initramfs_tmp, &initramfs)?;
     info!("final initramfs: {} bytes", initramfs.len());
 
