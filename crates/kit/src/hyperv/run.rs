@@ -13,6 +13,7 @@ use super::VmMetadata;
 #[derive(Parser, Debug)]
 pub struct HypervRunOpts {
     /// Disk image path (.vhdx)
+    #[clap(default_value = "")]
     pub disk: String,
 
     /// VM name (default: derived from disk filename)
@@ -114,7 +115,7 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         .to_string()
         .trim_start_matches(r"\\?\")
         .to_string();
-    vm::attach_vhdx(&vm_name, &vhdx_abs)?;
+    vm::attach_vhdx_at_slot(&vm_name, &vhdx_abs, 0)?;
     vm::set_boot_order_disk_first(&vm_name);
 
     let ssh_port = opts.ssh_port.unwrap_or_else(|| {

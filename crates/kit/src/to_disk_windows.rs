@@ -66,8 +66,16 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     let key_path = format!("{}.key", output_abs);
     let pub_path = format!("{}.key.pub", output_abs);
     info!("generating SSH keypair: {}", key_path);
-    let _ = std::fs::remove_file(&key_path);
-    let _ = std::fs::remove_file(&pub_path);
+    if let Err(e) = std::fs::remove_file(&key_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!("failed to remove old key {}: {}", key_path, e);
+        }
+    }
+    if let Err(e) = std::fs::remove_file(&pub_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!("failed to remove old pubkey {}: {}", pub_path, e);
+        }
+    }
     let status = Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-N", "", "-q", "-f", &key_path])
         .status()?;
@@ -112,7 +120,9 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .stderr(Stdio::piped())
         .output()?;
     if !ps_attach.status.success() {
-        let _ = std::fs::remove_file(&output_abs);
+        if let Err(e) = std::fs::remove_file(&output_abs) {
+            tracing::debug!("failed to clean up VHDX: {}", e);
+        }
         bail!(
             "Failed to attach VHDX: {}",
             String::from_utf8_lossy(&ps_attach.stderr).trim()
@@ -158,11 +168,13 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .stderr(Stdio::inherit())
         .status();
 
-    let _ = std::fs::remove_file(&script_path);
+    if let Err(e) = std::fs::remove_file(&script_path) {
+        tracing::debug!("failed to remove temp script: {}", e);
+    }
 
     // Phase 6: Detach VHDX from podman machine (always, even on failure)
     info!("detaching VHDX from podman machine...");
-    let _ = Command::new("powershell")
+    if let Err(e) = Command::new("powershell")
         .args([
             "-NoProfile", "-Command",
             &format!(
@@ -172,7 +184,10 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::warn!("failed to detach VHDX: {}", e);
+    }
 
     match install_result {
         Ok(status) if status.success() => {
@@ -184,11 +199,15 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
             Ok(())
         }
         Ok(status) => {
-            let _ = std::fs::remove_file(&output_abs);
+            if let Err(e) = std::fs::remove_file(&output_abs) {
+                tracing::debug!("failed to clean up VHDX: {}", e);
+            }
             bail!("installation failed (exit code: {:?})", status.code());
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&output_abs);
+            if let Err(e) = std::fs::remove_file(&output_abs) {
+                tracing::debug!("failed to clean up VHDX: {}", e);
+            }
             bail!("failed to run install command: {}", e);
         }
     }

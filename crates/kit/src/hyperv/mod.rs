@@ -121,7 +121,11 @@ impl VmMetadata {
 
     pub fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
-        let _ = std::fs::remove_file(path);
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove log {}: {}", path.display(), e);
+            }
+        }
     }
 
     pub fn list_all() -> Result<Vec<Self>> {
@@ -185,7 +189,7 @@ pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> 
     let log_file = std::fs::File::create(&log_path)?;
 
     let child = std::process::Command::new(exe)
-        .args(["vm", "run", ".", "--_internal", name])
+        .args(["vm", "run", "--_internal", name])
         .stdin(std::process::Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
@@ -206,11 +210,14 @@ pub(crate) fn kill_vm_service(meta: &VmMetadata) {
     if meta.service_pid == 0 {
         return;
     }
-    let _ = std::process::Command::new("taskkill")
+    if let Err(e) = std::process::Command::new("taskkill")
         .args(["/F", "/PID", &meta.service_pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to kill service process {}: {}", meta.service_pid, e);
+    }
 }
 
 pub(crate) fn run_vm_service(name: &str) -> Result<()> {
