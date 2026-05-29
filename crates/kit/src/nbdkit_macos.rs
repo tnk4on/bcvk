@@ -84,7 +84,7 @@ pub(crate) fn start_nbdkit_erofs_plugin(
          -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
          -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
          quay.io/fedora/fedora:latest \
-         nbdkit -f -p 10809 -r /plugin.so \
+         nbdkit -f --threads 4 -p 10809 -r /plugin.so \
          {dir} {cmdline}{ssh}",
         name = container_name,
         port = nbd_port,
@@ -182,7 +182,7 @@ pub(crate) fn start_nbdkit_vsock(
          -v /usr/bin/nbdkit:/usr/bin/nbdkit:ro \
          -v /usr/lib64/nbdkit:/usr/lib64/nbdkit:ro \
          quay.io/fedora/fedora:latest \
-         nbdkit -fv --threads 4 --vsock -p {port} -r /plugin.so \
+         nbdkit -f --threads 4 --vsock -p {port} -r /plugin.so \
          {dir} {cmdline}{ssh}",
         name = container_name,
         merged = merged_path,

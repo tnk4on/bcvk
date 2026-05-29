@@ -243,6 +243,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
 const VSOCK_PORT: u32 = 1030;
 const NBD_VSOCK_SOCK: &str = "/tmp/bcvk-nbd.sock";
+const NBD_TCP_PORT: u16 = 10809;
 
 /// Run an ephemeral VM using vfkit + EROFS over NBD (vsock transport).
 fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
@@ -319,35 +320,52 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    // Start nbdkit with erofs plugin in vsock mode (via krunkit connect)
-    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_vsock(
-        &machine,
-        &merged_path,
-        &cmdline,
-        &ssh_pubkey,
-        VSOCK_PORT,
-        &vm_name,
-    )?;
+    let use_tcp = std::env::var("BCVK_NBD_TCP").map(|v| v == "1").unwrap_or(false);
 
-    // Verify nbdkit readiness via krunkit connect socket
-    info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(NBD_VSOCK_SOCK) {
-            use std::io::Read;
-            stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-            let mut buf = [0u8; 8];
-            if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
-                drop(stream);
-                info!("nbdkit vsock ready (NBDMAGIC verified)");
-                break;
+    let nbd_container_name = if use_tcp {
+        // TCP mode: nbdkit listens on TCP port, forwarded via gvproxy
+        info!("NBD transport: TCP (gvproxy port forwarding)");
+        crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+            &machine,
+            &merged_path,
+            &cmdline,
+            &ssh_pubkey,
+            NBD_TCP_PORT,
+            &vm_name,
+        )?
+    } else {
+        // vsock mode: nbdkit listens on AF_VSOCK, connected via krunkit
+        info!("NBD transport: vsock");
+        let name = crate::nbdkit_macos::start_nbdkit_vsock(
+            &machine,
+            &merged_path,
+            &cmdline,
+            &ssh_pubkey,
+            VSOCK_PORT,
+            &vm_name,
+        )?;
+
+        // Verify nbdkit readiness via krunkit connect socket
+        info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(NBD_VSOCK_SOCK) {
+                use std::io::Read;
+                stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+                let mut buf = [0u8; 8];
+                if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
+                    drop(stream);
+                    info!("nbdkit vsock ready (NBDMAGIC verified)");
+                    break;
+                }
             }
+            if std::time::Instant::now() > deadline {
+                bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
-        if std::time::Instant::now() > deadline {
-            bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
+        name
+    };
 
     // gvproxy + vfkit (EFI boot)
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
@@ -377,10 +395,17 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         "--bootloader".to_string(),
         bootloader_arg,
         "--device".to_string(),
-        format!(
-            "nbd,uri=nbd+unix:///?socket={},readonly,timeout=5000,deviceId=rootfs",
-            NBD_VSOCK_SOCK
-        ),
+        if use_tcp {
+            format!(
+                "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
+                NBD_TCP_PORT
+            )
+        } else {
+            format!(
+                "nbd,uri=nbd+unix:///?socket={},readonly,timeout=5000,deviceId=rootfs",
+                NBD_VSOCK_SOCK
+            )
+        },
         "--device".to_string(),
         format!(
             "virtio-net,unixSocketPath={},mac={}",
@@ -388,7 +413,19 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         ),
         "--device".to_string(),
         "virtio-rng".to_string(),
+        "--device".to_string(),
+        format!(
+            "virtio-vsock,port=9000,socketURL={},connect",
+            cache_base.join(format!("{}-vsock.sock", vm_name)).display()
+        ),
     ];
+
+    if let Ok(bench_nbd) = std::env::var("BCVK_BENCH_NBD") {
+        vfkit_args.extend([
+            "--device".to_string(),
+            format!("nbd,uri={},readonly,timeout=5000,deviceId=bench", bench_nbd),
+        ]);
+    }
 
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
     vfkit_args.extend([

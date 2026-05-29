@@ -27,11 +27,22 @@ impl MmapRegion {
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
+        unsafe {
+            libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_SEQUENTIAL);
+        }
         Ok(MmapRegion {
             ptr: ptr as *const u8,
             len,
             path,
         })
+    }
+
+    pub fn ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 
     pub fn as_slice(&self) -> &[u8] {

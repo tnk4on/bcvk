@@ -7,19 +7,24 @@ mod regions;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use regions::Region;
+use regions::{Region, RegionType};
 
-static PLUGIN_STATE: Mutex<Option<PluginState>> = Mutex::new(None);
-
-struct PluginState {
+struct PluginConfig {
     dir: PathBuf,
     cmdline: Option<String>,
     ssh_pubkey: Option<String>,
+}
+
+static PLUGIN_CONFIG: Mutex<Option<PluginConfig>> = Mutex::new(None);
+
+struct PluginState {
     regions: Vec<Region>,
     total_size: u64,
 }
+
+static PLUGIN_STATE: OnceLock<PluginState> = OnceLock::new();
 
 // --- nbdkit C FFI ---
 
@@ -39,19 +44,17 @@ pub extern "C" fn plugin_config(key: *const c_char, value: *const c_char) -> c_i
     let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap_or("");
     let value = unsafe { CStr::from_ptr(value) }.to_str().unwrap_or("");
 
-    let mut state = PLUGIN_STATE.lock().unwrap();
-    let state = state.get_or_insert_with(|| PluginState {
+    let mut config = PLUGIN_CONFIG.lock().unwrap();
+    let config = config.get_or_insert_with(|| PluginConfig {
         dir: PathBuf::new(),
         cmdline: None,
         ssh_pubkey: None,
-        regions: Vec::new(),
-        total_size: 0,
     });
 
     match key {
-        "dir" => state.dir = PathBuf::from(value),
-        "cmdline" => state.cmdline = Some(value.to_string()),
-        "ssh_pubkey" => state.ssh_pubkey = Some(value.to_string()),
+        "dir" => config.dir = PathBuf::from(value),
+        "cmdline" => config.cmdline = Some(value.to_string()),
+        "ssh_pubkey" => config.ssh_pubkey = Some(value.to_string()),
         _ => {
             log_error(&format!("unknown parameter: {}", key));
             return -1;
@@ -62,21 +65,21 @@ pub extern "C" fn plugin_config(key: *const c_char, value: *const c_char) -> c_i
 
 #[no_mangle]
 pub extern "C" fn plugin_config_complete() -> c_int {
-    let state = PLUGIN_STATE.lock().unwrap();
-    let state = match state.as_ref() {
-        Some(s) => s,
+    let config = PLUGIN_CONFIG.lock().unwrap();
+    let config = match config.as_ref() {
+        Some(c) => c,
         None => {
             log_error("dir parameter is required");
             return -1;
         }
     };
 
-    if state.dir.as_os_str().is_empty() {
+    if config.dir.as_os_str().is_empty() {
         log_error("dir parameter is required");
         return -1;
     }
 
-    if state.cmdline.is_none() {
+    if config.cmdline.is_none() {
         log_error("cmdline parameter is required");
         return -1;
     }
@@ -121,14 +124,14 @@ fn find_grub(dir: &std::path::Path) -> Option<PathBuf> {
 
 #[no_mangle]
 pub extern "C" fn plugin_get_ready() -> c_int {
-    let mut state_guard = PLUGIN_STATE.lock().unwrap();
-    let state = match state_guard.as_mut() {
-        Some(s) => s,
+    let config = PLUGIN_CONFIG.lock().unwrap().take();
+    let config = match config {
+        Some(c) => c,
         None => return -1,
     };
 
     // Walk directory for EROFS
-    let walk = match dir_walk::walk_directory(&state.dir) {
+    let walk = match dir_walk::walk_directory(&config.dir) {
         Ok(w) => w,
         Err(e) => {
             log_error(&format!("failed to walk directory: {}", e));
@@ -147,7 +150,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
     let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk);
 
     // Discover boot files from dir
-    let (kernel_path, initrd_path) = match find_kernel_dir(&state.dir) {
+    let (kernel_path, initrd_path) = match find_kernel_dir(&config.dir) {
         Some(paths) => paths,
         None => {
             log_error("kernel/initramfs not found in dir/usr/lib/modules/");
@@ -155,7 +158,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let grub_path = match find_grub(&state.dir) {
+    let grub_path = match find_grub(&config.dir) {
         Some(p) => p,
         None => {
             log_error("grubaa64.efi not found in dir/usr/lib/");
@@ -183,7 +186,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         return -1;
     };
 
-    let cmdline = state.cmdline.as_deref().unwrap_or("");
+    let cmdline = config.cmdline.as_deref().unwrap_or("");
 
     // Generate grub.cfg
     let grub_cfg = format!(
@@ -193,7 +196,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
 
     // Generate CPIO archives
     let units_cpio = initramfs::build_units_cpio();
-    let ssh_cpio = state.ssh_pubkey.as_deref().map(initramfs::build_ssh_cpio);
+    let ssh_cpio = config.ssh_pubkey.as_deref().map(initramfs::build_ssh_cpio);
 
     // Build initrd regions (original file + padding + CPIO)
     let (initrd_parts, initrd_total) =
@@ -211,38 +214,36 @@ pub extern "C" fn plugin_get_ready() -> c_int {
     );
 
     // Build GPT disk with ESP + EROFS
-    match gpt::build_gpt_disk(
+    let disk = match gpt::build_gpt_disk(
         esp_regions,
         esp_size,
         erofs_regions,
         erofs_layout.total_size,
     ) {
-        Ok(disk) => {
-            // Pre-read all File regions into memory to eliminate per-pread I/O.
-            // Memory usage = overlay data size (typically 1-2 GB).
-            let mut regions = disk.regions;
-            let mut preread_bytes: u64 = 0;
-            for region in &mut regions {
-                if let regions::RegionType::File { handle, .. } = &region.region_type {
-                    use std::io::Read;
-                    let mut data = vec![0u8; region.len as usize];
-                    let mut f = handle.as_ref();
-                    if f.read_exact(&mut data).is_ok() {
-                        preread_bytes += region.len;
-                        region.region_type = regions::RegionType::Data(std::sync::Arc::new(data));
-                    }
-                }
-            }
-            log_error(&format!(
-                "pre-read {} MB of file data into memory",
-                preread_bytes / (1024 * 1024)
-            ));
-            state.regions = regions;
-            state.total_size = disk.total_size;
-        }
+        Ok(d) => d,
         Err(e) => {
             log_error(&format!("failed to build GPT disk: {}", e));
             return -1;
+        }
+    };
+
+    let state = PluginState {
+        regions: disk.regions,
+        total_size: disk.total_size,
+    };
+    let _ = PLUGIN_STATE.set(state);
+
+    // Pre-warm mmap regions via MADV_WILLNEED
+    let state = PLUGIN_STATE.get().unwrap();
+    for region in &state.regions {
+        if let RegionType::Mmap(mmap) = &region.region_type {
+            unsafe {
+                libc::madvise(
+                    mmap.ptr() as *mut libc::c_void,
+                    mmap.len(),
+                    libc::MADV_WILLNEED,
+                );
+            }
         }
     }
 
@@ -259,8 +260,10 @@ pub extern "C" fn plugin_close(_handle: *mut c_void) {}
 
 #[no_mangle]
 pub extern "C" fn plugin_get_size(_handle: *mut c_void) -> i64 {
-    let state = PLUGIN_STATE.lock().unwrap();
-    state.as_ref().map(|s| s.total_size as i64).unwrap_or(-1)
+    match PLUGIN_STATE.get() {
+        Some(s) => s.total_size as i64,
+        None => -1,
+    }
 }
 
 #[no_mangle]
@@ -276,8 +279,7 @@ pub extern "C" fn plugin_pread(
     offset: u64,
     _flags: u32,
 ) -> c_int {
-    let state = PLUGIN_STATE.lock().unwrap();
-    let state = match state.as_ref() {
+    let state = match PLUGIN_STATE.get() {
         Some(s) => s,
         None => return -1,
     };
