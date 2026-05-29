@@ -1214,7 +1214,9 @@ pub fn attach_vhdx_at_slot(name: &str, vhdx_path: &str, slot: u32) -> Result<()>
 }
 
 pub fn stop_vm(name: &str) -> Result<()> {
-    let _ = wmi_request_state_change(name, 3);
+    if let Err(e) = wmi_request_state_change(name, 3) {
+        tracing::warn!("stop_vm({}): state change request failed: {}", name, e);
+    }
     debug!("stopped VM: {}", name);
     Ok(())
 }

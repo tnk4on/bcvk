@@ -161,6 +161,14 @@ fn stop(name: &str) -> Result<()> {
     }
     kill_vm_service(&meta);
     vm::stop_vm(&meta.vm_name)?;
+    // Wait for VM to fully stop (stop_vm is async)
+    for _ in 0..30 {
+        let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
+        if s.contains("Off") || s.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     meta.state = "stopped".into();
     meta.service_pid = 0;
     meta.save()?;
