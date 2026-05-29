@@ -110,33 +110,44 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
 
     // Phase 5: Transfer SSH key + run bootc install in podman machine
     info!("installing bootc to disk...");
-    let pub_key_escaped = pub_key_content.replace('\'', "'\\''");
+    let pub_key_b64 = data_encoding::BASE64.encode(pub_key_content.as_bytes());
     let mut install_opts = opts.install.clone();
     if install_opts.filesystem.is_none() {
         install_opts.filesystem = Some("ext4".to_string());
     }
     let bootc_args = install_opts.to_bootc_args().join(" ");
 
+    // Write install script to temp file, then transfer via stdin to avoid
+    // multi-layer SSH escaping issues with base64/special characters
     let install_script = format!(
-        "echo '{key}' > /dev/shm/bcvk-ssh-key.pub && \
+        "#!/bin/bash\nset -euo pipefail\n\
+         printf '%s' '{b64}' | base64 -d > /dev/shm/bcvk-ssh-key.pub\n\
          {run} run --rm -i --privileged --pid=host --security-opt label=disable \
          -v /dev:/dev -v /dev/shm:/dev/shm \
          -v /var/lib/containers:/var/lib/containers -v /sys:/sys:ro \
          {image} \
          bootc install to-disk --wipe --generic-image --skip-fetch-check \
          --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
-         {args} /dev/sdb && rm -f /dev/shm/bcvk-ssh-key.pub",
-        key = pub_key_escaped,
+         {args} /dev/sdb\n\
+         rm -f /dev/shm/bcvk-ssh-key.pub\n",
+        b64 = pub_key_b64,
         run = run_cmd,
         image = opts.image,
         args = bootc_args,
     );
 
+    // Write script to temp file and pipe it via stdin to avoid escaping issues
+    let script_path = std::env::temp_dir().join("bcvk-todisk-install.sh");
+    std::fs::write(&script_path, &install_script)?;
+
     let install_result = Command::new("podman")
-        .args(["machine", "ssh", &machine, "--", "/bin/bash", "-c", &install_script])
+        .args(["machine", "ssh", &machine, "--", "/bin/bash"])
+        .stdin(Stdio::from(std::fs::File::open(&script_path)?))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
+
+    let _ = std::fs::remove_file(&script_path);
 
     // Phase 6: Detach VHDX from podman machine (always, even on failure)
     info!("detaching VHDX from podman machine...");
