@@ -20,8 +20,12 @@ pub struct HypervRunOpts {
     #[clap(long, short)]
     pub name: Option<String>,
 
+    /// Replace existing VM with same name (stop and remove if exists)
+    #[clap(long, short = 'R')]
+    pub replace: bool,
+
     /// Number of vCPUs
-    #[clap(long, default_value = "4")]
+    #[clap(long, default_value = "2")]
     pub cpus: u32,
 
     /// Memory in MB
@@ -35,6 +39,18 @@ pub struct HypervRunOpts {
     /// SSH port (default: auto-allocate)
     #[clap(long)]
     pub ssh_port: Option<u16>,
+
+    /// Automatically SSH into the VM after creation
+    #[clap(long)]
+    pub ssh: bool,
+
+    /// Keep the VM running in background after creation
+    #[clap(long, short = 'd')]
+    pub detach: bool,
+
+    /// Display VM console in Hyper-V Manager
+    #[clap(long)]
+    pub gui: bool,
 
     /// Internal: run as service process (do not use directly)
     #[clap(long = "_internal", hide = true)]
@@ -68,12 +84,20 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
 
     if let Ok(state) = vm::get_vm_state(&vm_name) {
         if !state.is_empty() {
-            bail!(
-                "VM '{}' already exists (state: {}). Remove it first with 'bcvk vm rm {}'",
-                name,
-                state.to_lowercase(),
-                name
-            );
+            if opts.replace {
+                // Replace mode: remove the existing VM
+                println!("Replacing existing VM '{}'...", name);
+                if state.contains("Running") {
+                    super::stop(&name, false)?;
+                }
+                super::rm::run(super::rm::HypervRmOpts {
+                    name: name.clone(),
+                    force: true,
+                    stop: false,
+                })?;
+            } else {
+                bail!("VM '{}' already exists. Use --replace to replace it.", name);
+            }
         }
     }
 
@@ -151,9 +175,21 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
 
     println!("VM '{}' started from {}", name, opts.disk);
     println!("SSH: ssh -p {} -i {} root@localhost", ssh_port, ssh_key);
-    println!("Use 'bcvk vm ssh {}' to connect.", name);
-    println!("Use 'bcvk vm stop {}' to stop.", name);
 
+    if opts.gui {
+        let _ = std::process::Command::new("vmconnect.exe")
+            .args(["localhost", &vm_name])
+            .spawn();
+    }
+
+    if opts.ssh {
+        let key_path = std::path::Path::new(&ssh_key);
+        crate::run_ephemeral_windows::wait_for_ssh(ssh_port, key_path, "root")?;
+        let status = crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, key_path, "root")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    println!("\nUse 'bcvk vm ssh {}' to connect", name);
     Ok(())
 }
 

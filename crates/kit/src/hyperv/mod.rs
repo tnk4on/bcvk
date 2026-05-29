@@ -20,8 +20,10 @@ pub(crate) mod vm;
 pub(crate) mod vsock_relay;
 
 // Persistent VM subcommands
+mod inspect;
 mod list;
 mod rm;
+mod rm_all;
 mod run;
 mod ssh;
 
@@ -33,11 +35,7 @@ pub enum HypervCommands {
 
     /// List all persistent VMs
     #[clap(name = "list", alias = "ls")]
-    List {
-        /// Output in JSON format
-        #[clap(long)]
-        json: bool,
-    },
+    List(list::HypervListOpts),
 
     /// SSH into a running VM
     Ssh(ssh::HypervSshOpts),
@@ -46,28 +44,49 @@ pub enum HypervCommands {
     Stop {
         /// VM name
         name: String,
+
+        /// Force immediate power-off (TurnOff) instead of graceful shutdown
+        #[clap(long, short = 'f')]
+        force: bool,
     },
 
     /// Start a stopped VM
     Start {
         /// VM name
         name: String,
+
+        /// Automatically SSH into the VM after starting
+        #[clap(long)]
+        ssh: bool,
+
+        /// Display VM console in Hyper-V Manager
+        #[clap(long)]
+        gui: bool,
     },
 
     /// Remove a VM and its metadata
     #[clap(name = "rm")]
     Remove(rm::HypervRmOpts),
+
+    /// Remove all persistent VMs
+    #[clap(name = "rm-all")]
+    RemoveAll(rm_all::HypervRmAllOpts),
+
+    /// Show detailed information about a VM
+    Inspect(inspect::HypervInspectOpts),
 }
 
 impl HypervCommands {
     pub fn run(self) -> Result<()> {
         match self {
             HypervCommands::Run(opts) => run::run(opts),
-            HypervCommands::List { json } => list::run(json),
+            HypervCommands::List(opts) => list::run(opts),
             HypervCommands::Ssh(opts) => ssh::run(opts),
-            HypervCommands::Stop { name } => stop(&name),
-            HypervCommands::Start { name } => start(&name),
+            HypervCommands::Stop { name, force } => stop(&name, force),
+            HypervCommands::Start { name, ssh, gui } => start(&name, ssh, gui),
             HypervCommands::Remove(opts) => rm::run(opts),
+            HypervCommands::RemoveAll(opts) => rm_all::run(opts),
+            HypervCommands::Inspect(opts) => inspect::run(opts),
         }
     }
 }
@@ -148,44 +167,75 @@ impl VmMetadata {
 
 // --- Stop / Start (inline, simple enough to not need separate files) ---
 
-fn stop(name: &str) -> Result<()> {
+fn stop(name: &str, force: bool) -> Result<()> {
     let mut meta = VmMetadata::load(name)?;
     let state = vm::get_vm_state(&meta.vm_name)?;
     if !state.contains("Running") {
         println!(
-            "VM '{}' is not running (state: {})",
+            "VM '{}' is already stopped (state: {})",
             name,
             state.to_lowercase()
         );
         return Ok(());
     }
+    println!("Stopping VM '{}'...", name);
     kill_vm_service(&meta);
-    vm::stop_vm(&meta.vm_name)?;
-    // Wait for VM to fully stop (stop_vm is async)
-    for _ in 0..30 {
-        let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
-        if s.contains("Off") || s.is_empty() {
-            break;
+    if force {
+        vm::turn_off_vm(&meta.vm_name)?;
+    } else {
+        vm::stop_vm(&meta.vm_name)?;
+        for _ in 0..30 {
+            let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
+            if s.contains("Off") || s.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
     }
     meta.state = "stopped".into();
     meta.service_pid = 0;
     meta.save()?;
-    println!("Stopped VM '{}'", name);
+    println!("VM '{}' stopped successfully", name);
     Ok(())
 }
 
-fn start(name: &str) -> Result<()> {
+fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     let mut meta = VmMetadata::load(name)?;
     let state = vm::get_vm_state(&meta.vm_name)?;
     if state.contains("Running") {
         println!("VM '{}' is already running", name);
+        if ssh {
+            println!("Connecting to running VM...");
+            let key_path = std::path::Path::new(&meta.ssh_key);
+            crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+            let status =
+                crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        if gui {
+            let _ = std::process::Command::new("vmconnect.exe")
+                .args(["localhost", &meta.vm_name])
+                .spawn();
+        }
         return Ok(());
     }
+    println!("Starting VM '{}'...", name);
     vm::start_vm(&meta.vm_name)?;
     spawn_vm_service(name, &mut meta)?;
-    println!("Started VM '{}'", name);
+    println!("VM '{}' started successfully", name);
+    if gui {
+        let _ = std::process::Command::new("vmconnect.exe")
+            .args(["localhost", &meta.vm_name])
+            .spawn();
+    }
+    if ssh {
+        println!("Connecting to running VM...");
+        let key_path = std::path::Path::new(&meta.ssh_key);
+        crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+        let status =
+            crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
     println!("Use 'bcvk vm ssh {}' to connect.", name);
     Ok(())
 }
@@ -262,4 +312,82 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         Ok::<(), color_eyre::Report>(())
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_vm_metadata(name: &str) -> VmMetadata {
+        VmMetadata {
+            name: name.to_string(),
+            image: "quay.io/fedora/fedora-bootc:latest".to_string(),
+            vm_name: format!("bcvk-{}", name),
+            ssh_port: 2222,
+            ssh_key: "/tmp/key".to_string(),
+            vcpus: 4,
+            memory_mb: 4096,
+            vhdx_path: "/tmp/disk.vhdx".to_string(),
+            switch_name: format!("bcvk-{}", name),
+            subnet: 128,
+            service_pid: 0,
+            state: "running".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_vm_metadata_roundtrip() {
+        let meta = sample_vm_metadata("test-vm");
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        let loaded: VmMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.name, "test-vm");
+        assert_eq!(loaded.vm_name, "bcvk-test-vm");
+        assert_eq!(loaded.vcpus, 4);
+        assert_eq!(loaded.memory_mb, 4096);
+        assert_eq!(loaded.ssh_port, 2222);
+        assert_eq!(loaded.state, "running");
+    }
+
+    #[test]
+    fn test_vm_metadata_save_load_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("myvm.json");
+        let meta = sample_vm_metadata("myvm");
+        std::fs::write(&json_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+        let data = std::fs::read_to_string(&json_path).unwrap();
+        let loaded: VmMetadata = serde_json::from_str(&data).unwrap();
+        assert_eq!(loaded.name, "myvm");
+        assert_eq!(loaded.ssh_port, 2222);
+        std::fs::remove_file(&json_path).unwrap();
+        assert!(!json_path.exists());
+    }
+
+    #[test]
+    fn test_vm_metadata_list_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            let meta = sample_vm_metadata(&format!("vm-{i}"));
+            let path = dir.path().join(format!("vm-{i}.json"));
+            std::fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();
+        }
+        std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
+
+        let mut vms = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(meta) = serde_json::from_str::<VmMetadata>(&data) {
+                    vms.push(meta);
+                }
+            }
+        }
+        assert_eq!(vms.len(), 3);
+        let mut names: Vec<_> = vms.iter().map(|v| v.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["vm-0", "vm-1", "vm-2"]);
+    }
 }

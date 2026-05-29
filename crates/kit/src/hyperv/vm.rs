@@ -1221,6 +1221,20 @@ pub fn stop_vm(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn turn_off_vm(name: &str) -> Result<()> {
+    wmi_request_state_change(name, 4)?;
+    for _ in 0..10 {
+        let s = get_vm_state(name).unwrap_or_default();
+        if s.contains("Off") || s.is_empty() {
+            debug!("forced off VM: {}", name);
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    debug!("forced off VM (timeout waiting for Off state): {}", name);
+    Ok(())
+}
+
 pub fn start_vm(name: &str) -> Result<()> {
     wmi_request_state_change(name, 2)?;
     debug!("started VM: {}", name);
