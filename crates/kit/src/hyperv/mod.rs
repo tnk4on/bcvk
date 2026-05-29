@@ -111,6 +111,10 @@ pub struct VmMetadata {
     pub service_pid: u32,
     #[serde(default)]
     pub state: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub port_mappings: Vec<(u16, u16)>,
     pub created: String,
 }
 
@@ -296,6 +300,20 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
             meta.ssh_port
         );
 
+        // Additional port forwarding
+        let mut _port_fwds = Vec::new();
+        for (host_port, guest_port) in &meta.port_mappings {
+            let fwd = ssh_forward::SshForward::start_on_ports(&client_ip, *host_port, *guest_port)
+                .await?;
+            tracing::info!(
+                "persistent VM '{}': port forward {}:{}",
+                name,
+                host_port,
+                guest_port
+            );
+            _port_fwds.push(fwd);
+        }
+
         let key_path = std::path::Path::new(&meta.ssh_key);
         crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
         tracing::info!("persistent VM '{}': SSH ready", name);
@@ -332,6 +350,8 @@ mod tests {
             subnet: 128,
             service_pid: 0,
             state: "running".to_string(),
+            labels: vec![],
+            port_mappings: vec![],
             created: "2026-01-01T00:00:00Z".to_string(),
         }
     }

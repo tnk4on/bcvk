@@ -27,9 +27,31 @@ pub struct ToDiskWindowsOpts {
     /// Installation options
     #[clap(flatten)]
     pub install: crate::install_options::InstallOptions,
+
+    /// Configure logging for `bootc install` by setting the `RUST_LOG` environment variable
+    #[clap(long)]
+    pub install_log: Option<String>,
+
+    /// Add metadata to the container in key=value form
+    #[clap(long = "label")]
+    pub label: Vec<String>,
+
+    /// Check if the disk would be regenerated without actually creating it
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
+    if opts.dry_run {
+        if opts.output.exists() {
+            println!("Disk image already exists: {}", opts.output);
+            println!("Would reuse existing disk (no cache validation on Windows yet)");
+        } else {
+            println!("Would create new disk image: {}", opts.output);
+        }
+        return Ok(());
+    }
+
     if opts.output.exists() {
         bail!("output file already exists: {}", opts.output);
     }
@@ -138,6 +160,19 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     }
     let bootc_args = install_opts.to_bootc_args().join(" ");
 
+    let install_log_arg = opts
+        .install_log
+        .as_deref()
+        .map(|v| format!("--env=RUST_LOG={}", v))
+        .unwrap_or_default();
+
+    let label_args = opts
+        .label
+        .iter()
+        .map(|l| format!("--label={}", l))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     // Write install script to temp file, then transfer via stdin to avoid
     // multi-layer SSH escaping issues with base64/special characters
     let install_script = format!(
@@ -146,6 +181,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
          {run} run --rm -i --privileged --pid=host --security-opt label=disable \
          -v /dev:/dev -v /dev/shm:/dev/shm \
          -v /var/lib/containers:/var/lib/containers -v /sys:/sys:ro \
+         {install_log} {labels} \
          {image} \
          bootc install to-disk --wipe --generic-image --skip-fetch-check \
          --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
@@ -153,6 +189,8 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
          rm -f /dev/shm/bcvk-ssh-key.pub\n",
         b64 = pub_key_b64,
         run = run_cmd,
+        install_log = install_log_arg,
+        labels = label_args,
         image = opts.image,
         args = bootc_args,
     );
