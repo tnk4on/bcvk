@@ -34,7 +34,11 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         bail!("output file already exists: {}", opts.output);
     }
 
-    let parent = opts.output.parent().map(|p| p.as_std_path()).unwrap_or(Path::new("."));
+    let parent = opts
+        .output
+        .parent()
+        .map(|p| p.as_std_path())
+        .unwrap_or(Path::new("."));
     let output_abs = std::fs::canonicalize(parent)?
         .join(opts.output.file_name().unwrap())
         .to_string_lossy()
@@ -77,7 +81,8 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     info!("creating VHDX: {} ({} bytes)", output_abs, size_bytes);
     let ps_result = Command::new("powershell")
         .args([
-            "-NoProfile", "-Command",
+            "-NoProfile",
+            "-Command",
             &format!(
                 "New-VHD -Path '{}' -SizeBytes {} -Dynamic | Out-Null; Write-Host 'OK'",
                 output_abs, size_bytes
@@ -87,7 +92,10 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .stderr(Stdio::piped())
         .output()?;
     if !ps_result.status.success() {
-        bail!("New-VHD failed: {}", String::from_utf8_lossy(&ps_result.stderr).trim());
+        bail!(
+            "New-VHD failed: {}",
+            String::from_utf8_lossy(&ps_result.stderr).trim()
+        );
     }
 
     // Phase 4: Hot-plug VHDX to podman machine
@@ -105,7 +113,10 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .output()?;
     if !ps_attach.status.success() {
         let _ = std::fs::remove_file(&output_abs);
-        bail!("Failed to attach VHDX: {}", String::from_utf8_lossy(&ps_attach.stderr).trim());
+        bail!(
+            "Failed to attach VHDX: {}",
+            String::from_utf8_lossy(&ps_attach.stderr).trim()
+        );
     }
 
     // Phase 5: Transfer SSH key + run bootc install in podman machine
@@ -182,8 +193,6 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         }
     }
 }
-
-
 
 fn parse_size(s: &str) -> Result<u64> {
     let s = s.trim();

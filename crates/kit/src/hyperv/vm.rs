@@ -237,12 +237,11 @@ fn wmi_wait_for_job(services: &IWbemServices, job_path: &str) -> Result<()> {
                 Some(&mut job_obj),
                 None,
             )?;
-            let job_obj =
-                job_obj.ok_or_else(|| color_eyre::eyre::eyre!("Job object not found"))?;
+            let job_obj = job_obj.ok_or_else(|| color_eyre::eyre::eyre!("Job object not found"))?;
             let state_val = wmi_get_property(&job_obj, "JobState")?;
             let state = variant_to_i32(&state_val);
             match state {
-                7 => return Ok(()),                       // Completed
+                7 => return Ok(()), // Completed
                 10 | 11 => {
                     let desc = wmi_get_property(&job_obj, "ErrorDescription")
                         .ok()
@@ -266,8 +265,11 @@ fn wmi_wait_for_job(services: &IWbemServices, job_path: &str) -> Result<()> {
 fn wmi_define_system(name: &str) -> Result<()> {
     let services = wmi_connect("root\\virtualization\\v2")?;
     let (_mgmt, mgmt_path) = wmi_get_mgmt_service(&services)?;
-    let in_params =
-        wmi_get_method_in_params(&services, "Msvm_VirtualSystemManagementService", "DefineSystem")?;
+    let in_params = wmi_get_method_in_params(
+        &services,
+        "Msvm_VirtualSystemManagementService",
+        "DefineSystem",
+    )?;
 
     let system_xml = format!(
         "<INSTANCE CLASSNAME=\"Msvm_VirtualSystemSettingData\">\
@@ -297,11 +299,7 @@ fn wmi_define_system(name: &str) -> Result<()> {
 }
 
 #[allow(unsafe_code)]
-fn wmi_query_first_string(
-    services: &IWbemServices,
-    query: &str,
-    property: &str,
-) -> Result<String> {
+fn wmi_query_first_string(services: &IWbemServices, query: &str, property: &str) -> Result<String> {
     unsafe {
         let enumerator = services.ExecQuery(
             &BSTR::from("WQL"),
@@ -399,7 +397,11 @@ unsafe fn wmi_get_default_ethernet_connection(
     loop {
         let mut objs = [None; 1];
         let mut returned = 0u32;
-        if enumerator.Next(WBEM_INFINITE, &mut objs, &mut returned).is_err() || returned == 0 {
+        if enumerator
+            .Next(WBEM_INFINITE, &mut objs, &mut returned)
+            .is_err()
+            || returned == 0
+        {
             break;
         }
         if let Some(ref obj) = objs[0] {
@@ -423,8 +425,8 @@ unsafe fn wmi_get_default_ethernet_connection(
         Some(&mut default_obj),
         None,
     )?;
-    let template = default_obj
-        .ok_or_else(|| color_eyre::eyre::eyre!("failed to get default template"))?;
+    let template =
+        default_obj.ok_or_else(|| color_eyre::eyre::eyre!("failed to get default template"))?;
     let instance = template.SpawnInstance(0)?;
 
     // 5. Set Parent (NIC) and HostResource (switch)
@@ -437,7 +439,10 @@ unsafe fn wmi_get_default_ethernet_connection(
     let bstr = BSTR::from(switch_path);
     let idx: i32 = 0;
     SafeArrayPutElement(sa, &idx, bstr.as_ptr() as *const _)?;
-    let prop_w: Vec<u16> = "HostResource".encode_utf16().chain(std::iter::once(0)).collect();
+    let prop_w: Vec<u16> = "HostResource"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut v = VARIANT::default();
     let p = &mut v as *mut VARIANT;
     let inner = &mut (*p).Anonymous.Anonymous;
@@ -609,10 +614,6 @@ pub struct VmInfo {
     pub state: String,
 }
 
-
-
-
-
 #[allow(unsafe_code)]
 pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Result<SwitchInfo> {
     let subnet = format!(
@@ -754,7 +755,11 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     if let Ok(out) = &ip_result {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            info!("netsh ip add failed for '{}': {}", adapter_name, stderr.trim());
+            info!(
+                "netsh ip add failed for '{}': {}",
+                adapter_name,
+                stderr.trim()
+            );
         }
     }
 
@@ -762,13 +767,7 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let check = Command::new("netsh")
-            .args([
-                "interface",
-                "ip",
-                "show",
-                "address",
-                &adapter_name,
-            ])
+            .args(["interface", "ip", "show", "address", &adapter_name])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output();
@@ -795,11 +794,7 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
             if let Some(ref cls) = nat_class {
                 if let Ok(nat_inst) = cls.SpawnInstance(0) {
                     let _ = wmi_put_bstr(&nat_inst, "Name", &nat_name);
-                    let _ = wmi_put_bstr(
-                        &nat_inst,
-                        "InternalIPInterfaceAddressPrefix",
-                        &subnet,
-                    );
+                    let _ = wmi_put_bstr(&nat_inst, "InternalIPInterfaceAddressPrefix", &subnet);
                     let _ = nat_services.PutInstance(
                         &nat_inst,
                         WBEM_GENERIC_FLAG_TYPE(WBEM_FLAG_CREATE_OR_UPDATE.0 as i32),
@@ -829,13 +824,7 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
         .status();
 
     let _ = Command::new("netsh")
-        .args([
-            "advfirewall",
-            "set",
-            "allprofiles",
-            "state",
-            "off",
-        ])
+        .args(["advfirewall", "set", "allprofiles", "state", "off"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -897,8 +886,7 @@ pub fn remove_internal_switch(name: &str) {
         );
         if let Ok(sw_path) = switch_path {
             unsafe {
-                let sw_mgmt_query =
-                    "SELECT * FROM Msvm_VirtualEthernetSwitchManagementService";
+                let sw_mgmt_query = "SELECT * FROM Msvm_VirtualEthernetSwitchManagementService";
                 if let Ok(enumerator) = services.ExecQuery(
                     &BSTR::from("WQL"),
                     &BSTR::from(sw_mgmt_query),
@@ -1070,8 +1058,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
          <VALUE>Microsoft:Hyper-V:Synthetic Ethernet Port</VALUE></PROPERTY>\
          <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>10</VALUE></PROPERTY>\
          </INSTANCE>";
-    let nic_paths =
-        wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[nic_xml])?;
+    let nic_paths = wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[nic_xml])?;
     debug!("NIC: nic_paths={:?}", nic_paths);
 
     // Connect NIC to switch via AddResourceSettings with all required properties
@@ -1188,12 +1175,10 @@ pub fn attach_vhdx_at_slot(name: &str, vhdx_path: &str, slot: u32) -> Result<()>
                  <VALUE>Microsoft:Hyper-V:Synthetic SCSI Controller</VALUE></PROPERTY>\
                  <PROPERTY NAME=\"ResourceType\" TYPE=\"uint16\"><VALUE>6</VALUE></PROPERTY>\
                  </INSTANCE>";
-            let paths =
-                wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[scsi_xml])?;
-            paths
-                .into_iter()
-                .next()
-                .ok_or_else(|| color_eyre::eyre::eyre!("AddResourceSettings returned no SCSI path"))?
+            let paths = wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[scsi_xml])?;
+            paths.into_iter().next().ok_or_else(|| {
+                color_eyre::eyre::eyre!("AddResourceSettings returned no SCSI path")
+            })?
         }
     };
 
@@ -1207,8 +1192,7 @@ pub fn attach_vhdx_at_slot(name: &str, vhdx_path: &str, slot: u32) -> Result<()>
          </INSTANCE>",
         scsi_path, slot,
     );
-    let drive_paths =
-        wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&drive_xml])?;
+    let drive_paths = wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&drive_xml])?;
     let drive_path = drive_paths
         .into_iter()
         .next()
@@ -1227,7 +1211,10 @@ pub fn attach_vhdx_at_slot(name: &str, vhdx_path: &str, slot: u32) -> Result<()>
     );
     wmi_add_resource_settings(&services, &mgmt_path, &vssd_path, &[&vhd_xml])?;
 
-    debug!("attached VHDX to VM {} at slot {}: {}", name, slot, vhdx_path);
+    debug!(
+        "attached VHDX to VM {} at slot {}: {}",
+        name, slot, vhdx_path
+    );
     Ok(())
 }
 
@@ -1562,8 +1549,8 @@ mod tests {
         remove_internal_switch(sw_name);
 
         // 1. Create internal switch
-        let sw = ensure_internal_switch(sw_name, host_ip, 24)
-            .expect("ensure_internal_switch failed");
+        let sw =
+            ensure_internal_switch(sw_name, host_ip, 24).expect("ensure_internal_switch failed");
         assert_eq!(sw.name, sw_name);
         assert_eq!(sw.host_ip, host_ip);
         eprintln!("[OK] ensure_internal_switch: {}", sw_name);
