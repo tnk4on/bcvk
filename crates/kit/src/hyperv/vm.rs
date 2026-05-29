@@ -1106,7 +1106,7 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
 }
 
 pub fn attach_and_start_vm(name: &str, vhdx_path: &str) -> Result<String> {
-    attach_vhdx(name, vhdx_path)?;
+    attach_vhdx_at_slot(name, vhdx_path, 0)?;
     set_boot_order_disk_first(name);
     start_vm(name)?;
     let guid = get_vm_guid(name)?;
@@ -1125,11 +1125,6 @@ pub fn set_boot_order_disk_first(name: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-#[allow(unsafe_code)]
-pub fn attach_vhdx(name: &str, vhdx_path: &str) -> Result<()> {
-    attach_vhdx_at_slot(name, vhdx_path, 0)
 }
 
 #[allow(unsafe_code)]
@@ -1591,8 +1586,8 @@ mod tests {
             .status();
 
         if vhdx_path.exists() {
-            attach_vhdx(vm_name, &vhdx_str).expect("attach_vhdx failed");
-            eprintln!("[OK] attach_vhdx: {}", vhdx_str);
+            attach_vhdx_at_slot(vm_name, &vhdx_str, 0).expect("attach_vhdx failed");
+            eprintln!("[OK] attach_vhdx_at_slot: {}", vhdx_str);
 
             // 5. Start VM (will fail to boot but state should change)
             start_vm(vm_name).expect("start_vm failed");

@@ -35,13 +35,25 @@ pub fn run(opts: HypervRmOpts) -> Result<()> {
     info!("removed Hyper-V VM: {}", meta.vm_name);
 
     if !meta.vhdx_path.is_empty() {
-        let _ = std::fs::remove_file(&meta.vhdx_path);
+        if let Err(e) = std::fs::remove_file(&meta.vhdx_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove VHDX {}: {}", meta.vhdx_path, e);
+            }
+        }
     }
 
     let key_path = std::path::Path::new(&meta.ssh_key);
-    let _ = std::fs::remove_file(key_path);
+    if let Err(e) = std::fs::remove_file(key_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!("failed to remove SSH key: {}", e);
+        }
+    }
     let pub_path = std::path::PathBuf::from(format!("{}.pub", meta.ssh_key));
-    let _ = std::fs::remove_file(pub_path);
+    if let Err(e) = std::fs::remove_file(pub_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!("failed to remove SSH pubkey: {}", e);
+        }
+    }
 
     if !meta.switch_name.is_empty() {
         vm::remove_internal_switch(&meta.switch_name);

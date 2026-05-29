@@ -12,6 +12,11 @@ use tracing::{info, warn};
 use windows::Win32::Networking::WinSock as ws;
 
 const IP_UNICAST_IF: i32 = 31;
+const DHCP_SERVER_PORT: u16 = 67;
+const BOOTP_MIN_PACKET_SIZE: usize = 300;
+const DNS_PRIMARY: [u8; 4] = [8, 8, 8, 8];
+const DNS_SECONDARY: [u8; 4] = [8, 8, 4, 4];
+const DHCP_LEASE_TIME_SECS: u32 = 3600;
 
 #[derive(Debug)]
 pub struct DhcpServer {
@@ -94,8 +99,8 @@ async fn run_dhcp(
     stop: Arc<Notify>,
 ) -> Result<()> {
     let bind_addr = format!(
-        "{}.{}.{}.{}:67",
-        server_ip[0], server_ip[1], server_ip[2], server_ip[3]
+        "{}.{}.{}.{}:{}",
+        server_ip[0], server_ip[1], server_ip[2], server_ip[3], DHCP_SERVER_PORT
     );
 
     // Bind with retry (vEthernet adapter may not be ready yet)
@@ -208,8 +213,8 @@ fn build_dhcp_response(
     // Option 6: DNS (Google Public DNS)
     resp[i] = 6;
     resp[i + 1] = 8;
-    resp[i + 2..i + 6].copy_from_slice(&[8, 8, 8, 8]);
-    resp[i + 6..i + 10].copy_from_slice(&[8, 8, 4, 4]);
+    resp[i + 2..i + 6].copy_from_slice(&DNS_PRIMARY);
+    resp[i + 6..i + 10].copy_from_slice(&DNS_SECONDARY);
     i += 10;
     resp[i] = 54;
     resp[i + 1] = 4;
@@ -217,12 +222,12 @@ fn build_dhcp_response(
     i += 6;
     resp[i] = 51;
     resp[i + 1] = 4;
-    resp[i + 2..i + 6].copy_from_slice(&[0, 0, 14, 16]);
+    resp[i + 2..i + 6].copy_from_slice(&DHCP_LEASE_TIME_SECS.to_be_bytes());
     i += 6;
     resp[i] = 255;
     i += 1;
     // Pad to BOOTP minimum (300 bytes)
-    resp.truncate(i.max(300));
+    resp.truncate(i.max(BOOTP_MIN_PACKET_SIZE));
     resp
 }
 
