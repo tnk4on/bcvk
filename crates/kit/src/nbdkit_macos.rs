@@ -146,7 +146,6 @@ pub(crate) fn start_nbdkit_erofs_plugin(
 }
 
 /// Find an available TCP port for NBD in range 10800-10900.
-#[allow(dead_code)]
 pub fn find_available_nbd_port() -> u16 {
     use rand::Rng;
     let mut rng = rand::rng();

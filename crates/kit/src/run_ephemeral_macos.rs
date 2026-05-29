@@ -229,8 +229,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     run_vfkit(opts)
 }
 
-const NBD_TCP_PORT: u16 = 10809;
-
 /// Run an ephemeral VM using vfkit + EROFS over NBD (TCP transport).
 fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.detach {
@@ -306,13 +304,14 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    info!("NBD transport: TCP (gvproxy port forwarding)");
+    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
+    info!("NBD transport: TCP (port {})", nbd_port);
     let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
         &machine,
         &merged_path,
         &cmdline,
         &ssh_pubkey,
-        NBD_TCP_PORT,
+        nbd_port,
         &vm_name,
     )?;
 
@@ -346,7 +345,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         "--device".to_string(),
         format!(
             "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
-            NBD_TCP_PORT
+            nbd_port
         ),
         "--device".to_string(),
         format!(
@@ -403,7 +402,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         log_path: None,
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: Some(nbd_container_name.clone()),
-        nbd_port: None,
+        nbd_port: Some(nbd_port),
     };
     metadata.save()?;
 
