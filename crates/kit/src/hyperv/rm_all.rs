@@ -16,12 +16,26 @@ pub struct HypervRmAllOpts {
     /// Remove VMs even if they are running
     #[clap(long)]
     pub stop: bool,
+
+    /// Filter VMs by label (only remove VMs with this label)
+    #[clap(long)]
+    pub label: Option<String>,
 }
 
 pub fn run(opts: HypervRmAllOpts) -> Result<()> {
-    let vms = VmMetadata::list_all()?;
+    let mut vms = VmMetadata::list_all()?;
+
+    // Filter by label if specified
+    if let Some(ref filter_label) = opts.label {
+        vms.retain(|v| v.labels.contains(filter_label));
+    }
+
     if vms.is_empty() {
-        println!("No VMs found");
+        if let Some(ref label) = opts.label {
+            println!("No VMs found with label '{}'", label);
+        } else {
+            println!("No VMs found");
+        }
         return Ok(());
     }
 

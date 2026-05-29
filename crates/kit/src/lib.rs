@@ -21,4 +21,13 @@ pub mod ephemeral_windows;
 pub mod hyperv;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
+pub mod install_options;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
+pub mod instancetypes;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
 pub mod run_ephemeral_windows;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
+pub mod to_disk_windows;

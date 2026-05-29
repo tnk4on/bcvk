@@ -48,6 +48,9 @@ pub fn run(opts: HypervInspectOpts) -> Result<()> {
             if !meta.switch_name.is_empty() {
                 println!("switch_name: {}", meta.switch_name);
             }
+            if !meta.labels.is_empty() {
+                println!("labels: {}", meta.labels.join(", "));
+            }
             println!("created: {}", meta.created);
         }
         OutputFormat::Json => {
