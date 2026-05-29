@@ -151,6 +151,12 @@ fn cmd_rm_all(force: bool) -> Result<()> {
                     tracing::warn!("failed to kill gvproxy {}: {}", vm.gvproxy_pid, e);
                 }
             }
+            // Wait for the VM process to exit so cleanup (VmCleanup::drop in
+            // the detached child) finishes before we proceed.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while vm.is_alive() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
         if let Some(ref container) = vm.nbd_container {
             crate::nbdkit_macos::stop_nbdkit_container(container);
