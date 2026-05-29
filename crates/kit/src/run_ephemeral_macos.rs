@@ -1,12 +1,11 @@
-//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS over vsock.
+//! Ephemeral VM launch flow for macOS using vfkit + NBD EROFS over TCP.
 //!
 //! Boot flow (fully diskless):
 //! 1. Mount container image overlay (`podman image mount`)
-//! 2. Start nbdkit with erofs plugin in vsock mode (via krunkit connect)
-//! 3. Launch vfkit with EFI boot via NBD Unix socket + virtio-net (gvproxy)
+//! 2. Start nbdkit with erofs plugin in TCP mode (port forwarded via gvproxy)
+//! 3. Launch vfkit with EFI boot via NBD TCP + virtio-net (gvproxy)
 //! 4. Wait for SSH and execute commands
 //!
-//! Requires libkrun-efi >= 1.18.1 (PR #656: peer_buf_alloc fix).
 //! Common helpers (gvproxy, SSH, vfkit detection) are pub for reuse by vfkit/ module.
 
 use std::fs;
@@ -122,9 +121,6 @@ impl EphemeralVmMetadata {
 pub struct RunEphemeralOpts {
     /// Container image to boot
     pub image: String,
-    /// VM backend: "vfkit" (default) or "krun"
-    #[clap(long, short = 'b', default_value = "vfkit")]
-    pub backend: String,
     /// Number of vCPUs
     #[clap(long)]
     pub vcpus: Option<u32>,
@@ -226,33 +222,23 @@ impl Drop for VmCleanup {
 
 /// Run an ephemeral VM from a container image.
 ///
-/// Dispatches to the appropriate backend based on `--backend` option.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together (GUI requires foreground process)");
     }
-    match opts.backend.as_str() {
-        "vfkit" => run_vfkit(opts),
-        #[cfg(feature = "krun")]
-        "krun" => crate::run_ephemeral_macos_krun::run_krun(opts),
-        #[cfg(not(feature = "krun"))]
-        "krun" => bail!("krun backend not available (rebuild with --features krun)"),
-        other => bail!("unknown backend: {} (expected 'vfkit' or 'krun')", other),
-    }
+    run_vfkit(opts)
 }
 
-const VSOCK_PORT: u32 = 1030;
-const NBD_VSOCK_SOCK: &str = "/tmp/bcvk-nbd.sock";
 const NBD_TCP_PORT: u16 = 10809;
 
-/// Run an ephemeral VM using vfkit + EROFS over NBD (vsock transport).
+/// Run an ephemeral VM using vfkit + EROFS over NBD (TCP transport).
 fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.detach {
         return run_detached(&opts);
     }
 
     let vfkit_bin = find_vfkit()?;
-    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + NBD vsock)");
+    info!(image = %opts.image, "starting ephemeral VM on macOS (vfkit + NBD TCP)");
 
     let cache_base = ephemeral_base_dir();
     fs::create_dir_all(&cache_base)?;
@@ -320,52 +306,15 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    let use_tcp = std::env::var("BCVK_NBD_TCP").map(|v| v == "1").unwrap_or(false);
-
-    let nbd_container_name = if use_tcp {
-        // TCP mode: nbdkit listens on TCP port, forwarded via gvproxy
-        info!("NBD transport: TCP (gvproxy port forwarding)");
-        crate::nbdkit_macos::start_nbdkit_erofs_plugin(
-            &machine,
-            &merged_path,
-            &cmdline,
-            &ssh_pubkey,
-            NBD_TCP_PORT,
-            &vm_name,
-        )?
-    } else {
-        // vsock mode: nbdkit listens on AF_VSOCK, connected via krunkit
-        info!("NBD transport: vsock");
-        let name = crate::nbdkit_macos::start_nbdkit_vsock(
-            &machine,
-            &merged_path,
-            &cmdline,
-            &ssh_pubkey,
-            VSOCK_PORT,
-            &vm_name,
-        )?;
-
-        // Verify nbdkit readiness via krunkit connect socket
-        info!("verifying nbdkit vsock via {}...", NBD_VSOCK_SOCK);
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(NBD_VSOCK_SOCK) {
-                use std::io::Read;
-                stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-                let mut buf = [0u8; 8];
-                if stream.read_exact(&mut buf).is_ok() && &buf == b"NBDMAGIC" {
-                    drop(stream);
-                    info!("nbdkit vsock ready (NBDMAGIC verified)");
-                    break;
-                }
-            }
-            if std::time::Instant::now() > deadline {
-                bail!("nbdkit vsock did not become ready on port {}", VSOCK_PORT);
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        name
-    };
+    info!("NBD transport: TCP (gvproxy port forwarding)");
+    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+        &machine,
+        &merged_path,
+        &cmdline,
+        &ssh_pubkey,
+        NBD_TCP_PORT,
+        &vm_name,
+    )?;
 
     // gvproxy + vfkit (EFI boot)
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
@@ -395,17 +344,10 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         "--bootloader".to_string(),
         bootloader_arg,
         "--device".to_string(),
-        if use_tcp {
-            format!(
-                "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
-                NBD_TCP_PORT
-            )
-        } else {
-            format!(
-                "nbd,uri=nbd+unix:///?socket={},readonly,timeout=5000,deviceId=rootfs",
-                NBD_VSOCK_SOCK
-            )
-        },
+        format!(
+            "nbd,uri=nbd://127.0.0.1:{}/,readonly,timeout=5000,deviceId=rootfs",
+            NBD_TCP_PORT
+        ),
         "--device".to_string(),
         format!(
             "virtio-net,unixSocketPath={},mac={}",

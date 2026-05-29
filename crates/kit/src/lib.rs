@@ -20,10 +20,3 @@ pub mod run_ephemeral_macos;
 
 #[cfg(target_os = "macos")]
 pub mod vfkit;
-
-// macOS boot files + vsock infrastructure (shared by vfkit and krun backends)
-#[cfg(target_os = "macos")]
-pub mod boot_files_macos;
-// macOS krun backend (requires --features krun and libkrun-efi >= 1.18.0)
-#[cfg(all(target_os = "macos", feature = "krun"))]
-pub mod run_ephemeral_macos_krun;
