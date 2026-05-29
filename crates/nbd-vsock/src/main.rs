@@ -43,7 +43,10 @@ fn readall(fd: &mut impl Read, buf: &mut [u8]) -> std::io::Result<()> {
     while done < buf.len() {
         let n = fd.read(&mut buf[done..])?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF",
+            ));
         }
         done += n;
     }
@@ -83,12 +86,23 @@ fn vsock_listen(port: u32) -> std::io::Result<RawFd> {
             return Err(std::io::Error::last_os_error());
         }
         let opt: libc::c_int = 1;
-        setsockopt(fd, SOL_SOCKET, libc::SO_REUSEADDR, &opt as *const _ as *const libc::c_void, 4);
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            &opt as *const _ as *const libc::c_void,
+            4,
+        );
         let mut addr: sockaddr_vm = std::mem::zeroed();
         addr.svm_family = AF_VSOCK as u16;
         addr.svm_cid = VMADDR_CID_ANY;
         addr.svm_port = port;
-        if bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of_val(&addr) as u32) < 0 {
+        if bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of_val(&addr) as u32,
+        ) < 0
+        {
             libc::close(fd);
             return Err(std::io::Error::last_os_error());
         }
@@ -107,8 +121,20 @@ fn vsock_accept(lsock: RawFd) -> std::io::Result<RawFd> {
             return Err(std::io::Error::last_os_error());
         }
         let sockbuf: libc::c_int = SOCKET_BUF_SIZE;
-        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sockbuf as *const _ as *const libc::c_void, 4);
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sockbuf as *const _ as *const libc::c_void, 4);
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sockbuf as *const _ as *const libc::c_void,
+            4,
+        );
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &sockbuf as *const _ as *const libc::c_void,
+            4,
+        );
         Ok(fd)
     }
 }
@@ -155,7 +181,10 @@ fn relay_thread(from: RawFd, to: RawFd) {
     }
 }
 
-fn start_relay(fd_a: RawFd, fd_b: RawFd) -> (std::thread::JoinHandle<()>, std::thread::JoinHandle<()>) {
+fn start_relay(
+    fd_a: RawFd,
+    fd_b: RawFd,
+) -> (std::thread::JoinHandle<()>, std::thread::JoinHandle<()>) {
     let t1 = std::thread::spawn(move || relay_thread(fd_a, fd_b));
     let t2 = std::thread::spawn(move || relay_thread(fd_b, fd_a));
     (t1, t2)
@@ -195,7 +224,7 @@ fn nla_put_string(buf: &mut Vec<u8>, attr_type: u16, s: &str) {
     buf.extend_from_slice(&attr_type.to_ne_bytes());
     buf.extend_from_slice(s.as_bytes());
     buf.push(0); // null terminator
-    // NLA_ALIGN padding
+                 // NLA_ALIGN padding
     let padded = (slen + 3) & !3;
     for _ in slen..padded {
         buf.push(0);
@@ -238,7 +267,12 @@ fn nl_open() -> std::io::Result<RawFd> {
             nl_pid: libc::getpid() as u32,
             nl_groups: 0,
         };
-        if libc::bind(fd, &sa as *const _ as *const libc::sockaddr, std::mem::size_of::<SockaddrNl>() as u32) < 0 {
+        if libc::bind(
+            fd,
+            &sa as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<SockaddrNl>() as u32,
+        ) < 0
+        {
             libc::close(fd);
             return Err(std::io::Error::last_os_error());
         }
@@ -254,9 +288,17 @@ fn genl_resolve_family(nl: RawFd, name: &str) -> std::io::Result<u16> {
     buf.resize(nlh_size + gh_size, 0);
 
     // genlmsghdr
-    let gh = GenlMsgHdr { cmd: CTRL_CMD_GETFAMILY, version: 1, reserved: 0 };
+    let gh = GenlMsgHdr {
+        cmd: CTRL_CMD_GETFAMILY,
+        version: 1,
+        reserved: 0,
+    };
     unsafe {
-        std::ptr::copy_nonoverlapping(&gh as *const _ as *const u8, buf.as_mut_ptr().add(nlh_size), gh_size);
+        std::ptr::copy_nonoverlapping(
+            &gh as *const _ as *const u8,
+            buf.as_mut_ptr().add(nlh_size),
+            gh_size,
+        );
     }
 
     nla_put_string(&mut buf, CTRL_ATTR_FAMILY_NAME, name);
@@ -309,19 +351,38 @@ fn genl_resolve_family(nl: RawFd, name: &str) -> std::io::Result<u16> {
         off += ((alen as usize) + 3) & !3; // NLA_ALIGN
     }
 
-    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nbd family not found"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "nbd family not found",
+    ))
 }
 
-fn nbd_connect(nl: RawFd, family_id: u16, dev_index: u32, fds: &[RawFd], size: u64, block_size: u32, server_flags: u16) -> std::io::Result<()> {
+fn nbd_connect(
+    nl: RawFd,
+    family_id: u16,
+    dev_index: u32,
+    fds: &[RawFd],
+    size: u64,
+    block_size: u32,
+    server_flags: u16,
+) -> std::io::Result<()> {
     let nlh_size = std::mem::size_of::<NlMsgHdr>();
     let gh_size = std::mem::size_of::<GenlMsgHdr>();
 
     let mut buf = Vec::with_capacity(512);
     buf.resize(nlh_size + gh_size, 0);
 
-    let gh = GenlMsgHdr { cmd: NBD_CMD_CONNECT, version: NBD_GENL_VERSION, reserved: 0 };
+    let gh = GenlMsgHdr {
+        cmd: NBD_CMD_CONNECT,
+        version: NBD_GENL_VERSION,
+        reserved: 0,
+    };
     unsafe {
-        std::ptr::copy_nonoverlapping(&gh as *const _ as *const u8, buf.as_mut_ptr().add(nlh_size), gh_size);
+        std::ptr::copy_nonoverlapping(
+            &gh as *const _ as *const u8,
+            buf.as_mut_ptr().add(nlh_size),
+            gh_size,
+        );
     }
 
     nla_put_u32(&mut buf, NBD_ATTR_INDEX, dev_index);
@@ -403,13 +464,23 @@ fn sd_notify_ready() {
             }
         }
         let len = std::mem::size_of::<libc::sa_family_t>() + pb.len();
-        libc::sendto(fd, b"READY=1".as_ptr() as *const _, 7, 0, &addr as *const _ as *const _, len as u32);
+        libc::sendto(
+            fd,
+            b"READY=1".as_ptr() as *const _,
+            7,
+            0,
+            &addr as *const _ as *const _,
+            len as u32,
+        );
         libc::close(fd);
     }
 }
 
 fn move_to_root_cgroup() {
-    let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", format!("{}\n", std::process::id()));
+    let _ = std::fs::write(
+        "/sys/fs/cgroup/cgroup.procs",
+        format!("{}\n", std::process::id()),
+    );
 }
 
 // --- main ---
@@ -422,10 +493,20 @@ fn main() {
     }
     let dev = &args[1];
     let port: u32 = args[2].parse().expect("invalid port");
-    let num_conns: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1).min(MAX_CONNECTIONS).max(1);
-    let dev_index: u32 = dev.trim_start_matches("/dev/nbd").parse().expect("invalid device index");
+    let num_conns: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .min(MAX_CONNECTIONS)
+        .max(1);
+    let dev_index: u32 = dev
+        .trim_start_matches("/dev/nbd")
+        .parse()
+        .expect("invalid device index");
 
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
 
     let lsock = vsock_listen(port).expect("vsock listen failed");
     msg!("listening on vsock port {}", port);
@@ -457,10 +538,34 @@ fn main() {
 
         let sndbuf: libc::c_int = RELAY_BUF_SIZE as i32;
         unsafe {
-            setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &sndbuf as *const _ as *const libc::c_void, 4);
-            setsockopt(pair[0], SOL_SOCKET, SO_RCVBUF, &sndbuf as *const _ as *const libc::c_void, 4);
-            setsockopt(pair[1], SOL_SOCKET, SO_SNDBUF, &sndbuf as *const _ as *const libc::c_void, 4);
-            setsockopt(pair[1], SOL_SOCKET, SO_RCVBUF, &sndbuf as *const _ as *const libc::c_void, 4);
+            setsockopt(
+                pair[0],
+                SOL_SOCKET,
+                SO_SNDBUF,
+                &sndbuf as *const _ as *const libc::c_void,
+                4,
+            );
+            setsockopt(
+                pair[0],
+                SOL_SOCKET,
+                SO_RCVBUF,
+                &sndbuf as *const _ as *const libc::c_void,
+                4,
+            );
+            setsockopt(
+                pair[1],
+                SOL_SOCKET,
+                SO_SNDBUF,
+                &sndbuf as *const _ as *const libc::c_void,
+                4,
+            );
+            setsockopt(
+                pair[1],
+                SOL_SOCKET,
+                SO_RCVBUF,
+                &sndbuf as *const _ as *const libc::c_void,
+                4,
+            );
         }
 
         vsock_fds.push(sock);
@@ -470,15 +575,23 @@ fn main() {
         relay_handles.push(t2);
     }
 
-    unsafe { libc::close(lsock); }
-    msg!("{} connection(s), export size={} bytes", num_conns, export_size);
+    unsafe {
+        libc::close(lsock);
+    }
+    msg!(
+        "{} connection(s), export size={} bytes",
+        num_conns,
+        export_size
+    );
 
     // Enter new PID namespace so switch_root's kill(-1, SIGKILL) can't reach us.
     unsafe {
         if libc::unshare(libc::CLONE_NEWPID) == 0 {
             let pid = libc::fork();
             if pid > 0 {
-                loop { libc::pause(); }
+                loop {
+                    libc::pause();
+                }
             }
             if pid < 0 {
                 msg!("fork failed, continuing without PID namespace");
@@ -494,16 +607,29 @@ fn main() {
         std::process::exit(1);
     });
 
-    nbd_connect(nl, family_id, dev_index, &unix_fds, export_size, 512, tflags).unwrap_or_else(|e| {
+    nbd_connect(
+        nl,
+        family_id,
+        dev_index,
+        &unix_fds,
+        export_size,
+        512,
+        tflags,
+    )
+    .unwrap_or_else(|e| {
         msg!("NBD_CMD_CONNECT failed: {}", e);
         std::process::exit(1);
     });
 
     msg!("kernel I/O started, relay running");
-    unsafe { libc::close(nl); }
+    unsafe {
+        libc::close(nl);
+    }
     sd_notify_ready();
 
-    unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN); }
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
 
     for h in relay_handles {
         let _ = h.join();

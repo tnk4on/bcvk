@@ -269,9 +269,9 @@ fn main() {
             .build()
         {
             Ok(ctrl) => {
-                    drop(ctrl);
-                    std::process::exit(0);
-                }
+                drop(ctrl);
+                std::process::exit(0);
+            }
             Err(e) => {
                 eprintln!("ublk test failed: {:?}", e);
                 std::process::exit(1);
@@ -329,7 +329,9 @@ fn main() {
         if libc::unshare(libc::CLONE_NEWPID) == 0 {
             let pid = libc::fork();
             if pid > 0 {
-                loop { libc::pause(); }
+                loop {
+                    libc::pause();
+                }
             }
             if pid < 0 {
                 msg!("fork failed, continuing without PID namespace");
