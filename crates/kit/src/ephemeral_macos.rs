@@ -11,7 +11,7 @@ use crate::run_ephemeral_macos::{self, EphemeralVmMetadata};
 
 /// Options for `ephemeral run-ssh`, combining run options with optional SSH arguments.
 #[derive(Debug, clap::Parser)]
-pub struct RunSshOpts {
+pub struct RunEphemeralSshOpts {
     #[command(flatten)]
     pub run_opts: run_ephemeral_macos::RunEphemeralOpts,
 
@@ -28,7 +28,7 @@ pub enum EphemeralCommands {
 
     /// Run ephemeral VM and SSH into it
     #[clap(name = "run-ssh")]
-    RunSsh(RunSshOpts),
+    RunSsh(RunEphemeralSshOpts),
 
     /// Connect to a running ephemeral VM via SSH
     #[clap(name = "ssh")]

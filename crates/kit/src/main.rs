@@ -163,7 +163,7 @@ enum Commands {
     // macOS: vfkit-based persistent VMs
     #[cfg(target_os = "macos")]
     /// Manage persistent VMs (vfkit backend)
-    #[clap(subcommand)]
+    #[clap(subcommand, alias = "vfkit")]
     Vm(vfkit::VmCommands),
 
     // macOS: to-disk and run
