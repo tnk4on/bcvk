@@ -10,12 +10,45 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    clear_xattr, expose_ssh_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy,
+    clear_xattr, expose_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy,
 };
 use crate::vm_helpers::{
     detect_machine_name, ensure_image_and_get_digest, parse_memory_to_mb, remove_file_if_exists,
     sanitize_vm_name, wait_for_ssh,
 };
+
+/// Port mapping from host to VM (format: host_port:guest_port).
+#[derive(Debug, Clone)]
+pub struct PortMapping {
+    /// Host-side port number.
+    pub host_port: u16,
+    /// Guest-side port number.
+    pub guest_port: u16,
+}
+
+impl std::str::FromStr for PortMapping {
+    type Err = color_eyre::Report;
+    fn from_str(s: &str) -> Result<Self> {
+        let (host_part, guest_part) = s.split_once(':').ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "Invalid port format '{}'. Expected format: host_port:guest_port",
+                s
+            )
+        })?;
+        let host_port = host_part
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| color_eyre::eyre::eyre!("Invalid host port '{}'", host_part))?;
+        let guest_port = guest_part
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| color_eyre::eyre::eyre!("Invalid guest port '{}'", guest_part))?;
+        Ok(PortMapping {
+            host_port,
+            guest_port,
+        })
+    }
+}
 
 /// Options for `vm run`.
 #[derive(Parser, Debug)]
@@ -53,6 +86,9 @@ pub struct VmRunOpts {
     /// Replace existing VM with same name
     #[clap(long, short = 'R')]
     pub replace: bool,
+    /// Port mapping from host to VM (format: host_port:guest_port, e.g. 8080:80)
+    #[clap(long = "port", short = 'p', action = clap::ArgAction::Append)]
+    pub port_mappings: Vec<PortMapping>,
 }
 
 fn is_disk_path(input: &str) -> bool {
@@ -245,7 +281,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
     info!("setting up SSH port forwarding...");
     for attempt in 0..15u32 {
-        match expose_ssh_port(&services_sock_str, "192.168.127.2", ssh_port) {
+        match expose_port(&services_sock_str, "192.168.127.2", ssh_port, 22) {
             Ok(_) => {
                 info!("SSH port {} forwarded", ssh_port);
                 break;
@@ -257,6 +293,16 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
             }
             Err(e) => bail!("SSH port forward failed: {}", e),
         }
+    }
+
+    for pm in &opts.port_mappings {
+        expose_port(
+            &services_sock_str,
+            "192.168.127.2",
+            pm.host_port,
+            pm.guest_port,
+        )?;
+        info!("port {}:{} forwarded", pm.host_port, pm.guest_port);
     }
 
     let key_path = std::path::Path::new(&ssh_key_path);

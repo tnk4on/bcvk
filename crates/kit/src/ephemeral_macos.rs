@@ -207,7 +207,7 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     let svc_sock = format!("{}/{}-gvproxy-svc.sock", base.display(), name);
     if std::path::Path::new(&svc_sock).exists() {
         if let Err(e) =
-            run_ephemeral_macos::expose_ssh_port(&svc_sock, "192.168.127.2", vm.ssh_port)
+            run_ephemeral_macos::expose_port(&svc_sock, "192.168.127.2", vm.ssh_port, 22)
         {
             tracing::debug!("SSH port forward re-expose: {}", e);
         }

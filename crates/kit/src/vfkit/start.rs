@@ -8,7 +8,7 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    clear_xattr, expose_ssh_port, find_vfkit, generate_mac, start_gvproxy,
+    clear_xattr, expose_port, find_vfkit, generate_mac, start_gvproxy,
 };
 use crate::vm_helpers::wait_for_ssh;
 
@@ -84,7 +84,7 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
 
     info!("setting up SSH port forwarding...");
     for attempt in 0..15u32 {
-        match expose_ssh_port(&services_sock_str, "192.168.127.2", meta.ssh_port) {
+        match expose_port(&services_sock_str, "192.168.127.2", meta.ssh_port, 22) {
             Ok(_) => {
                 info!("SSH port {} forwarded", meta.ssh_port);
                 break;

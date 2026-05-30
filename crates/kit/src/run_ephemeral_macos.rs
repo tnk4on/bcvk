@@ -403,7 +403,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");
         for attempt in 0..15u32 {
-            match expose_ssh_port(&services_sock_str, "192.168.127.2", ssh_port) {
+            match expose_port(&services_sock_str, "192.168.127.2", ssh_port, 22) {
                 Ok(_) => {
                     info!("SSH port {} forwarded", ssh_port);
                     break;
@@ -606,11 +606,16 @@ pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::pro
     Ok(child)
 }
 
-/// Expose SSH port forwarding via gvproxy's HTTP API.
-pub fn expose_ssh_port(services_sock: &str, vm_ip: &str, host_port: u16) -> Result<()> {
+/// Expose a TCP port forwarding rule via gvproxy's HTTP API.
+pub fn expose_port(
+    services_sock: &str,
+    vm_ip: &str,
+    host_port: u16,
+    guest_port: u16,
+) -> Result<()> {
     let body = format!(
-        r#"{{"local":":{}","remote":"{}:22","protocol":"tcp"}}"#,
-        host_port, vm_ip
+        r#"{{"local":":{}","remote":"{}:{}","protocol":"tcp"}}"#,
+        host_port, vm_ip, guest_port
     );
     let mut stream = UnixStream::connect(services_sock)?;
     let request = format!(
