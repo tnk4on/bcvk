@@ -275,8 +275,7 @@ impl RunContext {
             .stderr(Stdio::null())
             .output()?;
         let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
-        let rootful =
-            inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
+        let rootful = is_machine_rootful(&machine);
         let pm_ssh_port = inspect_json
             .lines()
             .find(|l| l.contains("\"Port\""))
@@ -861,6 +860,14 @@ pub fn detect_podman_vmtype() -> Result<String> {
         bail!("could not detect podman machine VM type");
     }
     Ok(vmtype)
+}
+
+pub fn is_machine_rootful(machine: &str) -> bool {
+    Command::new("podman")
+        .args(["machine", "ssh", machine, "id", "-u"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
