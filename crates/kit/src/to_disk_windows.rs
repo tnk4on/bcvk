@@ -334,13 +334,34 @@ fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn parse_size(s: &str) -> Result<u64> {
-    let s = s.trim();
-    if let Some(n) = s.strip_suffix('G').or(s.strip_suffix("GB")) {
-        Ok(n.trim().parse::<u64>()? * 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('M').or(s.strip_suffix("MB")) {
-        Ok(n.trim().parse::<u64>()? * 1024 * 1024)
-    } else {
-        Ok(s.parse::<u64>()?)
+fn parse_size(size_str: &str) -> Result<u64> {
+    let size_str = size_str.trim().to_uppercase();
+    if size_str.is_empty() {
+        bail!("Empty size string");
     }
+    let (number_str, multiplier) = if let Some(num) = size_str.strip_suffix("TB") {
+        (num, 1024_u64.pow(4))
+    } else if let Some(num) = size_str.strip_suffix("GB") {
+        (num, 1024 * 1024 * 1024)
+    } else if let Some(num) = size_str.strip_suffix("MB") {
+        (num, 1024 * 1024)
+    } else if let Some(num) = size_str.strip_suffix("KB") {
+        (num, 1024)
+    } else if let Some(num) = size_str.strip_suffix('T') {
+        (num, 1024_u64.pow(4))
+    } else if let Some(num) = size_str.strip_suffix('G') {
+        (num, 1024 * 1024 * 1024)
+    } else if let Some(num) = size_str.strip_suffix('M') {
+        (num, 1024 * 1024)
+    } else if let Some(num) = size_str.strip_suffix('K') {
+        (num, 1024)
+    } else if let Some(num) = size_str.strip_suffix('B') {
+        (num, 1)
+    } else {
+        (&*size_str, 1)
+    };
+    let number: u64 = number_str
+        .parse()
+        .map_err(|_| color_eyre::eyre::eyre!("Invalid number in size: {}", number_str))?;
+    Ok(number * multiplier)
 }
