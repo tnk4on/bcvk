@@ -5,6 +5,7 @@ use color_eyre::Result;
 use std::io::Write;
 
 use crate::run_ephemeral_windows::{self, EphemeralVmMetadata, RunEphemeralOpts};
+use crate::vm_helpers::{run_ssh_command, run_ssh_interactive};
 
 #[derive(clap::Parser, Debug)]
 pub struct RunEphemeralSshOpts {
@@ -79,12 +80,11 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
 
     let key_path = std::path::Path::new(&vm.ssh_key);
     if args.is_empty() {
-        run_ephemeral_windows::run_ssh_interactive(vm.ssh_port, key_path, "root")?;
+        run_ssh_interactive(vm.ssh_port, key_path, "root")?;
     } else {
         let combined = shlex::try_join(args.iter().map(|s| s.as_str()))
             .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH command: {}", e))?;
-        let status =
-            run_ephemeral_windows::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
+        let status = run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
         if !status.success() {
             std::process::exit(status.code().unwrap_or(1));
         }

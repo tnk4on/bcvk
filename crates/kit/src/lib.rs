@@ -31,3 +31,6 @@ pub mod run_ephemeral_windows;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod to_disk_windows;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
+pub mod vm_helpers;

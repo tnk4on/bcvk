@@ -70,6 +70,8 @@ mod hyperv;
 mod run_ephemeral_windows;
 #[cfg(target_os = "windows")]
 mod to_disk_windows;
+#[cfg(target_os = "windows")]
+mod vm_helpers;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]

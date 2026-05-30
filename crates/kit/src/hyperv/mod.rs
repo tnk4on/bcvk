@@ -214,9 +214,8 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
         if ssh {
             println!("Connecting to running VM...");
             let key_path = std::path::Path::new(&meta.ssh_key);
-            crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
-            let status =
-                crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
+            crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+            let status = crate::vm_helpers::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
             std::process::exit(status.code().unwrap_or(1));
         }
         if use_gui {
@@ -239,9 +238,8 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     if ssh {
         println!("Connecting to running VM...");
         let key_path = std::path::Path::new(&meta.ssh_key);
-        crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
-        let status =
-            crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
+        crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+        let status = crate::vm_helpers::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
         std::process::exit(status.code().unwrap_or(1));
     }
     println!("Use 'bcvk vm ssh {}' to connect.", name);
@@ -319,7 +317,7 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         }
 
         let key_path = std::path::Path::new(&meta.ssh_key);
-        crate::run_ephemeral_windows::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+        crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
         tracing::info!("persistent VM '{}': SSH ready", name);
 
         loop {
