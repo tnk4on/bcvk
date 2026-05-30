@@ -595,6 +595,11 @@ unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
         let err = ws::WSAGetLastError();
         const WSAEWOULDBLOCK: i32 = 10035;
         if err.0 != WSAEWOULDBLOCK {
+            debug!(
+                "hvsock_connect: immediate error WSA {} ({})",
+                err.0,
+                io::Error::from_raw_os_error(err.0)
+            );
             ws::closesocket(sock);
             return Err(io::Error::from_raw_os_error(err.0).into());
         }
@@ -607,6 +612,11 @@ unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
         };
         let n = ws::select(0, None, Some(&mut wfds), None, Some(&timeout));
         if n <= 0 {
+            let select_err = if n < 0 { ws::WSAGetLastError().0 } else { 0 };
+            debug!(
+                "hvsock_connect: select returned {} (WSA err {}, timeout 1s)",
+                n, select_err
+            );
             ws::closesocket(sock);
             return Err(color_eyre::eyre::eyre!("connect timed out (1s)"));
         }
