@@ -233,16 +233,18 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
     if let Ok(state) = vm::get_vm_state(&vm_name) {
         if !state.is_empty() {
             if opts.replace {
-                // Replace mode: remove the existing VM
+                // Replace mode: remove VM definition only (keep disk)
                 println!("Replacing existing VM '{}'...", name);
-                if state.contains("Running") {
-                    super::stop(&name, false)?;
+                if let Ok(meta) = super::VmMetadata::load(&name) {
+                    super::kill_vm_service(&meta);
                 }
-                super::rm::run(super::rm::HypervRmOpts {
-                    name: name.clone(),
-                    force: true,
-                    stop: false,
-                })?;
+                if state.contains("Running") {
+                    vm::turn_off_vm(&vm_name)?;
+                }
+                vm::remove_vm(&vm_name)?;
+                vm::remove_internal_switch(&vm_name);
+                super::VmMetadata::remove(&name);
+                std::thread::sleep(std::time::Duration::from_secs(2));
             } else {
                 bail!("VM '{}' already exists. Use --replace to replace it.", name);
             }
