@@ -110,6 +110,8 @@ pub struct VmMetadata {
     #[serde(default)]
     pub service_pid: u32,
     #[serde(default)]
+    pub gui: bool,
+    #[serde(default)]
     pub state: String,
     #[serde(default)]
     pub labels: Vec<String>,
@@ -206,6 +208,7 @@ fn stop(name: &str, force: bool) -> Result<()> {
 fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     let mut meta = VmMetadata::load(name)?;
     let state = vm::get_vm_state(&meta.vm_name)?;
+    let use_gui = gui || meta.gui;
     if state.contains("Running") {
         println!("VM '{}' is already running", name);
         if ssh {
@@ -216,7 +219,7 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
                 crate::run_ephemeral_windows::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        if gui {
+        if use_gui {
             let _ = std::process::Command::new("vmconnect.exe")
                 .args(["localhost", &meta.vm_name])
                 .spawn();
@@ -225,9 +228,10 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     }
     println!("Starting VM '{}'...", name);
     vm::start_vm(&meta.vm_name)?;
+    meta.gui = use_gui;
     spawn_vm_service(name, &mut meta)?;
     println!("VM '{}' started successfully", name);
-    if gui {
+    if use_gui {
         let _ = std::process::Command::new("vmconnect.exe")
             .args(["localhost", &meta.vm_name])
             .spawn();
@@ -349,6 +353,7 @@ mod tests {
             switch_name: format!("bcvk-{}", name),
             subnet: 128,
             service_pid: 0,
+            gui: false,
             state: "running".to_string(),
             labels: vec![],
             port_mappings: vec![],

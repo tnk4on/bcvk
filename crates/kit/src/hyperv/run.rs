@@ -316,6 +316,7 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         switch_name: switch_name.clone(),
         subnet,
         service_pid: 0,
+        gui: opts.gui,
         state: String::new(),
         labels: opts.label.clone(),
         port_mappings: opts
