@@ -163,16 +163,10 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
     } else {
         // Container image: run to-disk to create VHDX
         let image = &opts.image_or_disk;
-        let name = opts.name.clone().unwrap_or_else(|| {
-            image
-                .rsplit('/')
-                .next()
-                .unwrap_or("vm")
-                .split(':')
-                .next()
-                .unwrap_or("vm")
-                .to_string()
-        });
+        let name = opts
+            .name
+            .clone()
+            .unwrap_or_else(|| crate::vm_helpers::sanitize_vm_name(image));
 
         // Remove existing VM before to-disk (VHDX may be in use)
         let vm_name = format!("bcvk-{}", name);
@@ -197,20 +191,31 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         let vhdx_path = vms_dir.join(format!("{}.vhdx", name));
 
         if !vhdx_path.exists() {
-            println!(
-                "Creating disk image from '{}' (this may take a few minutes)...",
-                image
-            );
-            let to_disk_opts = crate::to_disk_windows::ToDiskWindowsOpts {
-                image: image.clone(),
-                output: camino::Utf8PathBuf::from(vhdx_path.to_string_lossy().to_string()),
-                disk_size: opts.disk_size.clone(),
-                install: opts.install.clone(),
-                install_log: None,
-                label: vec![],
-                dry_run: false,
-            };
-            crate::to_disk_windows::run(to_disk_opts)?;
+            let digest = crate::vm_helpers::ensure_image_and_get_digest(image)?;
+            let base_disk = crate::to_disk_windows::find_or_create_base_disk(
+                image,
+                &digest,
+                &opts.install,
+                &opts.disk_size,
+                &None,
+                &[],
+            )?;
+            crate::to_disk_windows::create_differencing_vhdx(
+                &base_disk,
+                &vhdx_path.to_string_lossy(),
+            )?;
+            // Copy SSH key from base
+            let base_key = format!("{}.key", base_disk);
+            let vm_key = format!("{}.key", vhdx_path.to_string_lossy());
+            if std::path::Path::new(&base_key).exists() {
+                std::fs::copy(&base_key, &vm_key)?;
+                let base_pub = format!("{}.key.pub", base_disk);
+                let vm_pub = format!("{}.key.pub", vhdx_path.to_string_lossy());
+                if std::path::Path::new(&base_pub).exists() {
+                    std::fs::copy(&base_pub, &vm_pub)?;
+                }
+            }
+            println!("VM '{}' disk created from base: {}", name, base_disk);
         } else {
             println!("Using cached disk image: {}", vhdx_path.display());
         }
