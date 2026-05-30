@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::info;
 
-use crate::run_ephemeral_macos::detect_machine_name;
+use crate::vm_helpers::detect_machine_name;
 
 /// Path to the nbdkit EROFS plugin shared library inside podman machine.
 const NBDKIT_EROFS_PLUGIN_PATH: &str = "/var/tmp/bcvk/libnbdkit_erofs_plugin.so";

@@ -23,3 +23,5 @@ pub mod run_ephemeral_macos;
 pub mod to_disk_macos;
 #[cfg(target_os = "macos")]
 pub mod vfkit;
+#[cfg(target_os = "macos")]
+pub mod vm_helpers;

@@ -8,8 +8,9 @@ use tracing::info;
 
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
-    clear_xattr, expose_ssh_port, find_vfkit, generate_mac, start_gvproxy, wait_for_ssh,
+    clear_xattr, expose_ssh_port, find_vfkit, generate_mac, start_gvproxy,
 };
+use crate::vm_helpers::wait_for_ssh;
 
 /// Options for `vm start`.
 #[derive(Parser, Debug)]
@@ -53,9 +54,9 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
     let gui = opts.gui || meta.gui;
     let mut vfkit_args = vec![
         "--cpus".to_string(),
-        meta.cpus.to_string(),
+        meta.vcpus.to_string(),
         "--memory".to_string(),
-        meta.memory.to_string(),
+        meta.memory_mb.to_string(),
         "--bootloader".to_string(),
         format!("efi,variable-store={},create", meta.efi_store),
         "--device".to_string(),

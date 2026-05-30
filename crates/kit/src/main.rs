@@ -72,6 +72,8 @@ mod run_ephemeral_macos;
 mod to_disk_macos;
 #[cfg(target_os = "macos")]
 mod vfkit;
+#[cfg(target_os = "macos")]
+mod vm_helpers;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]

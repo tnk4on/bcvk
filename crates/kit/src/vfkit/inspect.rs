@@ -21,8 +21,8 @@ pub fn run(name: &str, json: bool) -> Result<()> {
     println!("Name:       {}", meta.name);
     println!("State:      {}", state);
     println!("Disk:       {}", meta.disk_image);
-    println!("CPUs:       {}", meta.cpus);
-    println!("Memory:     {} MiB", meta.memory);
+    println!("CPUs:       {}", meta.vcpus);
+    println!("Memory:     {} MiB", meta.memory_mb);
     println!("GUI:        {}", meta.gui);
     println!("Created:    {}", meta.created);
     println!();

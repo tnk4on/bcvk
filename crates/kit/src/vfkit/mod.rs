@@ -89,6 +89,9 @@ impl VmCommands {
 pub struct VmMetadata {
     /// VM name used as identifier.
     pub name: String,
+    /// Container image used to create this VM (None if created from disk directly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     /// Path to the disk image file.
     pub disk_image: String,
     /// PID of the vfkit process.
@@ -102,9 +105,9 @@ pub struct VmMetadata {
     /// SSH username for connecting to the VM.
     pub ssh_user: String,
     /// Number of vCPUs allocated.
-    pub cpus: u32,
+    pub vcpus: u32,
     /// Memory in megabytes.
-    pub memory: u32,
+    pub memory_mb: u32,
     /// Path to the EFI variable store file.
     pub efi_store: String,
     /// Path to the serial console log file.
@@ -187,14 +190,15 @@ mod tests {
     fn sample_vm_metadata(name: &str) -> VmMetadata {
         VmMetadata {
             name: name.to_string(),
+            image: None,
             disk_image: "/tmp/disk.raw".to_string(),
             vfkit_pid: 0,
             gvproxy_pid: 0,
             ssh_port: 2222,
             ssh_key: "/tmp/key".to_string(),
             ssh_user: "root".to_string(),
-            cpus: 2,
-            memory: 4096,
+            vcpus: 2,
+            memory_mb: 4096,
             efi_store: "/tmp/efi.fd".to_string(),
             serial_log: "/tmp/serial.log".to_string(),
             gui: false,
@@ -210,8 +214,8 @@ mod tests {
         let loaded: VmMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.name, "test-vm");
         assert_eq!(loaded.disk_image, "/tmp/disk.raw");
-        assert_eq!(loaded.cpus, 2);
-        assert_eq!(loaded.memory, 4096);
+        assert_eq!(loaded.vcpus, 2);
+        assert_eq!(loaded.memory_mb, 4096);
         assert_eq!(loaded.ssh_user, "root");
         assert_eq!(loaded.state, "running");
         assert!(!loaded.gui);

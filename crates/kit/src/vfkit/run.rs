@@ -11,8 +11,8 @@ use tracing::info;
 use super::VmMetadata;
 use crate::run_ephemeral_macos::{
     clear_xattr, expose_ssh_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy,
-    wait_for_ssh,
 };
+use crate::vm_helpers::{parse_memory_to_mb, wait_for_ssh};
 
 /// Options for `vm run`.
 #[derive(Parser, Debug)]
@@ -91,7 +91,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     );
 
     let vcpus = opts.vcpus.unwrap_or(2);
-    let memory_mb = crate::run_ephemeral_macos::parse_memory_to_mb(&opts.memory)?;
+    let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
     let mut vfkit_args = vec![
         "--cpus".to_string(),
@@ -147,14 +147,15 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
     let metadata = VmMetadata {
         name: vm_name.clone(),
+        image: None,
         disk_image: opts.disk.clone(),
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
         ssh_port,
         ssh_key: ssh_key_path.clone(),
         ssh_user: opts.ssh_user.clone(),
-        cpus: vcpus,
-        memory: memory_mb,
+        vcpus,
+        memory_mb,
         efi_store: efi_store.to_string_lossy().to_string(),
         serial_log: serial_log.to_string_lossy().to_string(),
         gui: opts.gui,
