@@ -1,7 +1,9 @@
-//! Install bootc images to VHDX disk using Hyper-V ephemeral VMs (Windows).
+//! Install bootc images to VHDX disk using podman machine (Windows).
 //!
 //! Creates a VHDX disk image with `bootc install to-disk` running inside
-//! an ephemeral VM. SSH public key is embedded via `--root-ssh-authorized-keys`.
+//! the podman machine. Supports both Hyper-V and WSL2 backends:
+//! - Hyper-V: hot-plugs VHDX via Add-VMHardDiskDrive
+//! - WSL: attaches VHDX via `wsl --mount --vhd --bare`
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -68,8 +70,9 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .trim_start_matches(r"\\?\")
         .to_string();
 
-    // Phase 1: Detect podman machine
+    // Phase 1: Detect podman machine and backend type
     let machine = crate::run_ephemeral_windows::detect_machine_name()?;
+    let vmtype = crate::run_ephemeral_windows::detect_podman_vmtype()?;
     let inspect_out = Command::new("podman")
         .args(["machine", "inspect", &machine])
         .stdout(Stdio::piped())
@@ -82,7 +85,10 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     let rootful =
         inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
     let run_cmd = if rootful { "sudo podman" } else { "podman" };
-    info!("podman machine: {} (rootful={})", machine, rootful);
+    info!(
+        "podman machine: {} (rootful={}, type={})",
+        machine, rootful, vmtype
+    );
 
     // Phase 2: Generate SSH keypair
     let key_path = format!("{}.key", output_abs);
@@ -128,28 +134,13 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         );
     }
 
-    // Phase 4: Hot-plug VHDX to podman machine
-    info!("attaching VHDX to podman machine...");
-    let ps_attach = Command::new("powershell")
-        .args([
-            "-NoProfile", "-Command",
-            &format!(
-                "Add-VMHardDiskDrive -VMName '{}' -Path '{}' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1",
-                machine, output_abs
-            ),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()?;
-    if !ps_attach.status.success() {
-        if let Err(e) = std::fs::remove_file(&output_abs) {
-            tracing::debug!("failed to clean up VHDX: {}", e);
-        }
-        bail!(
-            "Failed to attach VHDX: {}",
-            String::from_utf8_lossy(&ps_attach.stderr).trim()
-        );
-    }
+    // Phase 4: Attach VHDX to podman machine (backend-specific)
+    let disk_device = if vmtype == "wsl" {
+        attach_vhdx_wsl(&output_abs, &machine)?
+    } else {
+        attach_vhdx_hyperv(&output_abs, &machine)?
+    };
+    info!("disk device inside machine: {}", disk_device);
 
     // Phase 5: Transfer SSH key + run bootc install in podman machine
     info!("installing bootc to disk...");
@@ -173,8 +164,6 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Write install script to temp file, then transfer via stdin to avoid
-    // multi-layer SSH escaping issues with base64/special characters
     let install_script = format!(
         "#!/bin/bash\nset -euo pipefail\n\
          printf '%s' '{b64}' | base64 -d > /dev/shm/bcvk-ssh-key.pub\n\
@@ -185,7 +174,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
          {image} \
          bootc install to-disk --wipe --generic-image --skip-fetch-check \
          --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
-         {args} /dev/sdb\n\
+         {args} {disk}\n\
          rm -f /dev/shm/bcvk-ssh-key.pub\n",
         b64 = pub_key_b64,
         run = run_cmd,
@@ -193,9 +182,9 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         labels = label_args,
         image = opts.image,
         args = bootc_args,
+        disk = disk_device,
     );
 
-    // Write script to temp file and pipe it via stdin to avoid escaping issues
     let script_path = std::env::temp_dir().join("bcvk-todisk-install.sh");
     std::fs::write(&script_path, &install_script)?;
 
@@ -211,20 +200,10 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     }
 
     // Phase 6: Detach VHDX from podman machine (always, even on failure)
-    info!("detaching VHDX from podman machine...");
-    if let Err(e) = Command::new("powershell")
-        .args([
-            "-NoProfile", "-Command",
-            &format!(
-                "Remove-VMHardDiskDrive -VMName '{}' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1",
-                machine
-            ),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        tracing::warn!("failed to detach VHDX: {}", e);
+    if vmtype == "wsl" {
+        detach_vhdx_wsl(&output_abs);
+    } else {
+        detach_vhdx_hyperv(&machine);
     }
 
     match install_result {
@@ -249,6 +228,111 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
             bail!("failed to run install command: {}", e);
         }
     }
+}
+
+/// Attach VHDX to Hyper-V podman machine via Add-VMHardDiskDrive.
+/// Returns the disk device path inside the machine (/dev/sdb).
+fn attach_vhdx_hyperv(vhdx_path: &str, machine: &str) -> Result<String> {
+    info!("attaching VHDX to Hyper-V machine...");
+    let ps_attach = Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "Add-VMHardDiskDrive -VMName '{}' -Path '{}' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1",
+                machine, vhdx_path
+            ),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !ps_attach.status.success() {
+        if let Err(e) = std::fs::remove_file(vhdx_path) {
+            tracing::debug!("failed to clean up VHDX: {}", e);
+        }
+        bail!(
+            "Failed to attach VHDX: {}",
+            String::from_utf8_lossy(&ps_attach.stderr).trim()
+        );
+    }
+    Ok("/dev/sdb".to_string())
+}
+
+/// Detach VHDX from Hyper-V podman machine.
+fn detach_vhdx_hyperv(machine: &str) {
+    info!("detaching VHDX from Hyper-V machine...");
+    if let Err(e) = Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "Remove-VMHardDiskDrive -VMName '{}' -ControllerType SCSI -ControllerNumber 0 -ControllerLocation 1",
+                machine
+            ),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        tracing::warn!("failed to detach VHDX: {}", e);
+    }
+}
+
+/// Attach VHDX to WSL podman machine via `wsl --mount --vhd --bare`.
+/// Returns the disk device path inside WSL (detected via lsblk).
+fn attach_vhdx_wsl(vhdx_path: &str, machine: &str) -> Result<String> {
+    info!("attaching VHDX to WSL machine via wsl --mount...");
+
+    // Snapshot block devices before mount
+    let before = list_wsl_block_devices(machine)?;
+
+    let mount_result = Command::new("wsl")
+        .args(["--mount", "--vhd", vhdx_path, "--bare"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !mount_result.status.success() {
+        if let Err(e) = std::fs::remove_file(vhdx_path) {
+            tracing::debug!("failed to clean up VHDX: {}", e);
+        }
+        bail!("wsl --mount failed (ensure Windows 11 22H2+)");
+    }
+
+    // Detect new block device by diffing before/after
+    let after = list_wsl_block_devices(machine)?;
+    let new_devs: Vec<_> = after.iter().filter(|d| !before.contains(d)).collect();
+
+    if new_devs.is_empty() {
+        bail!("wsl --mount succeeded but no new block device detected");
+    }
+    let dev = format!("/dev/{}", new_devs[0]);
+    info!("WSL: detected new block device: {}", dev);
+    Ok(dev)
+}
+
+/// Detach VHDX from WSL.
+fn detach_vhdx_wsl(vhdx_path: &str) {
+    info!("detaching VHDX from WSL...");
+    let _ = Command::new("wsl")
+        .args(["--unmount", vhdx_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// List block device names (e.g. ["sda", "sdb", "sdc"]) inside WSL machine.
+fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
+    let output = Command::new("podman")
+        .args([
+            "machine", "ssh", machine, "--", "lsblk", "-dn", "-o", "NAME",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    let names = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(names)
 }
 
 fn parse_size(s: &str) -> Result<u64> {
