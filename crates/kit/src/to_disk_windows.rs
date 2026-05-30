@@ -188,7 +188,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     std::fs::write(&script_path, &install_script)?;
 
     let install_result = Command::new("podman")
-        .args(["machine", "ssh", &machine, "--", "/bin/bash"])
+        .args(["machine", "ssh", &machine, "--", "bash", "-s"])
         .stdin(Stdio::from(std::fs::File::open(&script_path)?))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
