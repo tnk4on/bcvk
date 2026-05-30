@@ -4,14 +4,30 @@
 //! the podman machine. Supports both Hyper-V and WSL2 backends:
 //! - Hyper-V: hot-plugs VHDX via Add-VMHardDiskDrive
 //! - WSL: attaches VHDX via `wsl --mount --vhd --bare`
+//!
+//! Caching: base disks are stored by content hash and reused.
+//! VM-specific disks use VHDX differencing (backing file) for CoW.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
 use clap::Parser;
 use color_eyre::{eyre::bail, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::info;
+
+use crate::vm_helpers::{generate_ssh_keypair, remove_file_if_exists};
+
+/// Cache metadata stored alongside base VHDX as `.meta.json`.
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheMetadata {
+    cache_hash: String,
+    image_digest: String,
+    source_image: String,
+    version: u32,
+}
 
 /// Options for `to-disk` on Windows.
 #[derive(Parser, Debug)]
@@ -43,45 +59,151 @@ pub struct ToDiskWindowsOpts {
     pub dry_run: bool,
 }
 
-pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
-    if opts.dry_run {
-        if opts.output.exists() {
-            println!("Disk image already exists: {}", opts.output);
-            println!("Would reuse existing disk (no cache validation on Windows yet)");
+fn compute_cache_hash(
+    image_digest: &str,
+    source_image: &str,
+    install: &crate::install_options::InstallOptions,
+) -> String {
+    let inputs = serde_json::json!({
+        "image_digest": image_digest,
+        "source_image": source_image,
+        "filesystem": install.filesystem,
+        "root_size": install.root_size,
+        "target_transport": install.target_transport,
+        "composefs_backend": install.composefs_backend,
+        "kernel_args": install.karg,
+        "version": 1u32,
+    });
+    let json = serde_json::to_string(&inputs).expect("serialize cache inputs");
+    let hash = Sha256::digest(json.as_bytes());
+    format!("sha256:{:x}", hash)
+}
+
+fn meta_json_path(vhdx_path: &str) -> PathBuf {
+    PathBuf::from(format!("{}.meta.json", vhdx_path))
+}
+
+fn read_cache_metadata(vhdx_path: &str) -> Option<CacheMetadata> {
+    let path = meta_json_path(vhdx_path);
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn write_cache_metadata(vhdx_path: &str, meta: &CacheMetadata) -> Result<()> {
+    let path = meta_json_path(vhdx_path);
+    let json = serde_json::to_string_pretty(meta)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Base disk directory for caching.
+fn base_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
+        .join("bcvk")
+        .join("base")
+}
+
+/// Find or create a cached base disk for the given image + install options.
+/// Returns the path to the base VHDX.
+pub fn find_or_create_base_disk(
+    source_image: &str,
+    image_digest: &str,
+    install: &crate::install_options::InstallOptions,
+    disk_size: &str,
+    install_log: &Option<String>,
+    labels: &[String],
+) -> Result<String> {
+    let cache_hash = compute_cache_hash(image_digest, source_image, install);
+    let short_hash: String = cache_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&cache_hash)
+        .chars()
+        .take(16)
+        .collect();
+
+    let base = base_dir();
+    std::fs::create_dir_all(&base)?;
+    let base_disk_name = format!("bootc-base-{}.vhdx", short_hash);
+    let base_disk_path = base.join(&base_disk_name);
+    let base_disk_str = base_disk_path.to_string_lossy().to_string();
+
+    // Check existing cache
+    if base_disk_path.exists() {
+        if let Some(meta) = read_cache_metadata(&base_disk_str) {
+            if meta.cache_hash == cache_hash {
+                info!("reusing cached base disk: {}", base_disk_str);
+                return Ok(base_disk_str);
+            }
+            info!("base disk cache hash mismatch, recreating");
         } else {
-            println!("Would create new disk image: {}", opts.output);
+            info!("base disk has no cache metadata, recreating");
         }
-        return Ok(());
+        std::fs::remove_file(&base_disk_path)?;
+        remove_file_if_exists(&meta_json_path(&base_disk_str));
     }
 
-    if opts.output.exists() {
-        bail!("output file already exists: {}", opts.output);
+    info!("creating base disk: {}", base_disk_str);
+    create_base_disk(
+        &base_disk_str,
+        source_image,
+        install,
+        disk_size,
+        install_log,
+        labels,
+    )?;
+
+    // Write cache metadata
+    write_cache_metadata(
+        &base_disk_str,
+        &CacheMetadata {
+            cache_hash,
+            image_digest: image_digest.to_string(),
+            source_image: source_image.to_string(),
+            version: 1,
+        },
+    )?;
+
+    Ok(base_disk_str)
+}
+
+/// Create a differencing VHDX from a base disk (CoW clone).
+pub fn create_differencing_vhdx(base_path: &str, child_path: &str) -> Result<()> {
+    info!(
+        "creating differencing VHDX: {} (parent: {})",
+        child_path, base_path
+    );
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "New-VHD -Path '{}' -ParentPath '{}' -Differencing | Out-Null; Write-Host 'OK'",
+                child_path, base_path
+            ),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "New-VHD differencing failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
+    Ok(())
+}
 
-    let parent = opts
-        .output
-        .parent()
-        .map(|p| p.as_std_path())
-        .unwrap_or(Path::new("."));
-    let output_abs = std::fs::canonicalize(parent)?
-        .join(opts.output.file_name().unwrap())
-        .to_string_lossy()
-        .to_string()
-        .trim_start_matches(r"\\?\")
-        .to_string();
-
-    // Phase 1: Detect podman machine and backend type
+fn create_base_disk(
+    output_path: &str,
+    source_image: &str,
+    install: &crate::install_options::InstallOptions,
+    disk_size: &str,
+    install_log: &Option<String>,
+    labels: &[String],
+) -> Result<()> {
     let machine = crate::vm_helpers::detect_machine_name()?;
     let vmtype = crate::vm_helpers::detect_podman_vmtype()?;
-    let inspect_out = Command::new("podman")
-        .args(["machine", "inspect", &machine])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-    let inspect_json = String::from_utf8_lossy(&inspect_out.stdout);
-    if !inspect_json.contains("\"Running\"") && !inspect_json.contains("\"running\"") {
-        bail!("no podman machine is running");
-    }
     let rootful = crate::vm_helpers::is_machine_rootful(&machine);
     let run_cmd = if rootful { "sudo podman" } else { "podman" };
     info!(
@@ -89,38 +211,20 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         machine, rootful, vmtype
     );
 
-    // Phase 2: Generate SSH keypair
-    let key_path = format!("{}.key", output_abs);
-    let pub_path = format!("{}.key.pub", output_abs);
-    info!("generating SSH keypair: {}", key_path);
-    if let Err(e) = std::fs::remove_file(&key_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!("failed to remove old key {}: {}", key_path, e);
-        }
-    }
-    if let Err(e) = std::fs::remove_file(&pub_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!("failed to remove old pubkey {}: {}", pub_path, e);
-        }
-    }
-    let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-q", "-f", &key_path])
-        .status()?;
-    if !status.success() {
-        bail!("ssh-keygen failed");
-    }
-    let pub_key_content = std::fs::read_to_string(&pub_path)?.trim().to_string();
+    // Generate SSH keypair
+    let key_path = PathBuf::from(format!("{}.key", output_path));
+    let pub_key_content = generate_ssh_keypair(&key_path)?;
 
-    // Phase 3: Create target VHDX
-    let size_bytes = parse_size(&opts.disk_size)?;
-    info!("creating VHDX: {} ({} bytes)", output_abs, size_bytes);
+    // Create target VHDX
+    let size_bytes = parse_size(disk_size)?;
+    info!("creating VHDX: {} ({} bytes)", output_path, size_bytes);
     let ps_result = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
             &format!(
                 "New-VHD -Path '{}' -SizeBytes {} -Dynamic | Out-Null; Write-Host 'OK'",
-                output_abs, size_bytes
+                output_path, size_bytes
             ),
         ])
         .stdout(Stdio::piped())
@@ -133,31 +237,29 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         );
     }
 
-    // Phase 4: Attach VHDX to podman machine (backend-specific)
+    // Attach VHDX to podman machine (backend-specific)
     let disk_device = if vmtype == "wsl" {
-        attach_vhdx_wsl(&output_abs, &machine)?
+        attach_vhdx_wsl(output_path, &machine)?
     } else {
-        attach_vhdx_hyperv(&output_abs, &machine)?
+        attach_vhdx_hyperv(output_path, &machine)?
     };
     info!("disk device inside machine: {}", disk_device);
 
-    // Phase 5: Transfer SSH key + run bootc install in podman machine
+    // Run bootc install
     info!("installing bootc to disk...");
     let pub_key_b64 = data_encoding::BASE64.encode(pub_key_content.as_bytes());
-    let mut install_opts = opts.install.clone();
+    let mut install_opts = install.clone();
     if install_opts.filesystem.is_none() {
         install_opts.filesystem = Some("ext4".to_string());
     }
     let bootc_args = install_opts.to_bootc_args().join(" ");
 
-    let install_log_arg = opts
-        .install_log
+    let install_log_arg = install_log
         .as_deref()
         .map(|v| format!("--env=RUST_LOG={}", v))
         .unwrap_or_default();
 
-    let label_args = opts
-        .label
+    let label_args = labels
         .iter()
         .map(|l| format!("--label={}", l))
         .collect::<Vec<_>>()
@@ -179,7 +281,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         run = run_cmd,
         install_log = install_log_arg,
         labels = label_args,
-        image = opts.image,
+        image = source_image,
         args = bootc_args,
         disk = disk_device,
     );
@@ -194,43 +296,106 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .stderr(Stdio::inherit())
         .status();
 
-    if let Err(e) = std::fs::remove_file(&script_path) {
-        tracing::debug!("failed to remove temp script: {}", e);
-    }
+    remove_file_if_exists(&script_path);
 
-    // Phase 6: Detach VHDX from podman machine (always, even on failure)
+    // Detach VHDX (always, even on failure)
     if vmtype == "wsl" {
-        detach_vhdx_wsl(&output_abs);
+        detach_vhdx_wsl(output_path);
     } else {
         detach_vhdx_hyperv(&machine);
     }
 
     match install_result {
         Ok(status) if status.success() => {
-            info!("installation completed: {}", output_abs);
-            println!("Disk image created: {}", output_abs);
-            println!("SSH key: {}", key_path);
-            println!("\nTo run:");
-            println!("  bcvk vm run --name myvm {}", output_abs);
+            info!("installation completed: {}", output_path);
             Ok(())
         }
         Ok(status) => {
-            if let Err(e) = std::fs::remove_file(&output_abs) {
-                tracing::debug!("failed to clean up VHDX: {}", e);
-            }
+            remove_file_if_exists(Path::new(output_path));
             bail!("installation failed (exit code: {:?})", status.code());
         }
         Err(e) => {
-            if let Err(e) = std::fs::remove_file(&output_abs) {
-                tracing::debug!("failed to clean up VHDX: {}", e);
-            }
+            remove_file_if_exists(Path::new(output_path));
             bail!("failed to run install command: {}", e);
         }
     }
 }
 
-/// Attach VHDX to Hyper-V podman machine via Add-VMHardDiskDrive.
-/// Returns the disk device path inside the machine (/dev/sdb).
+pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
+    // Get image digest for caching
+    let image_digest = crate::vm_helpers::ensure_image_and_get_digest(&opts.image)?;
+
+    if opts.dry_run {
+        let cache_hash = compute_cache_hash(&image_digest, &opts.image, &opts.install);
+        let short_hash: String = cache_hash
+            .strip_prefix("sha256:")
+            .unwrap_or(&cache_hash)
+            .chars()
+            .take(16)
+            .collect();
+        let base_path = base_dir().join(format!("bootc-base-{}.vhdx", short_hash));
+
+        if base_path.exists() {
+            if let Some(meta) = read_cache_metadata(&base_path.to_string_lossy()) {
+                if meta.cache_hash == cache_hash {
+                    println!("Would reuse cached base disk: {}", base_path.display());
+                    if opts.output.exists() {
+                        println!("Output already exists: {}", opts.output);
+                    } else {
+                        println!(
+                            "Would create differencing disk: {} (from base)",
+                            opts.output
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+            println!("Would regenerate base disk (hash mismatch)");
+        } else {
+            println!("Would create new base disk and output: {}", opts.output);
+        }
+        return Ok(());
+    }
+
+    // Find or create base disk (with caching)
+    let base_disk = find_or_create_base_disk(
+        &opts.image,
+        &image_digest,
+        &opts.install,
+        &opts.disk_size,
+        &opts.install_log,
+        &opts.label,
+    )?;
+
+    // Create output as differencing disk from base
+    let output_str = opts.output.as_str();
+    if opts.output.exists() {
+        bail!("output file already exists: {}", opts.output);
+    }
+    create_differencing_vhdx(&base_disk, output_str)?;
+
+    // Copy SSH key from base to output
+    let base_key = format!("{}.key", base_disk);
+    let output_key = format!("{}.key", output_str);
+    let output_pub = format!("{}.key.pub", output_str);
+    if Path::new(&base_key).exists() {
+        std::fs::copy(&base_key, &output_key)?;
+        let base_pub = format!("{}.key.pub", base_disk);
+        if Path::new(&base_pub).exists() {
+            std::fs::copy(&base_pub, &output_pub)?;
+        }
+    }
+
+    println!("Disk image created: {}", output_str);
+    println!("  Base: {}", base_disk);
+    println!("SSH key: {}", output_key);
+    println!("\nTo run:");
+    println!("  bcvk vm run --name myvm {}", output_str);
+    Ok(())
+}
+
+// --- Disk attach/detach helpers ---
+
 fn attach_vhdx_hyperv(vhdx_path: &str, machine: &str) -> Result<String> {
     info!("attaching VHDX to Hyper-V machine...");
     let ps_attach = Command::new("powershell")
@@ -245,9 +410,7 @@ fn attach_vhdx_hyperv(vhdx_path: &str, machine: &str) -> Result<String> {
         .stderr(Stdio::piped())
         .output()?;
     if !ps_attach.status.success() {
-        if let Err(e) = std::fs::remove_file(vhdx_path) {
-            tracing::debug!("failed to clean up VHDX: {}", e);
-        }
+        remove_file_if_exists(Path::new(vhdx_path));
         bail!(
             "Failed to attach VHDX: {}",
             String::from_utf8_lossy(&ps_attach.stderr).trim()
@@ -256,7 +419,6 @@ fn attach_vhdx_hyperv(vhdx_path: &str, machine: &str) -> Result<String> {
     Ok("/dev/sdb".to_string())
 }
 
-/// Detach VHDX from Hyper-V podman machine.
 fn detach_vhdx_hyperv(machine: &str) {
     info!("detaching VHDX from Hyper-V machine...");
     if let Err(e) = Command::new("powershell")
@@ -275,30 +437,20 @@ fn detach_vhdx_hyperv(machine: &str) {
     }
 }
 
-/// Attach VHDX to WSL podman machine via `wsl --mount --vhd --bare`.
-/// Returns the disk device path inside WSL (detected via lsblk).
 fn attach_vhdx_wsl(vhdx_path: &str, machine: &str) -> Result<String> {
     info!("attaching VHDX to WSL machine via wsl --mount...");
-
-    // Snapshot block devices before mount
     let before = list_wsl_block_devices(machine)?;
-
     let mount_result = Command::new("wsl")
         .args(["--mount", "--vhd", vhdx_path, "--bare"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()?;
     if !mount_result.status.success() {
-        if let Err(e) = std::fs::remove_file(vhdx_path) {
-            tracing::debug!("failed to clean up VHDX: {}", e);
-        }
+        remove_file_if_exists(Path::new(vhdx_path));
         bail!("wsl --mount failed (ensure Windows 11 22H2+)");
     }
-
-    // Detect new block device by diffing before/after
     let after = list_wsl_block_devices(machine)?;
     let new_devs: Vec<_> = after.iter().filter(|d| !before.contains(d)).collect();
-
     if new_devs.is_empty() {
         bail!("wsl --mount succeeded but no new block device detected");
     }
@@ -307,7 +459,6 @@ fn attach_vhdx_wsl(vhdx_path: &str, machine: &str) -> Result<String> {
     Ok(dev)
 }
 
-/// Detach VHDX from WSL.
 fn detach_vhdx_wsl(vhdx_path: &str) {
     info!("detaching VHDX from WSL...");
     let _ = Command::new("wsl")
@@ -317,7 +468,6 @@ fn detach_vhdx_wsl(vhdx_path: &str) {
         .status();
 }
 
-/// List block device names (e.g. ["sda", "sdb", "sdc"]) inside WSL machine.
 fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
     let output = Command::new("podman")
         .args([
