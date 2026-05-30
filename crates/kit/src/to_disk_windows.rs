@@ -82,8 +82,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     if !inspect_json.contains("\"Running\"") && !inspect_json.contains("\"running\"") {
         bail!("no podman machine is running");
     }
-    let rootful =
-        inspect_json.contains("\"Rootful\": true") || inspect_json.contains("\"Rootful\":true");
+    let rootful = crate::run_ephemeral_windows::is_machine_rootful(&machine);
     let run_cmd = if rootful { "sudo podman" } else { "podman" };
     info!(
         "podman machine: {} (rootful={}, type={})",
