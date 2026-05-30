@@ -402,28 +402,15 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
         Ok(guid)
     });
 
-    // Pull via host podman (has registry auth), then mount via SSH
-    let image_pull = opts.image.clone();
+    // Ensure image is pulled and get digest (before parallel mount)
+    let digest_short = ensure_image_and_get_digest(&opts.image)?;
+    info!("image digest: {}...", digest_short);
+
+    // Mount image via SSH to podman machine
     let ps_mount = ctx.podman_ssh.clone();
     let image_mount = opts.image.clone();
     let rootful = ctx.rootful;
     let mount_handle = std::thread::spawn(move || -> Result<String> {
-        // Pull on host side (uses podman machine connection with registry auth)
-        let exists = Command::new("podman")
-            .args(["image", "exists", &image_pull])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !exists.success() {
-            info!("pulling image {}...", image_pull);
-            let pull = Command::new("podman")
-                .args(["pull", &image_pull])
-                .status()?;
-            if !pull.success() {
-                bail!("failed to pull image: {}", image_pull);
-            }
-        }
-        // Mount via SSH (image already pulled above)
         let pfx = if rootful {
             "sudo podman"
         } else {
@@ -453,8 +440,6 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     let podman_vm_guid = guid_handle.join().map_err(|_| eyre!("guid panicked"))??;
     let merged_path = mount_handle.join().map_err(|_| eyre!("mount panicked"))??;
     info!("image mounted at: {}", merged_path);
-    // Get digest after mount (pull is done by mount_handle, avoids parallel pull race)
-    let digest_short = boot_files::get_image_digest(&opts.image)?;
 
     Ok(Phase0Result {
         ssh_pubkey,
@@ -868,6 +853,36 @@ pub fn is_machine_rootful(machine: &str) -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false)
+}
+
+fn ensure_image_and_get_digest(image: &str) -> Result<String> {
+    let status = Command::new("podman")
+        .args(["image", "exists", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        info!("pulling image {}...", image);
+        if !Command::new("podman")
+            .args(["pull", image])
+            .status()?
+            .success()
+        {
+            bail!("failed to pull image: {}", image);
+        }
+    }
+    let output = Command::new("podman")
+        .args(["image", "inspect", "--format", "{{.Digest}}", image])
+        .output()?;
+    let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if digest.is_empty() {
+        bail!("failed to get image digest: {}", image);
+    }
+    Ok(digest
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(16)
+        .collect())
 }
 
 pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
