@@ -111,24 +111,6 @@ impl PodmanSsh {
     }
 }
 
-/// Get image digest (image must already exist locally).
-pub fn get_image_digest(image: &str) -> Result<String> {
-    let output = Command::new("podman")
-        .args(["image", "inspect", "--format", "{{.Digest}}", image])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-    let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if digest.is_empty() {
-        bail!("failed to get image digest: {}", image);
-    }
-    Ok(digest
-        .trim_start_matches("sha256:")
-        .chars()
-        .take(16)
-        .collect())
-}
-
 /// Cache directory for boot files, keyed by short digest.
 fn cache_dir_from_digest(digest_short: &str) -> PathBuf {
     dirs::data_local_dir()
