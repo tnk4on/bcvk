@@ -71,8 +71,8 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
         .to_string();
 
     // Phase 1: Detect podman machine and backend type
-    let machine = crate::run_ephemeral_windows::detect_machine_name()?;
-    let vmtype = crate::run_ephemeral_windows::detect_podman_vmtype()?;
+    let machine = crate::vm_helpers::detect_machine_name()?;
+    let vmtype = crate::vm_helpers::detect_podman_vmtype()?;
     let inspect_out = Command::new("podman")
         .args(["machine", "inspect", &machine])
         .stdout(Stdio::piped())
@@ -82,7 +82,7 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     if !inspect_json.contains("\"Running\"") && !inspect_json.contains("\"running\"") {
         bail!("no podman machine is running");
     }
-    let rootful = crate::run_ephemeral_windows::is_machine_rootful(&machine);
+    let rootful = crate::vm_helpers::is_machine_rootful(&machine);
     let run_cmd = if rootful { "sudo podman" } else { "podman" };
     info!(
         "podman machine: {} (rootful={}, type={})",

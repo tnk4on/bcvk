@@ -350,15 +350,15 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
 
     if opts.ssh_wait {
         let key_path = std::path::Path::new(&ssh_key);
-        crate::run_ephemeral_windows::wait_for_ssh(ssh_port, key_path, "root")?;
+        crate::vm_helpers::wait_for_ssh(ssh_port, key_path, "root")?;
         println!("Ready; use bcvk vm ssh to connect");
         return Ok(());
     }
 
     if opts.ssh {
         let key_path = std::path::Path::new(&ssh_key);
-        crate::run_ephemeral_windows::wait_for_ssh(ssh_port, key_path, "root")?;
-        let status = crate::run_ephemeral_windows::run_ssh_interactive(ssh_port, key_path, "root")?;
+        crate::vm_helpers::wait_for_ssh(ssh_port, key_path, "root")?;
+        let status = crate::vm_helpers::run_ssh_interactive(ssh_port, key_path, "root")?;
         std::process::exit(status.code().unwrap_or(1));
     }
 

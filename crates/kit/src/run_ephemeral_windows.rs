@@ -11,17 +11,18 @@ use color_eyre::{
     Result,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::hyperv::boot_files;
 use crate::hyperv::dhcp::DhcpServer;
 use crate::hyperv::ssh_forward::SshForward;
 use crate::hyperv::vm;
-
-const SSH_TIMEOUT: Duration = Duration::from_secs(240);
+use crate::vm_helpers::{
+    default_vcpus, detect_machine_name, detect_podman_vmtype, ensure_image_and_get_digest,
+    is_machine_rootful, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
+};
 
 const VM_PREFIX: &str = "bcvk-ephemeral-";
 
@@ -213,25 +214,6 @@ pub struct RunEphemeralOpts {
     /// Enable debug mode
     #[clap(long)]
     pub debug: bool,
-}
-
-/// Parse memory specification string (e.g. "4G", "2048M") to megabytes.
-pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
-    let s = s.trim();
-    if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
-        Ok((n.parse::<f64>()? * 1024.0) as u32)
-    } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
-        Ok(n.parse::<f64>()? as u32)
-    } else {
-        Ok(s.parse::<u32>()?)
-    }
-}
-
-fn default_vcpus() -> u32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(2)
-        .min(4)
 }
 
 // --- Main entry point ---
@@ -823,165 +805,13 @@ fn stop_nbdkit_container(name: &str) {
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---
 
-pub fn detect_machine_name() -> Result<String> {
-    let output = Command::new("podman")
-        .args(["machine", "info", "--format", "{{.Host.CurrentMachine}}"])
-        .output()?;
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() {
-        bail!("no podman machine is running");
-    }
-    Ok(name)
-}
-
-pub fn detect_podman_vmtype() -> Result<String> {
-    let output = Command::new("podman")
-        .args(["machine", "info", "--format", "{{.Host.VMType}}"])
-        .output()?;
-    let vmtype = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_lowercase();
-    if vmtype.is_empty() {
-        bail!("could not detect podman machine VM type");
-    }
-    Ok(vmtype)
-}
-
-pub fn is_machine_rootful(machine: &str) -> bool {
-    Command::new("podman")
-        .args(["machine", "ssh", machine, "id", "-u"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
-}
-
-fn ensure_image_and_get_digest(image: &str) -> Result<String> {
-    let status = Command::new("podman")
-        .args(["image", "exists", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !status.success() {
-        info!("pulling image {}...", image);
-        if !Command::new("podman")
-            .args(["pull", image])
-            .status()?
-            .success()
-        {
-            bail!("failed to pull image: {}", image);
-        }
-    }
-    let output = Command::new("podman")
-        .args(["image", "inspect", "--format", "{{.Digest}}", image])
-        .output()?;
-    let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if digest.is_empty() {
-        bail!("failed to get image digest: {}", image);
-    }
-    Ok(digest
-        .trim_start_matches("sha256:")
-        .chars()
-        .take(16)
-        .collect())
-}
-
-pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
-    use crate::ssh_options::CommonSshOptions;
-    let ssh_opts = CommonSshOptions::default();
-    let user_host = format!("{}@localhost", user);
-    info!("waiting for SSH on port {}...", port);
-    let start = std::time::Instant::now();
-    let mut attempt = 0u32;
-    loop {
-        if start.elapsed() > SSH_TIMEOUT {
-            bail!("SSH connection timeout ({}s)", SSH_TIMEOUT.as_secs());
-        }
-        let mut cmd = Command::new("ssh");
-        cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
-        ssh_opts.apply_to_command(&mut cmd);
-        cmd.args(["-o", "BatchMode=yes", &user_host, "true"]);
-        if let Ok(s) = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status() {
-            if s.success() {
-                info!("SSH connected after {}s", start.elapsed().as_secs());
-                return Ok(());
-            }
-        }
-        let backoff = if attempt < 2 {
-            500
-        } else if attempt < 4 {
-            1000
-        } else {
-            2000
-        };
-        std::thread::sleep(Duration::from_millis(backoff));
-        attempt += 1;
-    }
-}
-
-pub fn run_ssh_command(
-    port: u16,
-    key_path: &Path,
-    user: &str,
-    command: &str,
-) -> Result<std::process::ExitStatus> {
-    use crate::ssh_options::CommonSshOptions;
-    let ssh_opts = CommonSshOptions::default();
-    let user_host = format!("{}@localhost", user);
-    let mut cmd = Command::new("ssh");
-    cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
-    ssh_opts.apply_to_command(&mut cmd);
-    cmd.args(["-o", "BatchMode=yes", &user_host, command]);
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| eyre!("ssh failed: {}", e))
-}
-
-pub fn run_ssh_interactive(
-    port: u16,
-    key_path: &Path,
-    user: &str,
-) -> Result<std::process::ExitStatus> {
-    use crate::ssh_options::CommonSshOptions;
-    let ssh_opts = CommonSshOptions::default();
-    let user_host = format!("{}@localhost", user);
-    let mut cmd = Command::new("ssh");
-    cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
-    ssh_opts.apply_to_command(&mut cmd);
-    cmd.args(["-t", &user_host]);
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| eyre!("ssh failed: {}", e))
-}
+// Shared helpers moved to vm_helpers.rs:
+// detect_machine_name, detect_podman_vmtype, is_machine_rootful,
+// ensure_image_and_get_digest, wait_for_ssh, run_ssh_command, run_ssh_interactive
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_memory_to_mb() {
-        assert_eq!(parse_memory_to_mb("4G").unwrap(), 4096);
-        assert_eq!(parse_memory_to_mb("4g").unwrap(), 4096);
-        assert_eq!(parse_memory_to_mb("2048M").unwrap(), 2048);
-        assert_eq!(parse_memory_to_mb("2048m").unwrap(), 2048);
-        assert_eq!(parse_memory_to_mb("1024").unwrap(), 1024);
-        assert_eq!(parse_memory_to_mb("  8G  ").unwrap(), 8192);
-    }
-
-    #[test]
-    fn test_parse_memory_to_mb_errors() {
-        assert!(parse_memory_to_mb("abc").is_err());
-        assert!(parse_memory_to_mb("").is_err());
-    }
-
-    #[test]
-    fn test_default_vcpus() {
-        let vcpus = default_vcpus();
-        assert!(vcpus >= 1 && vcpus <= 4);
-    }
 
     #[test]
     fn test_ephemeral_vm_metadata_roundtrip() {
