@@ -33,6 +33,23 @@ pub fn run(opts: VmRmOpts) -> Result<()> {
         crate::vfkit::stop::run(&opts.name)?;
     }
 
+    // Remove disk image and SSH keys if they are inside the bcvk vms directory
+    // (i.e., created by `bcvk run`). User-provided disks from `bcvk vm run` are left alone.
+    let vms_dir = VmMetadata::vms_dir();
+    if std::path::Path::new(&meta.disk_image).starts_with(&vms_dir) {
+        for path in [
+            meta.disk_image.clone(),
+            format!("{}.key", meta.disk_image),
+            format!("{}.key.pub", meta.disk_image),
+        ] {
+            if let Err(e) = fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove {}: {}", path, e);
+                }
+            }
+        }
+    }
+
     for path in [&meta.efi_store, &meta.serial_log] {
         if !path.is_empty() {
             if let Err(e) = fs::remove_file(path) {
@@ -43,7 +60,6 @@ pub fn run(opts: VmRmOpts) -> Result<()> {
         }
     }
 
-    let vms_dir = VmMetadata::vms_dir();
     for suffix in ["-gvproxy.sock", "-gvproxy-svc.sock"] {
         let p = vms_dir.join(format!("{}{}", meta.name, suffix));
         if let Err(e) = fs::remove_file(&p) {
