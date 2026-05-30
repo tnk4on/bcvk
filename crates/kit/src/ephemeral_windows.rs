@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::run_ephemeral_windows::{self, EphemeralVmMetadata, RunEphemeralOpts};
 
 #[derive(clap::Parser, Debug)]
-pub struct RunSshOpts {
+pub struct RunEphemeralSshOpts {
     #[command(flatten)]
     pub run_opts: RunEphemeralOpts,
 
@@ -24,7 +24,7 @@ pub enum EphemeralCommands {
 
     /// Run ephemeral VM and SSH into it
     #[clap(name = "run-ssh")]
-    RunSsh(RunSshOpts),
+    RunSsh(RunEphemeralSshOpts),
 
     /// Connect to a running ephemeral VM via SSH
     #[clap(name = "ssh")]
