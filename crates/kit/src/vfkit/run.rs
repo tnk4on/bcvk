@@ -1,7 +1,7 @@
-//! vm run — Start a persistent VM from a disk image using vfkit + EFI boot.
+//! vm run — Start a persistent VM from a container image or disk image.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::Parser;
@@ -12,15 +12,19 @@ use super::VmMetadata;
 use crate::run_ephemeral_macos::{
     clear_xattr, expose_ssh_port, find_available_ssh_port, find_vfkit, generate_mac, start_gvproxy,
 };
-use crate::vm_helpers::{parse_memory_to_mb, wait_for_ssh};
+use crate::vm_helpers::{
+    detect_machine_name, ensure_image_and_get_digest, parse_memory_to_mb, remove_file_if_exists,
+    sanitize_vm_name, wait_for_ssh,
+};
 
 /// Options for `vm run`.
 #[derive(Parser, Debug)]
 pub struct VmRunOpts {
-    /// Disk image path (.raw)
-    pub disk: String,
-    /// VM name for identification
-    #[clap(long)]
+    /// Container image or disk image path (.raw)
+    #[clap(default_value = "")]
+    pub image_or_disk: String,
+    /// VM name (default: derived from image or disk filename)
+    #[clap(long, short)]
     pub name: Option<String>,
     /// Number of vCPUs
     #[clap(long)]
@@ -40,20 +44,132 @@ pub struct VmRunOpts {
     /// Display VM console in GUI window
     #[clap(long)]
     pub gui: bool,
+    /// Disk size for to-disk (e.g. "10G", "20G")
+    #[clap(long, default_value = "10G")]
+    pub disk_size: String,
+    /// Installation options (filesystem, root-size, etc.)
+    #[clap(flatten)]
+    pub install: crate::install_options::InstallOptions,
+    /// Replace existing VM with same name
+    #[clap(long, short = 'R')]
+    pub replace: bool,
 }
 
-/// Create and launch a persistent VM from a disk image via vfkit + EFI.
-pub fn run(opts: VmRunOpts) -> Result<()> {
-    let vfkit_bin = find_vfkit()?;
+fn is_disk_path(input: &str) -> bool {
+    let p = Path::new(input);
+    p.extension()
+        .map(|e| e == "raw" || e == "img" || e == "qcow2")
+        .unwrap_or(false)
+        || p.exists()
+}
 
-    if !Path::new(&opts.disk).exists() {
-        bail!("disk image not found: {}", opts.disk);
+/// Create and launch a persistent VM.
+pub fn run(opts: VmRunOpts) -> Result<()> {
+    if opts.image_or_disk.is_empty() {
+        bail!("container image or disk path required");
     }
-    clear_xattr(Path::new(&opts.disk));
+
+    let (disk_path_str, image_name) = if is_disk_path(&opts.image_or_disk) {
+        let p = Path::new(&opts.image_or_disk);
+        if !p.exists() {
+            bail!("disk image not found: {}", opts.image_or_disk);
+        }
+        (opts.image_or_disk.clone(), None)
+    } else {
+        let image = &opts.image_or_disk;
+        let vm_name = opts.name.clone().unwrap_or_else(|| sanitize_vm_name(image));
+
+        if vm_name.is_empty() {
+            bail!("could not derive VM name from image. Use --name to specify one.");
+        }
+
+        // Check existing VM
+        if let Ok(existing) = VmMetadata::load(&vm_name) {
+            if opts.replace {
+                info!("replacing existing VM '{}'", vm_name);
+                if existing.is_alive() {
+                    if let Err(e) = Command::new("kill")
+                        .arg(existing.vfkit_pid.to_string())
+                        .status()
+                    {
+                        tracing::warn!("failed to kill vfkit (pid {}): {}", existing.vfkit_pid, e);
+                    }
+                    if let Err(e) = Command::new("kill")
+                        .arg(existing.gvproxy_pid.to_string())
+                        .status()
+                    {
+                        tracing::warn!(
+                            "failed to kill gvproxy (pid {}): {}",
+                            existing.gvproxy_pid,
+                            e
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                VmMetadata::remove(&vm_name);
+            } else {
+                bail!(
+                    "VM '{}' already exists. Use --replace to overwrite, or --name to choose a different name.",
+                    vm_name
+                );
+            }
+        }
+
+        let vms_dir = crate::to_disk_macos::vms_dir();
+        fs::create_dir_all(&vms_dir)?;
+        let disk_path = vms_dir.join(format!("{}.raw", vm_name));
+        let key_path = PathBuf::from(format!("{}.key", disk_path.display()));
+        let key_pub_path = PathBuf::from(format!("{}.pub", key_path.display()));
+
+        if opts.replace {
+            remove_file_if_exists(&disk_path);
+            remove_file_if_exists(&key_path);
+            remove_file_if_exists(&key_pub_path);
+        }
+
+        if !disk_path.exists() {
+            info!("creating disk image for VM '{}'...", vm_name);
+            let machine = detect_machine_name()?;
+            let digest = ensure_image_and_get_digest(image)?;
+
+            let base_disk_path = crate::to_disk_macos::find_or_create_base_disk(
+                image,
+                &digest,
+                &opts.install,
+                &opts.disk_size,
+                &machine,
+            )?;
+
+            crate::to_disk_macos::clone_base_disk(&base_disk_path, &disk_path)?;
+
+            let base_key = PathBuf::from(format!("{}.key", base_disk_path.display()));
+            if base_key.exists() {
+                fs::copy(&base_key, &key_path)?;
+                let base_pub = PathBuf::from(format!("{}.pub", base_key.display()));
+                if base_pub.exists() {
+                    fs::copy(&base_pub, &key_pub_path)?;
+                }
+            }
+        }
+
+        (
+            disk_path.to_string_lossy().to_string(),
+            Some(image.to_string()),
+        )
+    };
+
+    clear_xattr(Path::new(&disk_path_str));
 
     let ssh_key_path = match &opts.ssh_key {
         Some(p) => p.clone(),
-        None => find_ssh_key()?,
+        None => {
+            let disk_key = format!("{}.key", disk_path_str);
+            if Path::new(&disk_key).exists() {
+                disk_key
+            } else {
+                find_ssh_key()?
+            }
+        }
     };
     if !Path::new(&ssh_key_path).exists() {
         bail!(
@@ -63,7 +179,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     }
 
     let vm_name = opts.name.clone().unwrap_or_else(|| {
-        Path::new(&opts.disk)
+        Path::new(&disk_path_str)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("vm")
@@ -93,6 +209,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     let vcpus = opts.vcpus.unwrap_or(2);
     let memory_mb = parse_memory_to_mb(&opts.memory)?;
 
+    let vfkit_bin = find_vfkit()?;
     let mut vfkit_args = vec![
         "--cpus".to_string(),
         vcpus.to_string(),
@@ -101,7 +218,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
         "--bootloader".to_string(),
         format!("efi,variable-store={},create", efi_store.display()),
         "--device".to_string(),
-        format!("virtio-blk,path={}", opts.disk),
+        format!("virtio-blk,path={}", disk_path_str),
         "--device".to_string(),
         format!(
             "virtio-net,unixSocketPath={},mac={}",
@@ -147,8 +264,8 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
     let metadata = VmMetadata {
         name: vm_name.clone(),
-        image: None,
-        disk_image: opts.disk.clone(),
+        image: image_name,
+        disk_image: disk_path_str.clone(),
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
         ssh_port,

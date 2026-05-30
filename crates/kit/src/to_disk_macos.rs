@@ -17,7 +17,6 @@ use crate::install_options::InstallOptions;
 use crate::run_ephemeral_macos::clear_xattr;
 use crate::vm_helpers::{
     detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, remove_file_if_exists,
-    sanitize_vm_name,
 };
 use sha2::{Digest, Sha256};
 
@@ -36,41 +35,14 @@ pub struct ToDiskMacosOpts {
     pub install: InstallOptions,
 }
 
-/// Options for `bcvk run` on macOS (to-disk + vm run).
-#[derive(Parser, Debug)]
-pub struct RunFromImageOpts {
-    /// Container image to run as a persistent VM
-    pub image: String,
-    /// VM name (auto-generated from image name if not specified)
-    #[clap(long)]
-    pub name: Option<String>,
-    /// Disk size (e.g. "10G", "5120M")
-    #[clap(long, default_value = "10G")]
-    pub disk_size: String,
-    /// Number of vCPUs
-    #[clap(long)]
-    pub vcpus: Option<u32>,
-    /// Memory size (e.g. "4G", "2048M", or plain number for MB)
-    #[clap(long, default_value = "4G")]
-    pub memory: String,
-    /// Installation options (filesystem, root-size, etc.)
-    #[clap(flatten)]
-    pub install: InstallOptions,
-    /// Display VM console in GUI window
-    #[clap(long)]
-    pub gui: bool,
-    /// Replace existing VM with same name
-    #[clap(long, short = 'R')]
-    pub replace: bool,
-}
-
 fn base_dir() -> PathBuf {
     dirs::home_dir()
         .expect("cannot determine home directory")
         .join(".local/share/bcvk/base")
 }
 
-fn vms_dir() -> PathBuf {
+/// Directory for persistent VM disk images.
+pub fn vms_dir() -> PathBuf {
     dirs::home_dir()
         .expect("cannot determine home directory")
         .join(".local/share/bcvk/vms")
@@ -210,7 +182,8 @@ fn write_xattr(path: &Path, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn find_or_create_base_disk(
+/// Find or create a cached base disk for the given image + install options.
+pub fn find_or_create_base_disk(
     source_image: &str,
     image_digest: &str,
     install_options: &InstallOptions,
@@ -281,7 +254,8 @@ fn find_or_create_base_disk(
     Ok(base_disk_path)
 }
 
-fn clone_base_disk(base_path: &Path, vm_disk_path: &Path) -> Result<()> {
+/// Clone a base disk to create a VM-specific disk via APFS clonefile (`cp -c`).
+pub fn clone_base_disk(base_path: &Path, vm_disk_path: &Path) -> Result<()> {
     if let Some(parent) = vm_disk_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -342,106 +316,6 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
         opts.target_disk
     );
     Ok(())
-}
-
-/// Execute `bcvk run` on macOS (to-disk + vm run).
-pub fn run_from_image(opts: RunFromImageOpts) -> Result<()> {
-    let vm_name = opts
-        .name
-        .clone()
-        .unwrap_or_else(|| sanitize_vm_name(&opts.image));
-
-    if vm_name.is_empty() {
-        bail!("could not derive VM name from image. Use --name to specify one.");
-    }
-
-    // Check if VM already exists
-    if let Ok(existing) = crate::vfkit::VmMetadata::load(&vm_name) {
-        if opts.replace {
-            info!("replacing existing VM '{}'", vm_name);
-            if existing.is_alive() {
-                if let Err(e) = Command::new("kill")
-                    .arg(existing.vfkit_pid.to_string())
-                    .status()
-                {
-                    tracing::warn!("failed to kill vfkit (pid {}): {}", existing.vfkit_pid, e);
-                }
-                if let Err(e) = Command::new("kill")
-                    .arg(existing.gvproxy_pid.to_string())
-                    .status()
-                {
-                    tracing::warn!(
-                        "failed to kill gvproxy (pid {}): {}",
-                        existing.gvproxy_pid,
-                        e
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            crate::vfkit::VmMetadata::remove(&vm_name);
-        } else {
-            bail!(
-                "VM '{}' already exists. Use --replace to overwrite, or --name to choose a different name.",
-                vm_name
-            );
-        }
-    }
-
-    let vms_dir = vms_dir();
-    fs::create_dir_all(&vms_dir)?;
-    let disk_path = vms_dir.join(format!("{}.raw", vm_name));
-    let key_path = PathBuf::from(format!("{}.key", disk_path.display()));
-    let key_pub_path = PathBuf::from(format!("{}.pub", key_path.display()));
-
-    // Remove old disk if replacing
-    if opts.replace {
-        remove_file_if_exists(&disk_path);
-        remove_file_if_exists(&key_path);
-        remove_file_if_exists(&key_pub_path);
-    }
-
-    if !disk_path.exists() {
-        info!("creating disk image for VM '{}'...", vm_name);
-        let machine = detect_machine_name()?;
-        let digest = ensure_image_and_get_digest(&opts.image)?;
-
-        let base_disk_path = find_or_create_base_disk(
-            &opts.image,
-            &digest,
-            &opts.install,
-            &opts.disk_size,
-            &machine,
-        )?;
-
-        clone_base_disk(&base_disk_path, &disk_path)?;
-
-        // Copy SSH key from base
-        let base_key = PathBuf::from(format!("{}.key", base_disk_path.display()));
-        if base_key.exists() {
-            fs::copy(&base_key, &key_path).context("copying SSH key")?;
-            let base_pub = PathBuf::from(format!("{}.pub", base_key.display()));
-            if base_pub.exists() {
-                fs::copy(&base_pub, &key_pub_path)?;
-            }
-        }
-    }
-
-    info!("starting VM '{}' from {}...", vm_name, disk_path.display());
-    let vm_opts = crate::vfkit::run::VmRunOpts {
-        disk: disk_path.to_string_lossy().to_string(),
-        name: Some(vm_name),
-        vcpus: opts.vcpus,
-        memory: opts.memory,
-        ssh_key: if key_path.exists() {
-            Some(key_path.to_string_lossy().to_string())
-        } else {
-            None
-        },
-        ssh_user: "root".to_string(),
-        ssh_port: None,
-        gui: opts.gui,
-    };
-    crate::vfkit::run::run(vm_opts)
 }
 
 #[cfg(test)]

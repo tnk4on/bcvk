@@ -166,15 +166,11 @@ enum Commands {
     #[clap(subcommand, alias = "vfkit")]
     Vm(vfkit::VmCommands),
 
-    // macOS: to-disk and run
+    // macOS: to-disk
     #[cfg(target_os = "macos")]
     /// Install bootc images to persistent disk images
     #[clap(name = "to-disk")]
     ToDisk(to_disk_macos::ToDiskMacosOpts),
-
-    #[cfg(target_os = "macos")]
-    /// Run a bootc container image as a persistent VM (to-disk + vm run)
-    Run(to_disk_macos::RunFromImageOpts),
 
     // Other platforms: stub
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -330,11 +326,6 @@ fn main() -> Result<(), Report> {
         #[cfg(target_os = "macos")]
         Commands::ToDisk(opts) => {
             to_disk_macos::run(opts)?;
-        }
-
-        #[cfg(target_os = "macos")]
-        Commands::Run(opts) => {
-            to_disk_macos::run_from_image(opts)?;
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
