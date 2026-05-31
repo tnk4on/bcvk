@@ -53,6 +53,17 @@ pub fn run(name: &str, json: bool) -> Result<()> {
             meta.ssh_port, meta.ssh_key, meta.ssh_user
         );
     }
+    if !meta.labels.is_empty() {
+        println!();
+        println!("Labels:     {}", meta.labels.join(", "));
+    }
+    if !meta.port_mappings.is_empty() {
+        println!();
+        println!("Port mappings:");
+        for (h, g) in &meta.port_mappings {
+            println!("  {}:{}", h, g);
+        }
+    }
     println!();
     println!("Files:");
     println!("  EFI store:  {}", meta.efi_store);

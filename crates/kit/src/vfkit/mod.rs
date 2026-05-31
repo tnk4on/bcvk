@@ -118,6 +118,12 @@ pub struct VmMetadata {
     pub created: String,
     /// Current VM state (running, stopped).
     pub state: String,
+    /// User-defined labels for organizing VMs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Port mappings from host to VM (host_port, guest_port).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_mappings: Vec<(u16, u16)>,
 }
 
 impl VmMetadata {
@@ -204,6 +210,8 @@ mod tests {
             gui: false,
             created: "2026-01-01T00:00:00Z".to_string(),
             state: "running".to_string(),
+            labels: vec![],
+            port_mappings: vec![],
         }
     }
 

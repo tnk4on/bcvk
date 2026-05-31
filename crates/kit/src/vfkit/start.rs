@@ -98,6 +98,11 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
         }
     }
 
+    for &(host_port, guest_port) in &meta.port_mappings {
+        expose_port(&services_sock_str, "192.168.127.2", host_port, guest_port)?;
+        info!("port {}:{} forwarded", host_port, guest_port);
+    }
+
     let key_path = std::path::Path::new(&meta.ssh_key);
     wait_for_ssh(meta.ssh_port, key_path, &meta.ssh_user)?;
 

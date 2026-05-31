@@ -16,7 +16,8 @@ use tracing::{debug, info};
 use crate::install_options::InstallOptions;
 use crate::run_ephemeral_macos::clear_xattr;
 use crate::vm_helpers::{
-    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, remove_file_if_exists,
+    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, parse_disk_size,
+    remove_file_if_exists,
 };
 use sha2::{Digest, Sha256};
 
@@ -61,27 +62,6 @@ fn resolve_path_in_machine(host_path: &str) -> String {
     } else {
         resolved
     }
-}
-
-fn parse_disk_size(s: &str) -> Result<u64> {
-    let s = s.trim();
-    if let Ok(n) = s.parse::<u64>() {
-        return Ok(n);
-    }
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('G').or(s.strip_suffix('g')) {
-        (n, 1024u64 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('M').or(s.strip_suffix('m')) {
-        (n, 1024u64 * 1024)
-    } else if let Some(n) = s.strip_suffix('K').or(s.strip_suffix('k')) {
-        (n, 1024u64)
-    } else {
-        bail!("invalid disk size format: '{}' (use e.g. 10G, 5120M)", s);
-    };
-    let num: u64 = num_str
-        .trim()
-        .parse()
-        .with_context(|| format!("invalid disk size number: '{}'", num_str))?;
-    Ok(num * multiplier)
 }
 
 fn create_raw_disk(path: &str, size_bytes: u64) -> Result<()> {
@@ -350,16 +330,6 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_disk_size() {
-        assert_eq!(parse_disk_size("10G").unwrap(), 10 * 1024 * 1024 * 1024);
-        assert_eq!(parse_disk_size("5120M").unwrap(), 5120 * 1024 * 1024);
-        assert_eq!(parse_disk_size("1024K").unwrap(), 1024 * 1024);
-        assert_eq!(parse_disk_size("1073741824").unwrap(), 1073741824);
-        assert!(parse_disk_size("abc").is_err());
-        assert!(parse_disk_size("10X").is_err());
-    }
 
     #[test]
     fn test_resolve_path_in_machine() {

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use color_eyre::{eyre::bail, eyre::eyre, Result};
+use color_eyre::{eyre::bail, eyre::eyre, eyre::Context, Result};
 use tracing::info;
 
 use crate::ssh_options::CommonSshOptions;
@@ -225,9 +225,41 @@ pub fn sanitize_vm_name(image: &str) -> String {
         .to_string()
 }
 
+/// Parse a disk size string (e.g. "10G", "5120M", "1024K") to bytes.
+pub fn parse_disk_size(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('G').or(s.strip_suffix('g')) {
+        (n, 1024u64 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('M').or(s.strip_suffix('m')) {
+        (n, 1024u64 * 1024)
+    } else if let Some(n) = s.strip_suffix('K').or(s.strip_suffix('k')) {
+        (n, 1024u64)
+    } else {
+        bail!("invalid disk size format: '{}' (use e.g. 10G, 5120M)", s);
+    };
+    let num: u64 = num_str
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid disk size number: '{}'", num_str))?;
+    Ok(num * multiplier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_disk_size() {
+        assert_eq!(parse_disk_size("10G").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert_eq!(parse_disk_size("5120M").unwrap(), 5120 * 1024 * 1024);
+        assert_eq!(parse_disk_size("1024K").unwrap(), 1024 * 1024);
+        assert_eq!(parse_disk_size("1073741824").unwrap(), 1073741824);
+        assert!(parse_disk_size("abc").is_err());
+        assert!(parse_disk_size("10X").is_err());
+    }
 
     #[test]
     fn test_parse_memory_to_mb() {

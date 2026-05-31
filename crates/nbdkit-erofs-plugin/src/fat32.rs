@@ -79,9 +79,17 @@ pub fn build_esp_regions(
     // Files
     let mut files: Vec<FatFile> = Vec::new();
 
-    // BOOTAA64.EFI
+    let boot_efi_name = if grub_path
+        .file_name()
+        .map(|n| n == "grubx64.efi")
+        .unwrap_or(false)
+    {
+        "BOOTX64"
+    } else {
+        "BOOTAA64"
+    };
     files.push(FatFile {
-        name_8_3: make_8_3("BOOTAA64", "EFI"),
+        name_8_3: make_8_3(boot_efi_name, "EFI"),
         size: grub_size,
         regions: vec![FileDataRegion::FromFile {
             path: grub_path.to_path_buf(),

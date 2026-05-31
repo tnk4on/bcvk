@@ -89,6 +89,18 @@ pub struct VmRunOpts {
     /// Port mapping from host to VM (format: host_port:guest_port, e.g. 8080:80)
     #[clap(long = "port", short = 'p', action = clap::ArgAction::Append)]
     pub port_mappings: Vec<PortMapping>,
+    /// User-defined labels for organizing VMs (comma not allowed in labels)
+    #[clap(long)]
+    pub label: Vec<String>,
+}
+
+fn validate_labels(labels: &[String]) -> Result<()> {
+    for label in labels {
+        if label.contains(',') {
+            bail!("Label '{}' contains comma which is not allowed", label);
+        }
+    }
+    Ok(())
 }
 
 fn is_disk_path(input: &str) -> bool {
@@ -104,6 +116,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     if opts.image_or_disk.is_empty() {
         bail!("container image or disk path required");
     }
+    validate_labels(&opts.label)?;
 
     let (disk_path_str, image_name) = if is_disk_path(&opts.image_or_disk) {
         let p = Path::new(&opts.image_or_disk);
@@ -324,6 +337,12 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
         gui: opts.gui,
         created: chrono::Utc::now().to_rfc3339(),
         state: "running".to_string(),
+        labels: opts.label.clone(),
+        port_mappings: opts
+            .port_mappings
+            .iter()
+            .map(|pm| (pm.host_port, pm.guest_port))
+            .collect(),
     };
     metadata.save()?;
 
