@@ -323,7 +323,7 @@ impl RunContext {
     }
 }
 
-struct Phase0Result {
+struct SetupResult {
     ssh_pubkey: String,
     digest_short: String,
     podman_vm_guid: String,
@@ -333,7 +333,7 @@ struct Phase0Result {
 
 const VSOCK_PORT_BASE: u32 = 1030;
 
-fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result> {
+fn setup_image_and_guid(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<SetupResult> {
     let need_ssh = opts.ssh_keygen || !opts.execute.is_empty();
     let ssh_key_path = ctx.ssh_key_path.clone();
     let ssh_handle = std::thread::spawn(move || -> Result<String> {
@@ -423,7 +423,7 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     let merged_path = mount_handle.join().map_err(|_| eyre!("mount panicked"))??;
     info!("image mounted at: {}", merged_path);
 
-    Ok(Phase0Result {
+    Ok(SetupResult {
         ssh_pubkey,
         digest_short,
         podman_vm_guid,
@@ -432,12 +432,12 @@ fn run_phase0(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Phase0Result>
     })
 }
 
-struct Phase1Result {
+struct BootDiskResult {
     vhdx_path: String,
     nbdkit_handle: Option<std::thread::JoinHandle<Result<Vec<u8>>>>,
 }
 
-fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
+fn create_boot_disk(ctx: &RunContext, p0: &SetupResult) -> Result<BootDiskResult> {
     let mut ssh_param_str = String::new();
     if !p0.ssh_pubkey.is_empty() {
         let param = format!("ssh_pubkey={}", p0.ssh_pubkey);
@@ -504,16 +504,16 @@ fn run_phase1(ctx: &RunContext, p0: &Phase0Result) -> Result<Phase1Result> {
         &vhdx_vm,
     )?;
 
-    Ok(Phase1Result {
+    Ok(BootDiskResult {
         vhdx_path,
         nbdkit_handle: Some(nbdkit_handle),
     })
 }
 
-fn run_phase2(
+fn start_vm_and_services(
     ctx: &RunContext,
-    p0: &Phase0Result,
-    p1: &Phase1Result,
+    p0: &SetupResult,
+    p1: &BootDiskResult,
     opts: &RunEphemeralOpts,
     t_start: &std::time::Instant,
 ) -> Result<()> {
@@ -696,14 +696,14 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 
     let ctx = RunContext::new(&opts)?;
-    let phase0 = run_phase0(&ctx, &opts)?;
+    let setup = setup_image_and_guid(&ctx, &opts)?;
     elapsed!("image mount + setup");
 
-    let mut phase0 = phase0;
-    let phase1 = run_phase1(&ctx, &phase0)?;
+    let mut setup = setup;
+    let boot_disk = create_boot_disk(&ctx, &setup)?;
     elapsed!("VHDX created");
 
-    let (switch, _) = phase0
+    let (switch, _) = setup
         .switch_vm_handle
         .take()
         .unwrap()
@@ -713,8 +713,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("switch ready");
     elapsed!("VM created");
 
-    let mut phase1 = phase1;
-    if let Err(e) = phase1
+    let mut boot_disk = boot_disk;
+    if let Err(e) = boot_disk
         .nbdkit_handle
         .take()
         .unwrap()
@@ -726,7 +726,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("nbdkit ready");
 
     // VM start + serial + relay + DHCP + SSH
-    run_phase2(&ctx, &phase0, &phase1, &opts, &t_start)
+    start_vm_and_services(&ctx, &setup, &boot_disk, &opts, &t_start)
 }
 
 // --- Detached mode ---
