@@ -62,12 +62,11 @@ pub fn parse_memory_to_mb(s: &str) -> Result<u32> {
     }
 }
 
-/// Return sensible default vCPU count (capped at 4).
+/// Return sensible default vCPU count (half of host logical CPUs, minimum 2).
 pub fn default_vcpus() -> u32 {
     std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
+        .map(|n| (n.get() as u32 / 2).max(2))
         .unwrap_or(2)
-        .min(4)
 }
 
 /// Ensure image exists locally (pulling if needed) and return its short digest.
@@ -246,7 +245,7 @@ mod tests {
     #[test]
     fn test_default_vcpus() {
         let vcpus = default_vcpus();
-        assert!(vcpus >= 1 && vcpus <= 4);
+        assert!(vcpus >= 2);
     }
 
     #[test]
