@@ -680,6 +680,26 @@ pub fn remove_internal_switch(name: &str) {
          Remove-VMSwitch -Name '{}' -Force -EA SilentlyContinue",
         name, name
     ));
+
+    // Wait for vEthernet adapter to disappear (VMMS miniport cleanup is async)
+    for i in 0..20 {
+        let check = Command::new("netsh")
+            .args(["interface", "ipv4", "show", "interfaces"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        if let Ok(out) = check {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.contains(name) {
+                if i > 0 {
+                    debug!("vEthernet adapter disappeared after {}ms", i * 500);
+                }
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
     debug!("removed switch: {}", name);
 }
 
