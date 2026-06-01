@@ -209,23 +209,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
     clear_xattr(Path::new(&disk_path_str));
 
-    let ssh_key_path = match &opts.ssh_key {
-        Some(p) => p.clone(),
-        None => {
-            let disk_key = format!("{}.key", disk_path_str);
-            if Path::new(&disk_key).exists() {
-                disk_key
-            } else {
-                find_ssh_key()?
-            }
-        }
-    };
-    if !Path::new(&ssh_key_path).exists() {
-        bail!(
-            "SSH key not found: {}. Specify with --ssh-key",
-            ssh_key_path
-        );
-    }
+    let ssh_key_path = find_ssh_key(&opts.ssh_key, &disk_path_str)?;
 
     let vm_name = opts.name.clone().unwrap_or_else(|| {
         Path::new(&disk_path_str)
@@ -358,7 +342,18 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     Ok(())
 }
 
-fn find_ssh_key() -> Result<String> {
+fn find_ssh_key(explicit: &Option<String>, disk_path: &str) -> Result<String> {
+    if let Some(p) = explicit {
+        if !Path::new(p).exists() {
+            bail!("SSH key not found: {}", p);
+        }
+        return Ok(p.clone());
+    }
+    let auto_key = format!("{}.key", disk_path);
+    if Path::new(&auto_key).exists() {
+        info!("using auto-generated SSH key: {}", auto_key);
+        return Ok(auto_key);
+    }
     let home = dirs::home_dir()
         .ok_or_else(|| color_eyre::eyre::eyre!("cannot determine home directory"))?;
     for name in &["id_ed25519", "id_rsa"] {
@@ -367,5 +362,5 @@ fn find_ssh_key() -> Result<String> {
             return Ok(path.to_string_lossy().to_string());
         }
     }
-    bail!("no SSH key found in ~/.ssh/. Generate with: ssh-keygen -t ed25519")
+    bail!("no SSH key found. Specify with --ssh-key")
 }

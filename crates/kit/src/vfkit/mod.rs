@@ -50,11 +50,7 @@ pub enum VmCommands {
 
     /// Remove all VMs
     #[clap(name = "rm-all")]
-    RemoveAll {
-        /// Force removal without confirmation
-        #[clap(short, long)]
-        force: bool,
-    },
+    RemoveAll(rm_all::VmRmAllOpts),
 
     /// Show detailed VM information
     Inspect {
@@ -76,7 +72,7 @@ impl VmCommands {
             VmCommands::Stop { name } => stop::run(&name),
             VmCommands::Start(opts) => start::run(opts),
             VmCommands::Remove(opts) => rm::run(opts),
-            VmCommands::RemoveAll { force } => rm_all::run(force),
+            VmCommands::RemoveAll(opts) => rm_all::run(opts),
             VmCommands::Inspect { name, json } => inspect::run(&name, json),
         }
     }
