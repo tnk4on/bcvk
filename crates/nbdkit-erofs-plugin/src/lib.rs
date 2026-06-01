@@ -7,24 +7,19 @@ mod regions;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::RwLock;
 
-use regions::{Region, RegionType};
+use regions::Region;
 
-struct PluginConfig {
+static PLUGIN_STATE: RwLock<Option<PluginState>> = RwLock::new(None);
+
+struct PluginState {
     dir: PathBuf,
     cmdline: Option<String>,
     ssh_pubkey: Option<String>,
-}
-
-static PLUGIN_CONFIG: Mutex<Option<PluginConfig>> = Mutex::new(None);
-
-struct PluginState {
     regions: Vec<Region>,
     total_size: u64,
 }
-
-static PLUGIN_STATE: OnceLock<PluginState> = OnceLock::new();
 
 // --- nbdkit C FFI ---
 
@@ -44,17 +39,19 @@ pub extern "C" fn plugin_config(key: *const c_char, value: *const c_char) -> c_i
     let key = unsafe { CStr::from_ptr(key) }.to_str().unwrap_or("");
     let value = unsafe { CStr::from_ptr(value) }.to_str().unwrap_or("");
 
-    let mut config = PLUGIN_CONFIG.lock().unwrap();
-    let config = config.get_or_insert_with(|| PluginConfig {
+    let mut state = PLUGIN_STATE.write().unwrap();
+    let state = state.get_or_insert_with(|| PluginState {
         dir: PathBuf::new(),
         cmdline: None,
         ssh_pubkey: None,
+        regions: Vec::new(),
+        total_size: 0,
     });
 
     match key {
-        "dir" => config.dir = PathBuf::from(value),
-        "cmdline" => config.cmdline = Some(value.to_string()),
-        "ssh_pubkey" => config.ssh_pubkey = Some(value.to_string()),
+        "dir" => state.dir = PathBuf::from(value),
+        "cmdline" => state.cmdline = Some(value.to_string()),
+        "ssh_pubkey" => state.ssh_pubkey = Some(value.to_string()),
         _ => {
             log_error(&format!("unknown parameter: {}", key));
             return -1;
@@ -65,21 +62,21 @@ pub extern "C" fn plugin_config(key: *const c_char, value: *const c_char) -> c_i
 
 #[no_mangle]
 pub extern "C" fn plugin_config_complete() -> c_int {
-    let config = PLUGIN_CONFIG.lock().unwrap();
-    let config = match config.as_ref() {
-        Some(c) => c,
+    let state = PLUGIN_STATE.read().unwrap();
+    let state = match state.as_ref() {
+        Some(s) => s,
         None => {
             log_error("dir parameter is required");
             return -1;
         }
     };
 
-    if config.dir.as_os_str().is_empty() {
+    if state.dir.as_os_str().is_empty() {
         log_error("dir parameter is required");
         return -1;
     }
 
-    if config.cmdline.is_none() {
+    if state.cmdline.is_none() {
         log_error("cmdline parameter is required");
         return -1;
     }
@@ -124,14 +121,14 @@ fn find_grub(dir: &std::path::Path) -> Option<PathBuf> {
 
 #[no_mangle]
 pub extern "C" fn plugin_get_ready() -> c_int {
-    let config = PLUGIN_CONFIG.lock().unwrap().take();
-    let config = match config {
-        Some(c) => c,
+    let mut state_guard = PLUGIN_STATE.write().unwrap();
+    let state = match state_guard.as_mut() {
+        Some(s) => s,
         None => return -1,
     };
 
     // Walk directory for EROFS
-    let walk = match dir_walk::walk_directory(&config.dir) {
+    let walk = match dir_walk::walk_directory(&state.dir) {
         Ok(w) => w,
         Err(e) => {
             log_error(&format!("failed to walk directory: {}", e));
@@ -147,10 +144,11 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let erofs_regions = erofs::build_erofs_regions(&erofs_layout, &walk);
+    let erofs_regions =
+        regions::consolidate_regions(erofs::build_erofs_regions(&erofs_layout, &walk));
 
     // Discover boot files from dir
-    let (kernel_path, initrd_path) = match find_kernel_dir(&config.dir) {
+    let (kernel_path, initrd_path) = match find_kernel_dir(&state.dir) {
         Some(paths) => paths,
         None => {
             log_error("kernel/initramfs not found in dir/usr/lib/modules/");
@@ -158,7 +156,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         }
     };
 
-    let grub_path = match find_grub(&config.dir) {
+    let grub_path = match find_grub(&state.dir) {
         Some(p) => p,
         None => {
             log_error("grubaa64.efi not found in dir/usr/lib/");
@@ -186,7 +184,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
         return -1;
     };
 
-    let cmdline = config.cmdline.as_deref().unwrap_or("");
+    let cmdline = state.cmdline.as_deref().unwrap_or("");
 
     // Generate grub.cfg
     let grub_cfg = format!(
@@ -196,7 +194,7 @@ pub extern "C" fn plugin_get_ready() -> c_int {
 
     // Generate CPIO archives
     let units_cpio = initramfs::build_units_cpio();
-    let ssh_cpio = config.ssh_pubkey.as_deref().map(initramfs::build_ssh_cpio);
+    let ssh_cpio = state.ssh_pubkey.as_deref().map(initramfs::build_ssh_cpio);
 
     // Build initrd regions (original file + padding + CPIO)
     let (initrd_parts, initrd_total) =
@@ -214,36 +212,19 @@ pub extern "C" fn plugin_get_ready() -> c_int {
     );
 
     // Build GPT disk with ESP + EROFS
-    let disk = match gpt::build_gpt_disk(
+    match gpt::build_gpt_disk(
         esp_regions,
         esp_size,
         erofs_regions,
         erofs_layout.total_size,
     ) {
-        Ok(d) => d,
+        Ok(disk) => {
+            state.regions = disk.regions;
+            state.total_size = disk.total_size;
+        }
         Err(e) => {
             log_error(&format!("failed to build GPT disk: {}", e));
             return -1;
-        }
-    };
-
-    let state = PluginState {
-        regions: disk.regions,
-        total_size: disk.total_size,
-    };
-    let _ = PLUGIN_STATE.set(state);
-
-    // Pre-warm mmap regions via MADV_WILLNEED
-    let state = PLUGIN_STATE.get().unwrap();
-    for region in &state.regions {
-        if let RegionType::Mmap(mmap) = &region.region_type {
-            unsafe {
-                libc::madvise(
-                    mmap.ptr() as *mut libc::c_void,
-                    mmap.len(),
-                    libc::MADV_WILLNEED,
-                );
-            }
         }
     }
 
@@ -260,10 +241,8 @@ pub extern "C" fn plugin_close(_handle: *mut c_void) {}
 
 #[no_mangle]
 pub extern "C" fn plugin_get_size(_handle: *mut c_void) -> i64 {
-    match PLUGIN_STATE.get() {
-        Some(s) => s.total_size as i64,
-        None => -1,
-    }
+    let state = PLUGIN_STATE.read().unwrap();
+    state.as_ref().map(|s| s.total_size as i64).unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -279,7 +258,8 @@ pub extern "C" fn plugin_pread(
     offset: u64,
     _flags: u32,
 ) -> c_int {
-    let state = match PLUGIN_STATE.get() {
+    let state = PLUGIN_STATE.read().unwrap();
+    let state = match state.as_ref() {
         Some(s) => s,
         None => return -1,
     };

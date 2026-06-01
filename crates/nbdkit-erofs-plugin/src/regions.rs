@@ -1,84 +1,17 @@
 //! Region-based virtual block device composition.
 //! Inspired by the regions pattern in nbdkit's floppy plugin (BSD-3-Clause).
 
-use std::path::PathBuf;
+use std::fs::File;
 use std::sync::Arc;
 
-/// Memory-mapped file region (Send+Sync safe via immutable read-only access).
-pub struct MmapRegion {
-    ptr: *const u8,
-    len: usize,
-    path: PathBuf,
-}
-
-impl MmapRegion {
-    pub fn new(file: &std::fs::File, len: usize, path: PathBuf) -> std::io::Result<Self> {
-        use std::os::unix::io::AsRawFd;
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        unsafe {
-            libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_SEQUENTIAL);
-        }
-        Ok(MmapRegion {
-            ptr: ptr as *const u8,
-            len,
-            path,
-        })
-    }
-
-    pub fn ptr(&self) -> *const u8 {
-        self.ptr
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
-
-impl Drop for MmapRegion {
-    fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.ptr as *mut libc::c_void, self.len);
-        }
-    }
-}
-
-unsafe impl Send for MmapRegion {}
-unsafe impl Sync for MmapRegion {}
-
-impl std::fmt::Debug for MmapRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MmapRegion({}, {} bytes)", self.path.display(), self.len)
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RegionType {
     Data(Arc<Vec<u8>>),
-    File {
-        path: PathBuf,
-        handle: Arc<std::fs::File>,
-    },
-    Mmap(Arc<MmapRegion>),
+    File { file: Arc<File> },
     Zero,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Region {
     pub start: u64,
     pub len: u64,
@@ -106,6 +39,76 @@ pub fn find_region(regions: &[Region], offset: u64) -> Option<&Region> {
         .map(|i| &regions[i])
 }
 
+const PRELOAD_THRESHOLD: u64 = 4096;
+const MERGE_CHUNK_MAX: u64 = 4 * 1024 * 1024;
+
+pub fn consolidate_regions(regions: Vec<Region>) -> Vec<Region> {
+    use std::os::unix::fs::FileExt;
+
+    let mut out: Vec<Region> = Vec::new();
+    let mut merge_buf: Vec<u8> = Vec::new();
+    let mut merge_start: u64 = 0;
+
+    for r in regions {
+        let should_inline = match &r.region_type {
+            RegionType::File { file } => r.len <= PRELOAD_THRESHOLD,
+            RegionType::Data(_) | RegionType::Zero => true,
+        };
+
+        if should_inline {
+            if merge_buf.is_empty() {
+                merge_start = r.start;
+            }
+            let needed = (r.start + r.len - merge_start) as usize;
+            if needed as u64 > MERGE_CHUNK_MAX && !merge_buf.is_empty() {
+                out.push(Region {
+                    start: merge_start,
+                    len: merge_buf.len() as u64,
+                    region_type: RegionType::Data(Arc::new(merge_buf.clone())),
+                });
+                merge_buf.clear();
+                merge_start = r.start;
+            }
+            let offset_in_buf = (r.start - merge_start) as usize;
+            if merge_buf.len() < offset_in_buf + r.len as usize {
+                merge_buf.resize(offset_in_buf + r.len as usize, 0);
+            }
+            match &r.region_type {
+                RegionType::Data(data) => {
+                    merge_buf[offset_in_buf..offset_in_buf + r.len as usize]
+                        .copy_from_slice(&data[..r.len as usize]);
+                }
+                RegionType::File { file } => {
+                    let _ = file.read_exact_at(
+                        &mut merge_buf[offset_in_buf..offset_in_buf + r.len as usize],
+                        0,
+                    );
+                }
+                RegionType::Zero => {
+                    merge_buf[offset_in_buf..offset_in_buf + r.len as usize].fill(0);
+                }
+            }
+        } else {
+            if !merge_buf.is_empty() {
+                out.push(Region {
+                    start: merge_start,
+                    len: merge_buf.len() as u64,
+                    region_type: RegionType::Data(Arc::new(std::mem::take(&mut merge_buf))),
+                });
+            }
+            out.push(r);
+        }
+    }
+    if !merge_buf.is_empty() {
+        out.push(Region {
+            start: merge_start,
+            len: merge_buf.len() as u64,
+            region_type: RegionType::Data(Arc::new(merge_buf)),
+        });
+    }
+    out
+}
+
 pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     let mut remaining = buf.len();
     let mut buf_offset = 0;
@@ -128,14 +131,9 @@ pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result
                 let start = region_offset as usize;
                 buf[buf_offset..buf_offset + len].copy_from_slice(&data[start..start + len]);
             }
-            RegionType::File { handle, .. } => {
+            RegionType::File { file } => {
                 use std::os::unix::fs::FileExt;
-                handle.read_exact_at(&mut buf[buf_offset..buf_offset + len], region_offset)?;
-            }
-            RegionType::Mmap(mmap) => {
-                let start = region_offset as usize;
-                let src = &mmap.as_slice()[start..start + len];
-                buf[buf_offset..buf_offset + len].copy_from_slice(src);
+                file.read_exact_at(&mut buf[buf_offset..buf_offset + len], region_offset)?;
             }
             RegionType::Zero => {
                 buf[buf_offset..buf_offset + len].fill(0);
