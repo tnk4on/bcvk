@@ -94,7 +94,8 @@ fn generate_bootc_install_script(
         .unwrap_or(std::borrow::Cow::Borrowed(image))
         .to_string();
 
-    let pubkey_escaped = ssh_pubkey.replace('\'', "'\\''");
+    use base64::Engine;
+    let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(ssh_pubkey);
 
     format!(
         r#"set -euo pipefail
@@ -102,54 +103,26 @@ LOOP=$(sudo losetup -fP --show {disk_path})
 echo "Loop device: $LOOP"
 trap 'sudo losetup -d $LOOP 2>/dev/null' EXIT
 
+printf '%s' '{b64}' | base64 -d > /dev/shm/bcvk-ssh-key.pub
+
 echo "Running bootc install to-disk..."
 podman run --rm --privileged --pid=host --net=none \
   -v /dev:/dev \
+  -v /dev/shm:/dev/shm \
   -v /var/lib/containers:/var/lib/containers \
   {image} bootc install to-disk \
   --generic-image --skip-fetch-check --wipe \
+  --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
   {bootc_args} $LOOP
 
-echo "Injecting SSH key..."
-PARTS=$(lsblk -nlo NAME "$LOOP" | tail -n +2)
-ROOT_PART=""
-for p in $PARTS; do
-  LABEL=$(lsblk -nlo PARTLABEL "/dev/$p" 2>/dev/null || true)
-  if [ "$LABEL" = "root" ]; then
-    ROOT_PART="/dev/$p"
-    break
-  fi
-done
-if [ -z "$ROOT_PART" ]; then
-  ROOT_PART="/dev/$(echo "$PARTS" | tail -1)"
-fi
-
-mkdir -p /tmp/bcvk-mnt
-sudo mount "$ROOT_PART" /tmp/bcvk-mnt
-
-# bootc/ostree layout: /root → var/roothome (symlink)
-OSNAME=$(ls /tmp/bcvk-mnt/ostree/deploy/ 2>/dev/null | head -1)
-if [ -n "$OSNAME" ]; then
-  SSH_DIR="/tmp/bcvk-mnt/ostree/deploy/$OSNAME/var/roothome/.ssh"
-else
-  SSH_DIR="/tmp/bcvk-mnt/root/.ssh"
-fi
-
-sudo mkdir -p "$(dirname "$SSH_DIR")"
-sudo chmod 700 "$(dirname "$SSH_DIR")"
-sudo mkdir -p "$SSH_DIR"
-sudo chmod 700 "$SSH_DIR"
-echo '{pubkey}' | sudo tee "$SSH_DIR/authorized_keys" > /dev/null
-sudo chmod 600 "$SSH_DIR/authorized_keys"
-echo "SSH key injected to $SSH_DIR"
-sudo umount /tmp/bcvk-mnt
+rm -f /dev/shm/bcvk-ssh-key.pub
 
 echo "Installation complete!"
 "#,
         disk_path = disk_path_in_machine,
+        b64 = pub_key_b64,
         image = image_quoted,
         bootc_args = bootc_args,
-        pubkey = pubkey_escaped,
     )
 }
 
