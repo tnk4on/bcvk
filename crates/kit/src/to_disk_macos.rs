@@ -16,8 +16,8 @@ use tracing::{debug, info};
 use crate::install_options::InstallOptions;
 use crate::run_ephemeral_macos::clear_xattr;
 use crate::vm_helpers::{
-    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, parse_size,
-    remove_file_if_exists,
+    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, is_machine_rootful,
+    parse_size, remove_file_if_exists,
 };
 use sha2::{Digest, Sha256};
 
@@ -79,6 +79,7 @@ fn generate_bootc_install_script(
     image: &str,
     install_opts: &InstallOptions,
     ssh_pubkey: &str,
+    rootful: bool,
 ) -> String {
     let bootc_args = install_opts
         .to_bootc_args()
@@ -98,11 +99,13 @@ fn generate_bootc_install_script(
     use base64::Engine;
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(ssh_pubkey);
 
+    let sudo = if rootful { "" } else { "sudo " };
+
     format!(
         r#"set -euo pipefail
-LOOP=$(sudo losetup -fP --show {disk_path})
+LOOP=$({sudo}losetup -fP --show {disk_path})
 echo "Loop device: $LOOP"
-trap 'sudo losetup -d $LOOP 2>/dev/null' EXIT
+trap '{sudo}losetup -d $LOOP 2>/dev/null' EXIT
 
 printf '%s' '{b64}' | base64 -d > /dev/shm/bcvk-ssh-key.pub
 
@@ -120,6 +123,7 @@ rm -f /dev/shm/bcvk-ssh-key.pub
 
 echo "Installation complete!"
 "#,
+        sudo = sudo,
         disk_path = disk_path_in_machine,
         b64 = pub_key_b64,
         image = image_quoted,
@@ -210,8 +214,14 @@ pub fn find_or_create_base_disk(
     let ssh_pubkey = generate_ssh_keypair(&key_path)?;
 
     let disk_in_machine = resolve_path_in_machine(&base_disk_str);
-    let script =
-        generate_bootc_install_script(&disk_in_machine, source_image, install_options, &ssh_pubkey);
+    let rootful = is_machine_rootful(machine);
+    let script = generate_bootc_install_script(
+        &disk_in_machine,
+        source_image,
+        install_options,
+        &ssh_pubkey,
+        rootful,
+    );
 
     info!("running bootc install to-disk in podman machine...");
     let mut child = Command::new("podman")
