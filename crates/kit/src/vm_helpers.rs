@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use color_eyre::{eyre::bail, eyre::eyre, Result};
+use color_eyre::{eyre::bail, eyre::eyre, eyre::Context, Result};
 use tracing::info;
 
 use crate::ssh_options::CommonSshOptions;
@@ -224,6 +224,44 @@ pub fn sanitize_vm_name(image: &str) -> String {
         .to_string()
 }
 
+/// Parse a size string (e.g. "20G", "5120M", "10GB", "1TB") to bytes.
+pub fn parse_size(size_str: &str) -> Result<u64> {
+    let s = size_str.trim();
+    if s.is_empty() {
+        bail!("empty size string");
+    }
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    let upper = s.to_uppercase();
+    let (num_str, multiplier) = if let Some(n) = upper.strip_suffix("TB") {
+        (n, 1024_u64.pow(4))
+    } else if let Some(n) = upper.strip_suffix("GB") {
+        (n, 1024_u64 * 1024 * 1024)
+    } else if let Some(n) = upper.strip_suffix("MB") {
+        (n, 1024_u64 * 1024)
+    } else if let Some(n) = upper.strip_suffix("KB") {
+        (n, 1024_u64)
+    } else if let Some(n) = upper.strip_suffix('T') {
+        (n, 1024_u64.pow(4))
+    } else if let Some(n) = upper.strip_suffix('G') {
+        (n, 1024_u64 * 1024 * 1024)
+    } else if let Some(n) = upper.strip_suffix('M') {
+        (n, 1024_u64 * 1024)
+    } else if let Some(n) = upper.strip_suffix('K') {
+        (n, 1024_u64)
+    } else if let Some(n) = upper.strip_suffix('B') {
+        (n, 1)
+    } else {
+        bail!("invalid size format: '{}' (use e.g. 20G, 5120M, 1TB)", s);
+    };
+    let num: u64 = num_str
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid number in size: '{}'", num_str))?;
+    Ok(num * multiplier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +294,20 @@ mod tests {
         );
         assert_eq!(sanitize_vm_name("centos:stream10"), "centos-stream10");
         assert_eq!(sanitize_vm_name("simple"), "simple");
+    }
+
+    #[test]
+    fn test_parse_size() {
+        assert_eq!(parse_size("10G").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("20GB").unwrap(), 20 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("5120M").unwrap(), 5120 * 1024 * 1024);
+        assert_eq!(parse_size("512MB").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_size("1024K").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1TB").unwrap(), 1024_u64.pow(4));
+        assert_eq!(parse_size("1073741824").unwrap(), 1073741824);
+        assert_eq!(parse_size("100B").unwrap(), 100);
+        assert!(parse_size("abc").is_err());
+        assert!(parse_size("10X").is_err());
+        assert!(parse_size("").is_err());
     }
 }
