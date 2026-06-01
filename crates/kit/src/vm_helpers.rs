@@ -27,7 +27,7 @@ pub fn detect_machine_name() -> Result<String> {
     Ok(name)
 }
 
-/// Detect the podman machine VM type (e.g. "hyperv", "wsl", "applehv").
+/// Detect the podman machine VM type (e.g. "hyperv", "wsl", "libkrun", "applehv").
 #[allow(dead_code)]
 pub fn detect_podman_vmtype() -> Result<String> {
     let output = Command::new("podman")
