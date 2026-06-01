@@ -126,10 +126,13 @@ impl EphemeralVmMetadata {
 pub struct RunEphemeralOpts {
     /// Container image to boot
     pub image: String,
-    /// Number of vCPUs
+    /// Instance type (e.g., u1.nano, u1.small). Overrides vcpus/memory if specified.
+    #[clap(long)]
+    pub itype: Option<crate::instancetypes::InstanceType>,
+    /// Number of vCPUs (overridden by --itype if specified)
     #[clap(long)]
     pub vcpus: Option<u32>,
-    /// Memory size (e.g. "4G", "2048M", or plain number for MB)
+    /// Memory size (overridden by --itype if specified)
     #[clap(long, default_value = "4G")]
     pub memory: String,
     /// Generate a temporary SSH key pair for VM access
@@ -318,8 +321,16 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
     let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
 
-    let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
-    let memory_mb = parse_memory_to_mb(&opts.memory)?;
+    let vcpus = opts
+        .itype
+        .map(|t| t.vcpus())
+        .or(opts.vcpus)
+        .unwrap_or_else(default_vcpus);
+    let memory_mb = opts
+        .itype
+        .map(|t| t.memory_mb())
+        .map(Ok)
+        .unwrap_or_else(|| parse_memory_to_mb(&opts.memory))?;
 
     let mut vfkit_args = vec![
         "--cpus".to_string(),
