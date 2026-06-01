@@ -16,7 +16,7 @@ use tracing::{debug, info};
 use crate::install_options::InstallOptions;
 use crate::run_ephemeral_macos::clear_xattr;
 use crate::vm_helpers::{
-    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, parse_disk_size,
+    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, parse_size,
     remove_file_if_exists,
 };
 use sha2::{Digest, Sha256};
@@ -229,7 +229,7 @@ pub fn find_or_create_base_disk(
     info!("creating base disk: {:?}", base_disk_path);
     let base_disk_str = base_disk_path.to_string_lossy().to_string();
 
-    let size_bytes = parse_disk_size(disk_size)?;
+    let size_bytes = parse_size(disk_size)?;
     create_raw_disk(&base_disk_str, size_bytes)?;
 
     let key_path = PathBuf::from(format!("{}.key", base_disk_path.display()));
