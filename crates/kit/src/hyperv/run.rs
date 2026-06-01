@@ -249,7 +249,6 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
                 vm::remove_vm(&vm_name)?;
                 vm::remove_internal_switch(&vm_name);
                 super::VmMetadata::remove(&name);
-                std::thread::sleep(std::time::Duration::from_secs(2));
             } else {
                 bail!("VM '{}' already exists. Use --replace to replace it.", name);
             }
