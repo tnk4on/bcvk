@@ -461,11 +461,14 @@ fn attach_vhdx_wsl(vhdx_path: &str, machine: &str) -> Result<String> {
 
 fn detach_vhdx_wsl(vhdx_path: &str) {
     info!("detaching VHDX from WSL...");
-    let _ = Command::new("wsl")
+    if let Err(e) = Command::new("wsl")
         .args(["--unmount", vhdx_path])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("wsl --unmount failed (non-fatal): {}", e);
+    }
 }
 
 fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
