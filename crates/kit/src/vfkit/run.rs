@@ -140,21 +140,15 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
             if opts.replace {
                 info!("replacing existing VM '{}'", vm_name);
                 if existing.is_alive() {
-                    if let Err(e) = Command::new("kill")
-                        .arg(existing.vfkit_pid.to_string())
-                        .status()
-                    {
-                        tracing::warn!("failed to kill vfkit (pid {}): {}", existing.vfkit_pid, e);
+                    if let Some(pid) = rustix::process::Pid::from_raw(existing.vfkit_pid as i32) {
+                        if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+                            tracing::warn!("failed to kill vfkit (pid {}): {}", existing.vfkit_pid, e);
+                        }
                     }
-                    if let Err(e) = Command::new("kill")
-                        .arg(existing.gvproxy_pid.to_string())
-                        .status()
-                    {
-                        tracing::warn!(
-                            "failed to kill gvproxy (pid {}): {}",
-                            existing.gvproxy_pid,
-                            e
-                        );
+                    if let Some(pid) = rustix::process::Pid::from_raw(existing.gvproxy_pid as i32) {
+                        if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+                            tracing::warn!("failed to kill gvproxy (pid {}): {}", existing.gvproxy_pid, e);
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
