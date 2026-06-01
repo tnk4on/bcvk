@@ -216,7 +216,7 @@ fn create_base_disk(
     let pub_key_content = generate_ssh_keypair(&key_path)?;
 
     // Create target VHDX
-    let size_bytes = parse_size(disk_size)?;
+    let size_bytes = crate::vm_helpers::parse_size(disk_size)?;
     info!("creating VHDX: {} ({} bytes)", output_path, size_bytes);
     let ps_result = Command::new("powershell")
         .args([
@@ -482,36 +482,4 @@ fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
         .filter(|l| !l.is_empty())
         .collect();
     Ok(names)
-}
-
-fn parse_size(size_str: &str) -> Result<u64> {
-    let size_str = size_str.trim().to_uppercase();
-    if size_str.is_empty() {
-        bail!("Empty size string");
-    }
-    let (number_str, multiplier) = if let Some(num) = size_str.strip_suffix("TB") {
-        (num, 1024_u64.pow(4))
-    } else if let Some(num) = size_str.strip_suffix("GB") {
-        (num, 1024 * 1024 * 1024)
-    } else if let Some(num) = size_str.strip_suffix("MB") {
-        (num, 1024 * 1024)
-    } else if let Some(num) = size_str.strip_suffix("KB") {
-        (num, 1024)
-    } else if let Some(num) = size_str.strip_suffix('T') {
-        (num, 1024_u64.pow(4))
-    } else if let Some(num) = size_str.strip_suffix('G') {
-        (num, 1024 * 1024 * 1024)
-    } else if let Some(num) = size_str.strip_suffix('M') {
-        (num, 1024 * 1024)
-    } else if let Some(num) = size_str.strip_suffix('K') {
-        (num, 1024)
-    } else if let Some(num) = size_str.strip_suffix('B') {
-        (num, 1)
-    } else {
-        (&*size_str, 1)
-    };
-    let number: u64 = number_str
-        .parse()
-        .map_err(|_| color_eyre::eyre::eyre!("Invalid number in size: {}", number_str))?;
-    Ok(number * multiplier)
 }
