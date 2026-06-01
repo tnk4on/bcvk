@@ -174,21 +174,20 @@ fn fetch_boot_files(
     let _ = ssh.ssh_cmd(&format!(
         "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
          xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko; \
-         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/ublk_drv.ko.xz > /tmp/ublk_drv.ko 2>/dev/null || true",
-        m = merged_path, k = kver,
+         xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko",
+        m = merged_path,
+        k = kver,
     ));
     let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
     let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
     let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
-    let _ = ssh.scp_to_local("/tmp/ublk_drv.ko", &cache_dir.join("ublk_drv.ko"));
-    info!("kernel modules (vsock, hv_sock, nbd, ublk_drv): SCP complete");
+    info!("kernel modules (vsock, hv_sock, nbd): SCP complete");
 
-    // Copy nbd-vsock and ublk-vsock binaries from well-known location
+    // Copy nbd-vsock binary from well-known location
     let bcvk_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
         .join("bcvk");
-    for bin_name in &["nbd-vsock", "ublk-vsock"] {
+    for bin_name in &["nbd-vsock"] {
         let src = bcvk_dir.join(bin_name);
         if src.exists() {
             let dest = cache_dir.join(bin_name);
@@ -393,20 +392,6 @@ fn add_binaries_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) -> Resul
     w.write_all(&nbd_data)?;
     w.finish()?;
 
-    let ublk_vsock_path = cache_dir.join("ublk-vsock");
-    if ublk_vsock_path.exists() {
-        let ublk_data = std::fs::read(&ublk_vsock_path)?;
-        let b = NewcBuilder::new("usr/bin/ublk-vsock")
-            .mode(0o755)
-            .set_mode_file_type(ModeFileType::Regular);
-        let mut w = b.write(&mut *buf, ublk_data.len() as u32);
-        w.write_all(&ublk_data)?;
-        w.finish()?;
-        info!(
-            "included ublk-vsock ({} bytes) in initramfs",
-            ublk_data.len()
-        );
-    }
     Ok(())
 }
 
@@ -415,7 +400,7 @@ fn add_kernel_modules_to_cpio(buf: &mut Vec<u8>, cache_dir: &std::path::Path) ->
     use cpio::newc::ModeFileType;
     use std::io::Write;
 
-    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko", "ublk_drv.ko"] {
+    for module_name in &["nbd.ko", "vsock.ko", "hv_sock.ko"] {
         let module_path = cache_dir.join(module_name);
         if module_path.exists() {
             let module_data = std::fs::read(&module_path)?;
@@ -445,13 +430,7 @@ fn add_shell_scripts_to_cpio(buf: &mut Vec<u8>, vsock_port: u32) -> Result<()> {
 #!/bin/bash\n\
 modprobe hv_vmbus 2>/dev/null\n\
 insmod /usr/lib/bcvk/vsock.ko 2>/dev/kmsg\n\
-n=0; while [ $n -lt 10 ]; do insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break; sleep 1; n=$((n+1)); done\n\
-if insmod /usr/lib/bcvk/ublk_drv.ko 2>/dev/null; then\n\
-  if [ ! -e /dev/ublk-control ] && [ -f /sys/class/misc/ublk-control/dev ]; then\n\
-    DEVNUM=$(cat /sys/class/misc/ublk-control/dev)\n\
-    mknod /dev/ublk-control c ${DEVNUM%%:*} ${DEVNUM##*:}\n\
-  fi\n\
-fi\n";
+n=0; while [ $n -lt 10 ]; do insmod /usr/lib/bcvk/hv_sock.ko 2>/dev/null && break; sleep 1; n=$((n+1)); done\n";
     let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh")
         .mode(0o755)
         .set_mode_file_type(ModeFileType::Regular);
@@ -463,15 +442,6 @@ fi\n";
         "\
 #!/bin/bash\n\
 VSOCK_PORT={vsock_port}\n\
-\n\
-if [ -e /sys/module/ublk_drv ] && [ -x /usr/bin/ublk-vsock ] && [ -e /dev/ublk-control ]; then\n\
-    if /usr/bin/ublk-vsock --test 2>/dev/null; then\n\
-        echo 'bcvk: using ublk block device' > /dev/kmsg\n\
-        exec /usr/bin/ublk-vsock /dev/ublkb0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n\
-    else\n\
-        echo 'bcvk: ublk not available (test failed), using NBD' > /dev/kmsg\n\
-    fi\n\
-fi\n\
 echo 'bcvk: using NBD block device' > /dev/kmsg\n\
 insmod /usr/lib/bcvk/nbd.ko max_part=16 2>/dev/kmsg\n\
 exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
@@ -487,11 +457,7 @@ exec /usr/bin/nbd-vsock /dev/nbd0 \"$VSOCK_PORT\" 1 2>/dev/kmsg\n",
     let post_script = "\
 #!/bin/bash\n\
 sleep 1\n\
-if [ -b /dev/ublkb0 ]; then\n\
-    DEV=ublkb0\n\
-else\n\
-    DEV=nbd0\n\
-fi\n\
+DEV=nbd0\n\
 blockdev --rereadpt /dev/$DEV 2>/dev/null\n\
 echo 65536 > /sys/block/$DEV/queue/read_ahead_kb 2>/dev/null\n";
     let b = NewcBuilder::new("usr/lib/bcvk/block-device-post.sh")
