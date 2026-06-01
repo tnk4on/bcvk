@@ -55,8 +55,9 @@ fn resolve_path_in_machine(host_path: &str) -> String {
     } else {
         host_path.to_string()
     };
-    // macOS /tmp → /private/tmp symlink; machine内 /tmp は tmpfs なので /private/tmp を使う
-    // canonicalize() が /private/tmp に解決するので通常はこの分岐に入らないが念のため
+    // macOS /tmp is a symlink to /private/tmp; podman machine mounts
+    // /private/tmp via virtiofs, so we need the canonical path.
+    // canonicalize() normally resolves this, but handle it explicitly.
     if resolved.starts_with("/tmp/") {
         format!("/private{}", resolved)
     } else {
