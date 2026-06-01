@@ -274,13 +274,20 @@ pub(crate) fn kill_vm_service(meta: &VmMetadata) {
     if meta.service_pid == 0 {
         return;
     }
-    if let Err(e) = std::process::Command::new("taskkill")
-        .args(["/F", "/PID", &meta.service_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        tracing::debug!("failed to kill service process {}: {}", meta.service_pid, e);
+    #[allow(unsafe_code)]
+    unsafe {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        let handle = OpenProcess(PROCESS_TERMINATE, false, meta.service_pid);
+        match handle {
+            Ok(h) => {
+                let _ = TerminateProcess(h, 1);
+                let _ = CloseHandle(h);
+            }
+            Err(e) => {
+                tracing::debug!("failed to open process {}: {}", meta.service_pid, e);
+            }
+        }
     }
 }
 
