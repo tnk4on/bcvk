@@ -47,10 +47,18 @@ pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Resu
 pub(crate) fn ensure_nbdkit_ready(machine: &str) -> Result<()> {
     let script = crate::vm_helpers::nbdkit_setup_script(EROFS_PLUGIN_SO);
     info!("checking nbdkit container image...");
-    let output = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", "bash", "-c", &script])
-        .output()
+    let mut child = Command::new("podman")
+        .args(["machine", "ssh", machine, "--", "bash", "-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("nbdkit setup in podman machine")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(script.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
             "nbdkit setup failed: {}",
