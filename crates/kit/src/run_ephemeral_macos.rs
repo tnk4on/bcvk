@@ -289,6 +289,9 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
 
+    // Ensure nbdkit container image is ready (auto-build on first run)
+    crate::nbdkit_macos::ensure_nbdkit_ready(&machine)?;
+
     // Get container image merged overlay path
     let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
