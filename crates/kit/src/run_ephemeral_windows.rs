@@ -187,7 +187,10 @@ fn spawn_cleanup(c: &VmCleanup) {
 pub struct RunEphemeralOpts {
     /// Container image to boot
     pub image: String,
-    /// Number of vCPUs
+    /// Instance type (e.g., u1.nano, u1.small, u1.medium). Overrides vcpus/memory if specified.
+    #[clap(long)]
+    pub itype: Option<crate::instancetypes::InstanceType>,
+    /// Number of vCPUs (overridden by --itype if specified)
     #[clap(long)]
     pub vcpus: Option<u32>,
     /// Memory size (e.g. "4G", "2048M", or plain number for MB)
@@ -295,8 +298,17 @@ impl RunContext {
         });
         let vm_name = format!("{}{}", VM_PREFIX, vm_name_suffix);
         let name = vm_name_suffix;
-        let vcpus = opts.vcpus.unwrap_or_else(default_vcpus);
-        let memory_mb = parse_memory_to_mb(&opts.memory)?;
+        let vcpus = opts
+            .itype
+            .as_ref()
+            .map(|t| t.vcpus())
+            .or(opts.vcpus)
+            .unwrap_or_else(default_vcpus);
+        let memory_mb = opts
+            .itype
+            .as_ref()
+            .map(|t| t.memory_mb())
+            .unwrap_or_else(|| parse_memory_to_mb(&opts.memory).unwrap_or(4096));
         let base_dir = ephemeral_base_dir();
         std::fs::create_dir_all(&base_dir)?;
         let ssh_key_path = base_dir.join(format!("{}-key", name));
