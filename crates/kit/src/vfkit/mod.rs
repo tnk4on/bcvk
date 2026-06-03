@@ -18,6 +18,18 @@ pub mod ssh;
 pub mod start;
 pub mod stop;
 
+/// Output format for inspect and list commands.
+#[derive(Debug, Clone, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    /// Table format (default for list)
+    Table,
+    /// JSON format
+    Json,
+    /// YAML-like key-value format (default for inspect)
+    Yaml,
+}
+
 /// Subcommands for persistent VM management via vfkit.
 #[derive(Debug, Subcommand)]
 pub enum VmCommands {
@@ -26,11 +38,7 @@ pub enum VmCommands {
 
     /// List all persistent VMs
     #[clap(name = "list", alias = "ls")]
-    List {
-        /// Output in JSON format
-        #[clap(long)]
-        json: bool,
-    },
+    List(list::VmListOpts),
 
     /// SSH into a running VM
     Ssh(ssh::VmSshOpts),
@@ -53,13 +61,7 @@ pub enum VmCommands {
     RemoveAll(rm_all::VmRmAllOpts),
 
     /// Show detailed VM information
-    Inspect {
-        /// VM name
-        name: String,
-        /// Output in JSON format
-        #[clap(long)]
-        json: bool,
-    },
+    Inspect(inspect::VmInspectOpts),
 }
 
 impl VmCommands {
@@ -67,13 +69,13 @@ impl VmCommands {
     pub fn run(self) -> Result<()> {
         match self {
             VmCommands::Run(opts) => run::run(opts),
-            VmCommands::List { json } => list::run(json),
+            VmCommands::List(opts) => list::run(opts),
             VmCommands::Ssh(opts) => ssh::run(opts),
             VmCommands::Stop { name } => stop::run(&name),
             VmCommands::Start(opts) => start::run(opts),
             VmCommands::Remove(opts) => rm::run(opts),
             VmCommands::RemoveAll(opts) => rm_all::run(opts),
-            VmCommands::Inspect { name, json } => inspect::run(&name, json),
+            VmCommands::Inspect(opts) => inspect::run(opts),
         }
     }
 }

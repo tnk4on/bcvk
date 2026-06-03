@@ -34,6 +34,9 @@ pub struct ToDiskMacosOpts {
     /// Installation options (filesystem, root-size, etc.)
     #[clap(flatten)]
     pub install: InstallOptions,
+    /// Check if the disk would be regenerated without actually creating it
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 fn base_dir() -> PathBuf {
@@ -276,6 +279,38 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
     let machine = detect_machine_name()?;
     let digest = ensure_image_and_get_digest(&opts.source_image)?;
     info!("image digest: {}...", &digest[..16.min(digest.len())]);
+
+    let cache_hash = compute_cache_hash(&digest, &opts.source_image, &opts.install);
+    let short_hash: String = cache_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&cache_hash)
+        .chars()
+        .take(16)
+        .collect();
+    let base_disk_path = base_dir().join(format!("bootc-base-{}.raw", short_hash));
+
+    if opts.dry_run {
+        if base_disk_path.exists() {
+            if let Some(stored) = read_xattr(&base_disk_path, CACHE_HASH_XATTR) {
+                if stored == cache_hash {
+                    println!("Would reuse cached base disk: {}", base_disk_path.display());
+                    if Path::new(&opts.target_disk).exists() {
+                        println!("Output already exists: {}", opts.target_disk);
+                    } else {
+                        println!("Would create disk: {} (from base)", opts.target_disk);
+                    }
+                    return Ok(());
+                }
+            }
+            println!("Would regenerate base disk (hash mismatch)");
+        } else {
+            println!(
+                "Would create new base disk and output: {}",
+                opts.target_disk
+            );
+        }
+        return Ok(());
+    }
 
     let base_disk_path = find_or_create_base_disk(
         &opts.source_image,

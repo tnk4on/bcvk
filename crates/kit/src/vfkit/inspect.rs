@@ -1,15 +1,29 @@
 //! vm inspect — Show detailed VM information.
 
-use super::VmMetadata;
+use super::{OutputFormat, VmMetadata};
+use clap::Parser;
 use color_eyre::Result;
 
-/// Display detailed metadata for the named VM.
-pub fn run(name: &str, json: bool) -> Result<()> {
-    let meta = VmMetadata::load(name)?;
+/// Options for `vm inspect`.
+#[derive(Parser, Debug)]
+pub struct VmInspectOpts {
+    /// VM name
+    pub name: String,
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Yaml)]
+    pub format: OutputFormat,
+}
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&meta)?);
-        return Ok(());
+/// Display detailed metadata for the named VM.
+pub fn run(opts: VmInspectOpts) -> Result<()> {
+    let meta = VmMetadata::load(&opts.name)?;
+
+    match opts.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&meta)?);
+            return Ok(());
+        }
+        OutputFormat::Yaml | OutputFormat::Table => {}
     }
 
     let state = if meta.is_alive() {
