@@ -214,7 +214,9 @@ pub fn wait_for_vm_ssh(
 
         if status.ssh_access {
             // End the monitor
-            let _ = child.kill();
+            if let Err(e) = child.kill() {
+                tracing::debug!("failed to kill monitor process: {}", e);
+            }
             return Ok((true, progress));
         }
 

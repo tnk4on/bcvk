@@ -234,9 +234,16 @@ fn relay_vm_to_podman_tracked(
         return;
     }
 
+    let mut req_count: u64 = 0;
+    let mut cache_hits: u64 = 0;
+    let mut cache_misses: u64 = 0;
     loop {
         let mut hdr = [0u8; 28];
         if !wsa_recv_exact(vm_sock, &mut hdr) {
+            info!(
+                "relay VM→podman: recv failed after {} requests ({} hits, {} misses)",
+                req_count, cache_hits, cache_misses
+            );
             break;
         }
 
@@ -253,15 +260,33 @@ fn relay_vm_to_podman_tracked(
         let offset = u64::from_be_bytes(hdr[16..24].try_into().unwrap());
         let length = u32::from_be_bytes(hdr[24..28].try_into().unwrap()) as usize;
 
+        req_count += 1;
         if cmd == NBD_CMD_READ {
-            let cache_hit = cache.read().unwrap().get(&offset).and_then(|d| {
-                if d.len() == length {
-                    Some(d.clone())
+            let cache_hit = {
+                let c = cache.read().unwrap();
+                if let Some(d) = c.get(&offset) {
+                    if d.len() == length {
+                        Some(d.clone())
+                    } else if d.len() > length {
+                        Some(d[..length].to_vec())
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    let chunk_size: u64 = 512 * 1024;
+                    let chunk_start = (offset / chunk_size) * chunk_size;
+                    let inner_offset = (offset - chunk_start) as usize;
+                    c.get(&chunk_start).and_then(|d| {
+                        if inner_offset + length <= d.len() {
+                            Some(d[inner_offset..inner_offset + length].to_vec())
+                        } else {
+                            None
+                        }
+                    })
                 }
-            });
+            };
             if let Some(cached_data) = cache_hit {
+                cache_hits += 1;
                 let mut reply_buf = vec![0u8; 16 + length];
                 reply_buf[0..4].copy_from_slice(&NBD_REPLY_MAGIC.to_be_bytes());
                 reply_buf[8..16].copy_from_slice(&handle.to_be_bytes());
@@ -273,6 +298,8 @@ fn relay_vm_to_podman_tracked(
                 drop(sock);
                 continue;
             }
+            cache_misses += 1;
+            info!("relay cache MISS: offset={}, length={}", offset, length);
             pending
                 .write()
                 .unwrap()
@@ -539,8 +566,12 @@ fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache
         relay_podman_to_vm_tracked(podman_sock, cache_reply, pending_reply, vm_w2);
     });
 
-    let _ = t1.join();
-    let _ = t2.join();
+    if let Err(e) = t1.join() {
+        tracing::debug!("relay thread 1 panicked: {:?}", e);
+    }
+    if let Err(e) = t2.join() {
+        tracing::debug!("relay thread 2 panicked: {:?}", e);
+    }
 
     // Only close the VM socket; keep podman socket alive so nbdkit survives
     // across VM-side reconnections (e.g. after switch_root).

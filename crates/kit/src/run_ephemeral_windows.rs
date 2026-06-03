@@ -22,9 +22,11 @@ use crate::hyperv::vm;
 use crate::vm_helpers::{
     default_vcpus, detect_machine_name, detect_podman_vmtype, ensure_image_and_get_digest,
     is_machine_rootful, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
+    NBDKIT_IMAGE,
 };
 
 const VM_PREFIX: &str = "bcvk-ephemeral-";
+const EROFS_PLUGIN_SO: &[u8] = include_bytes!("../nbdkit-erofs-plugin.so");
 
 // --- Metadata ---
 
@@ -65,7 +67,11 @@ impl EphemeralVmMetadata {
 
     pub fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
-        let _ = std::fs::remove_file(path);
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove {}: {}", path.display(), e);
+            }
+        }
     }
 
     pub fn load(name: &str) -> Result<Self> {
@@ -116,15 +122,21 @@ impl Drop for VmCleanup {
         if let Some(ref fwd) = self.ssh_forward {
             fwd.stop();
         }
-        let _ = vm::remove_vm(&self.vm_name);
+        if let Err(e) = vm::remove_vm(&self.vm_name) {
+            tracing::debug!("failed to remove VM {}: {}", self.vm_name, e);
+        }
         if let Some(ref name) = self.nbd_container {
             stop_nbdkit_container(name);
         }
         if let Some(ref vhdx) = self.vhdx_path {
-            let _ = std::fs::remove_file(vhdx);
+            if let Err(e) = std::fs::remove_file(vhdx) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove VHDX {}: {}", vhdx, e);
+                }
+            }
         }
         if let Ok(machine) = detect_machine_name() {
-            let _ = Command::new("podman")
+            if let Err(e) = Command::new("podman")
                 .args([
                     "machine",
                     "ssh",
@@ -137,10 +149,15 @@ impl Drop for VmCleanup {
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
+                .status()
+            {
+                tracing::debug!("failed to umount image {}: {}", self.image, e);
+            }
         }
         if let Some(port) = self.vsock_port {
-            let _ = vm::unregister_vsock_service(port);
+            if let Err(e) = vm::unregister_vsock_service(port) {
+                tracing::debug!("failed to unregister vsock service port {}: {}", port, e);
+            }
         }
         if let Some(ref sw) = self.switch_name {
             vm::remove_internal_switch(sw);
@@ -151,32 +168,48 @@ impl Drop for VmCleanup {
 
 /// Spawn cleanup as a detached process so bcvk can exit immediately.
 fn spawn_cleanup(c: &VmCleanup) {
-    let _ = vm::stop_vm(&c.vm_name);
-    let _ = vm::remove_vm(&c.vm_name);
+    if let Err(e) = vm::stop_vm(&c.vm_name) {
+        tracing::debug!("failed to stop VM {}: {}", c.vm_name, e);
+    }
+    if let Err(e) = vm::remove_vm(&c.vm_name) {
+        tracing::debug!("failed to remove VM {}: {}", c.vm_name, e);
+    }
     if let Some(ref sw) = c.switch_name {
         vm::remove_internal_switch(sw);
     }
     if let Some(ref name) = c.nbd_container {
-        let _ = Command::new("podman")
+        if let Err(e) = Command::new("podman")
             .args(["rm", "-f", name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            tracing::debug!("failed to remove container {}: {}", name, e);
+        }
     }
     if let Some(ref vhdx) = c.vhdx_path {
-        let _ = std::fs::remove_file(vhdx);
+        if let Err(e) = std::fs::remove_file(vhdx) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove VHDX {}: {}", vhdx, e);
+            }
+        }
     }
     if let Ok(machine) = detect_machine_name() {
-        let _ = Command::new("podman")
+        if let Err(e) = Command::new("podman")
             .args([
                 "machine", "ssh", &machine, "--", "podman", "image", "umount", &c.image,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            tracing::debug!("failed to umount image {}: {}", c.image, e);
+        }
     }
     if let Some(port) = c.vsock_port {
-        let _ = vm::unregister_vsock_service(port);
+        if let Err(e) = vm::unregister_vsock_service(port) {
+            tracing::debug!("failed to unregister vsock service port {}: {}", port, e);
+        }
     }
     EphemeralVmMetadata::remove(&c.name);
 }
@@ -351,8 +384,13 @@ fn setup_image_and_guid(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Set
     let ssh_handle = std::thread::spawn(move || -> Result<String> {
         if need_ssh {
             let pub_path = PathBuf::from(format!("{}.pub", ssh_key_path.display()));
-            let _ = std::fs::remove_file(&ssh_key_path);
-            let _ = std::fs::remove_file(&pub_path);
+            for p in [&ssh_key_path, &pub_path] {
+                if let Err(e) = std::fs::remove_file(p) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::debug!("failed to remove {}: {}", p.display(), e);
+                    }
+                }
+            }
             let status = Command::new("ssh-keygen")
                 .args(["-t", "ed25519", "-f"])
                 .arg(&ssh_key_path)
@@ -468,41 +506,49 @@ fn create_boot_disk(ctx: &RunContext, p0: &SetupResult) -> Result<BootDiskResult
         let vsock_port = ctx.vsock_port;
         let container_name = nbd_name.clone();
         std::thread::spawn(move || -> Result<Vec<u8>> {
-            let nbdkit_script = format!(
-                "if ! {run} image exists localhost/bcvk-nbdkit:latest 2>/dev/null; then \
-                   echo BUILDING_NBDKIT_IMAGE; \
-                   printf 'FROM quay.io/fedora/fedora:latest\\nRUN dnf install -y nbdkit && dnf clean all\\n' | \
-                   {run} build -t localhost/bcvk-nbdkit:latest -f - /tmp; \
-                 fi; \
-                 {run} rm -f -t 0 {name} 2>/dev/null; \
+            let setup_script = crate::vm_helpers::nbdkit_setup_script(EROFS_PLUGIN_SO);
+            ps.ssh_cmd_stdin(&setup_script)?;
+            let run_script = format!(
+                "{run} rm -f -t 0 {name} 2>/dev/null; \
                  {run} run -d --name {name} --privileged \
                  --network=host --device /dev/vsock \
                  -v {merged}:{merged}:ro \
-                 -v /var/tmp/bcvk:/bcvk:z,exec \
-                 localhost/bcvk-nbdkit:latest \
-                 nbdkit -fv --threads 4 --vsock -p {port} -r /bcvk/libnbdkit_erofs_plugin.so \
+                 {image} \
+                 nbdkit -fv --threads 4 --vsock -p {port} -r /plugin.so \
                  dir={merged} \
                  'cmdline=root=PARTLABEL=bcvk-root ro rootfstype=erofs'{ssh}",
                 run = run_str,
                 name = nbd_name,
                 merged = merged,
                 port = vsock_port,
+                image = NBDKIT_IMAGE,
                 ssh = ssh,
             );
-            let result = ps.ssh_cmd(&nbdkit_script)?;
-            for _ in 0..25 {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let check = ps.ssh_cmd(&format!(
-                    "{} ps --filter name={} --format '{{{{.Status}}}}'",
-                    run_str, container_name
-                ));
+            let result = ps.ssh_cmd(&run_script)?;
+            for i in 0..600 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let check = ps.ssh_cmd(&format!("{} logs {} 2>&1", run_str, container_name));
                 if let Ok(out) = check {
-                    if String::from_utf8_lossy(&out).contains("Up") {
+                    let logs = String::from_utf8_lossy(&out);
+                    if logs.contains("bound to vsock") {
                         return Ok(result);
                     }
+                    if logs.contains("exit") || logs.contains("panic") {
+                        bail!(
+                            "nbdkit container '{}' crashed: {}",
+                            container_name,
+                            logs.lines().last().unwrap_or("")
+                        );
+                    }
+                }
+                if i == 59 {
+                    info!("nbdkit: still waiting for vsock bind (30s)...");
                 }
             }
-            bail!("nbdkit container '{}' failed to start", container_name)
+            bail!(
+                "nbdkit container '{}' failed to bind vsock within 300s",
+                container_name
+            )
         })
     };
 
@@ -576,8 +622,12 @@ fn start_vm_and_services(
         for line in reader.lines() {
             match line {
                 Ok(l) => {
-                    let _ = writeln!(log, "{}", l);
-                    let _ = log.flush();
+                    if let Err(e) = writeln!(log, "{}", l) {
+                        tracing::debug!("failed to write serial log: {}", e);
+                    }
+                    if let Err(e) = log.flush() {
+                        tracing::debug!("failed to flush serial log: {}", e);
+                    }
                     if serial_debug {
                         eprintln!("[serial] {}", l);
                     }
@@ -631,9 +681,12 @@ fn start_vm_and_services(
         elapsed!("relay connected");
 
         if gui {
-            let _ = Command::new("vmconnect.exe")
+            if let Err(e) = Command::new("vmconnect.exe")
                 .args(["localhost", &vm_name])
-                .spawn();
+                .spawn()
+            {
+                tracing::debug!("failed to launch vmconnect: {}", e);
+            }
         }
 
         info!("serial log: {}", serial_log_path.display());
@@ -808,11 +861,14 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
 }
 
 fn stop_nbdkit_container(name: &str) {
-    let _ = Command::new("podman")
+    if let Err(e) = Command::new("podman")
         .args(["rm", "-f", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to remove nbdkit container {}: {}", name, e);
+    }
 }
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---

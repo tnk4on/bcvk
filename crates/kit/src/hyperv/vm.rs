@@ -436,7 +436,9 @@ fn wmi_modify_guest_service_settings(
             None,
         )?;
         if let Some(ref out) = out_params {
-            let _ = wmi_check_result(services, out);
+            if let Err(e) = wmi_check_result(services, out) {
+                tracing::debug!("WMI result check failed: {}", e);
+            }
         }
     }
     Ok(())
@@ -638,14 +640,16 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
 
     // NAT via PowerShell
     let nat_name = format!("{}-nat", name);
-    let _ = run_ps(&format!(
+    if let Err(e) = run_ps(&format!(
         "$n = Get-NetNat -Name '{}' -EA SilentlyContinue; \
          if (-not $n) {{ New-NetNat -Name '{}' -InternalIPInterfaceAddressPrefix '{}' | Out-Null }}",
         nat_name, nat_name, subnet
-    ));
+    )) {
+        tracing::debug!("failed to create NAT {}: {}", nat_name, e);
+    }
 
     // Firewall via netsh
-    let _ = Command::new("netsh")
+    if let Err(e) = Command::new("netsh")
         .args([
             "advfirewall",
             "firewall",
@@ -659,13 +663,19 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to add firewall rule: {}", e);
+    }
 
-    let _ = Command::new("netsh")
+    if let Err(e) = Command::new("netsh")
         .args(["advfirewall", "set", "allprofiles", "state", "off"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to disable firewall: {}", e);
+    }
 
     debug!("ensured internal switch: {} ({})", name, host_ip);
     Ok(SwitchInfo {
@@ -675,11 +685,13 @@ pub fn ensure_internal_switch(name: &str, host_ip: &str, prefix_len: u8) -> Resu
 }
 
 pub fn remove_internal_switch(name: &str) {
-    let _ = run_ps(&format!(
+    if let Err(e) = run_ps(&format!(
         "Remove-NetNat -Name '{}-nat' -Confirm:$false -EA SilentlyContinue; \
          Remove-VMSwitch -Name '{}' -Force -EA SilentlyContinue",
         name, name
-    ));
+    )) {
+        tracing::debug!("failed to remove switch {}: {}", name, e);
+    }
 
     // Wait for vEthernet adapter to disappear (VMMS miniport cleanup is async)
     for i in 0..20 {
@@ -705,7 +717,9 @@ pub fn remove_internal_switch(name: &str) {
 
 #[allow(unsafe_code)]
 pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> Result<()> {
-    let _ = remove_vm(name);
+    if let Err(e) = remove_vm(name) {
+        tracing::debug!("pre-cleanup remove_vm failed: {}", e);
+    }
 
     // Step 1: Create Gen2 VM via WMI DefineSystem
     wmi_define_system(name)?;
@@ -868,7 +882,9 @@ pub fn create_gen2_vm(name: &str, memory_mb: u32, vcpus: u32, switch: &str) -> R
              </INSTANCE>",
             gsi_id,
         );
-        let _ = wmi_modify_guest_service_settings(&services, &mgmt_path, &[&gsi_xml]);
+        if let Err(e) = wmi_modify_guest_service_settings(&services, &mgmt_path, &[&gsi_xml]) {
+            tracing::debug!("failed to modify guest service settings: {}", e);
+        }
     }
 
     info!(
@@ -893,11 +909,14 @@ pub fn set_boot_order_disk_first(name: &str) {
          if ($hd) {{ Set-VMFirmware -VMName '{}' -FirstBootDevice $hd }}",
         name, name
     );
-    let _ = Command::new("powershell")
+    if let Err(e) = Command::new("powershell")
         .args(["-NoProfile", "-Command", &ps_cmd])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to set boot order for {}: {}", name, e);
+    }
 }
 
 #[allow(unsafe_code)]
@@ -1016,7 +1035,12 @@ pub fn start_vm(name: &str) -> Result<()> {
 
 #[allow(unsafe_code)]
 pub fn remove_vm(name: &str) -> Result<()> {
-    let _ = stop_vm(name);
+    if let Err(e) = stop_vm(name) {
+        tracing::debug!(
+            "stop_vm before remove failed (may already be stopped): {}",
+            e
+        );
+    }
     let services = wmi_connect("root\\virtualization\\v2")?;
 
     let vm_path = match wmi_query_first_string(
@@ -1044,7 +1068,7 @@ pub fn remove_vm(name: &str) -> Result<()> {
 
     unsafe {
         let mut out_params = None;
-        let _ = services.ExecMethod(
+        if let Err(e) = services.ExecMethod(
             &BSTR::from(mgmt_path),
             &BSTR::from("DestroySystem"),
             WBEM_GENERIC_FLAG_TYPE(0),
@@ -1052,9 +1076,13 @@ pub fn remove_vm(name: &str) -> Result<()> {
             &in_params,
             Some(&mut out_params),
             None,
-        );
+        ) {
+            tracing::debug!("DestroySystem ExecMethod failed: {}", e);
+        }
         if let Some(ref out) = out_params {
-            let _ = wmi_check_result(&services, out);
+            if let Err(e) = wmi_check_result(&services, out) {
+                tracing::debug!("WMI result check failed: {}", e);
+            }
         }
     }
     debug!("removed VM: {}", name);
@@ -1269,7 +1297,7 @@ mod tests {
     #[ignore = "requires Hyper-V"]
     fn test_create_gen2_vm() {
         let name = "bcvk-wmi-test";
-        let _ = remove_vm(name);
+        drop(remove_vm(name));
 
         create_gen2_vm(name, 2048, 2, "bcvk").expect("create_gen2_vm failed");
 
@@ -1279,7 +1307,7 @@ mod tests {
         let guid = get_vm_guid(name).expect("get_vm_guid failed");
         assert!(!guid.is_empty(), "VM GUID should not be empty");
 
-        let _ = remove_vm(name);
+        drop(remove_vm(name));
         let state_after = get_vm_state(name).expect("get_vm_state after remove");
         assert!(state_after.is_empty(), "VM should not exist after remove");
     }
@@ -1289,7 +1317,7 @@ mod tests {
     fn test_simultaneous_vm_creation() {
         let names = ["bcvk-sim-test-1", "bcvk-sim-test-2"];
         for name in &names {
-            let _ = remove_vm(name);
+            drop(remove_vm(name));
         }
 
         let handles: Vec<_> = names
@@ -1317,7 +1345,7 @@ mod tests {
         assert_ne!(guid1, guid2, "GUIDs must differ");
 
         for name in &names {
-            let _ = remove_vm(name);
+            drop(remove_vm(name));
         }
     }
 
@@ -1329,7 +1357,7 @@ mod tests {
         let host_ip = "10.0.77.1";
 
         // Cleanup from previous runs
-        let _ = remove_vm(vm_name);
+        drop(remove_vm(vm_name));
         remove_internal_switch(sw_name);
 
         // 1. Create internal switch
@@ -1356,23 +1384,25 @@ mod tests {
 
         // 4. Attach VHDX (create a dummy one first)
         let vhdx_dir = std::env::temp_dir().join("bcvk-test");
-        let _ = std::fs::create_dir_all(&vhdx_dir);
+        drop(std::fs::create_dir_all(&vhdx_dir));
         let vhdx_path = vhdx_dir.join("lifecycle-test.vhdx");
         let vhdx_str = vhdx_path.to_string_lossy().to_string();
 
         // Create minimal VHDX via PowerShell (only for test setup)
-        let _ = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "Remove-Item '{}' -Force -EA SilentlyContinue; \
+        drop(
+            std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!(
+                        "Remove-Item '{}' -Force -EA SilentlyContinue; \
                      New-VHD -Path '{}' -SizeBytes 512MB -Dynamic | Out-Null",
-                    vhdx_str, vhdx_str
-                ),
-            ])
-            .status();
+                        vhdx_str, vhdx_str
+                    ),
+                ])
+                .status(),
+        );
 
         if vhdx_path.exists() {
             attach_vhdx_at_slot(vm_name, &vhdx_str, 0).expect("attach_vhdx failed");
@@ -1385,7 +1415,7 @@ mod tests {
 
             // 6. Stop VM
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = stop_vm(vm_name);
+            drop(stop_vm(vm_name));
             std::thread::sleep(std::time::Duration::from_secs(1));
             let state = get_vm_state(vm_name).expect("get_vm_state after stop");
             eprintln!("[OK] stop_vm: state={}", state);
@@ -1418,7 +1448,7 @@ mod tests {
         );
 
         // Cleanup
-        let _ = std::fs::remove_dir_all(&vhdx_dir);
+        drop(std::fs::remove_dir_all(&vhdx_dir));
         eprintln!("[OK] all lifecycle tests passed");
     }
 }

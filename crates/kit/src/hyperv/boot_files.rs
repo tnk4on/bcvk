@@ -75,11 +75,57 @@ impl PodmanSsh {
             .status()?;
         let stdout = std::fs::read(&stdout_path).unwrap_or_default();
         let stderr = std::fs::read(&stderr_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&stdout_path);
-        let _ = std::fs::remove_file(&stderr_path);
+        for p in [&stdout_path, &stderr_path] {
+            if let Err(e) = std::fs::remove_file(p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove temp file {}: {}", p.display(), e);
+                }
+            }
+        }
         if !status.success() {
             let stderr_str = String::from_utf8_lossy(&stderr);
             bail!("ssh failed: {}\nstderr: {}", cmd, stderr_str.trim());
+        }
+        Ok(stdout)
+    }
+
+    /// Run a shell script via stdin (for large scripts that exceed command-line limits).
+    pub fn ssh_cmd_stdin(&self, script: &str) -> Result<Vec<u8>> {
+        use std::io::Write;
+        let remote_cmd = "sudo bash -s".to_string();
+        let tmp_dir = std::env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let stdout_path = tmp_dir.join(format!("bcvk-ssh-{}.out", stamp));
+        let stderr_path = tmp_dir.join(format!("bcvk-ssh-{}.err", stamp));
+        let stdout_file = std::fs::File::create(&stdout_path)?;
+        let stderr_file = std::fs::File::create(&stderr_path)?;
+        let mut child = Command::new("ssh")
+            .args(self.ssh_args())
+            .arg(&self.user_host())
+            .arg(&remote_cmd)
+            .stdin(Stdio::piped())
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(script.as_bytes())?;
+        let status = child.wait()?;
+        let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+        let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+        for p in [&stdout_path, &stderr_path] {
+            if let Err(e) = std::fs::remove_file(p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("failed to remove temp file {}: {}", p.display(), e);
+                }
+            }
+        }
+        if !status.success() {
+            bail!(
+                "ssh script failed:\nstderr: {}",
+                String::from_utf8_lossy(&stderr).trim()
+            );
         }
         Ok(stdout)
     }
@@ -171,16 +217,24 @@ fn fetch_boot_files(
     info!("initramfs: SCP complete");
 
     // Fetch kernel modules (decompress to /tmp since overlay is read-only)
-    let _ = ssh.ssh_cmd(&format!(
+    if let Err(e) = ssh.ssh_cmd(&format!(
         "xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/vsock.ko.xz > /tmp/vsock.ko; \
          xz -dk -c {m}/usr/lib/modules/{k}/kernel/net/vmw_vsock/hv_sock.ko.xz > /tmp/hv_sock.ko; \
          xz -dk -c {m}/usr/lib/modules/{k}/kernel/drivers/block/nbd.ko.xz > /tmp/nbd.ko",
         m = merged_path,
         k = kver,
-    ));
-    let _ = ssh.scp_to_local("/tmp/vsock.ko", &cache_dir.join("vsock.ko"));
-    let _ = ssh.scp_to_local("/tmp/hv_sock.ko", &cache_dir.join("hv_sock.ko"));
-    let _ = ssh.scp_to_local("/tmp/nbd.ko", &cache_dir.join("nbd.ko"));
+    )) {
+        tracing::debug!("failed to decompress kernel modules: {}", e);
+    }
+    for (remote, local) in [
+        ("/tmp/vsock.ko", "vsock.ko"),
+        ("/tmp/hv_sock.ko", "hv_sock.ko"),
+        ("/tmp/nbd.ko", "nbd.ko"),
+    ] {
+        if let Err(e) = ssh.scp_to_local(remote, &cache_dir.join(local)) {
+            tracing::debug!("failed to fetch {}: {}", remote, e);
+        }
+    }
     info!("kernel modules (vsock, hv_sock, nbd): SCP complete");
 
     // Copy nbd-vsock binary from well-known location
@@ -270,7 +324,9 @@ pub fn create_boot_vhdx(
 
     // Copy cached VHDX as starting point if available
     if cache_vhdx.exists() && !output_path.exists() {
-        let _ = std::fs::copy(&cache_vhdx, output_path);
+        if let Err(e) = std::fs::copy(&cache_vhdx, output_path) {
+            tracing::debug!("failed to copy cached VHDX: {}", e);
+        }
     }
 
     let ps_script = if output_path.exists() {
@@ -330,12 +386,19 @@ pub fn create_boot_vhdx(
 
     // Save to cache for future reuse (best-effort, ignore lock errors)
     if output_path != cache_vhdx {
-        let _ = std::fs::copy(output_path, &cache_vhdx);
+        if let Err(e) = std::fs::copy(output_path, &cache_vhdx) {
+            tracing::debug!("failed to save VHDX to cache: {}", e);
+        }
     }
 
     // Cleanup temp initramfs
-    let _ = std::fs::remove_file(&initramfs_tmp);
-    let _ = std::fs::remove_file(&grub_cfg_path);
+    for p in [&initramfs_tmp, &grub_cfg_path] {
+        if let Err(e) = std::fs::remove_file(p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove temp file {}: {}", p.display(), e);
+            }
+        }
+    }
 
     info!("boot VHDX: {}", vhdx_str);
     Ok(vhdx_str)
