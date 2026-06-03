@@ -129,7 +129,6 @@ pub(crate) fn start_nbdkit_erofs_plugin(
     }
 
     info!("waiting for nbdkit on port {}...", nbd_port);
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], nbd_port)),
@@ -142,25 +141,46 @@ pub(crate) fn start_nbdkit_erofs_plugin(
                 break;
             }
         }
-        if std::time::Instant::now() > deadline {
-            let _ = Command::new("podman")
-                .args([
-                    "machine",
-                    "ssh",
-                    machine,
-                    "--",
-                    "podman",
-                    "rm",
-                    "-f",
-                    &container_name,
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            bail!(
-                "nbdkit erofs plugin did not become ready on port {}",
-                nbd_port
-            );
+        // Check if container is still alive (no fixed timeout — wait as long
+        // as plugin_get_ready() is running, which scans the entire overlay
+        // directory and scales with image size)
+        let status = Command::new("podman")
+            .args([
+                "machine",
+                "ssh",
+                machine,
+                "--",
+                "podman",
+                "ps",
+                "--filter",
+                &format!("name={}", container_name),
+                "--format",
+                "{{.Status}}",
+            ])
+            .output();
+        match status {
+            Ok(out) if String::from_utf8_lossy(&out.stdout).contains("Up") => {}
+            _ => {
+                let _ = Command::new("podman")
+                    .args([
+                        "machine",
+                        "ssh",
+                        machine,
+                        "--",
+                        "podman",
+                        "rm",
+                        "-f",
+                        &container_name,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                bail!(
+                    "nbdkit container '{}' exited before becoming ready on port {}",
+                    container_name,
+                    nbd_port
+                );
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     }
