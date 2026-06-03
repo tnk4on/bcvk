@@ -347,9 +347,12 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
     println!("SSH: ssh -p {} -i {} root@localhost", ssh_port, ssh_key);
 
     if opts.gui {
-        let _ = std::process::Command::new("vmconnect.exe")
+        if let Err(e) = std::process::Command::new("vmconnect.exe")
             .args(["localhost", &vm_name])
-            .spawn();
+            .spawn()
+        {
+            tracing::debug!("failed to launch vmconnect: {}", e);
+        }
     }
 
     if opts.ssh_wait {

@@ -48,7 +48,9 @@ impl SshForward {
                                 tokio::spawn(async move {
                                     match tokio::net::TcpStream::connect(&addr).await {
                                         Ok(mut server) => {
-                                            let _ = copy_bidirectional(&mut client, &mut server).await;
+                                            if let Err(e) = copy_bidirectional(&mut client, &mut server).await {
+                                                tracing::debug!("ssh forward copy ended: {}", e);
+                                            }
                                         }
                                         Err(e) => {
                                             debug!("port forward connect to {} failed: {}", addr, e);
@@ -87,7 +89,9 @@ impl SshForward {
                                 tokio::spawn(async move {
                                     match tokio::net::TcpStream::connect(&addr).await {
                                         Ok(mut server) => {
-                                            let _ = copy_bidirectional(&mut client, &mut server).await;
+                                            if let Err(e) = copy_bidirectional(&mut client, &mut server).await {
+                                                tracing::debug!("ssh forward copy ended: {}", e);
+                                            }
                                         }
                                         Err(e) => {
                                             debug!("SSH forward connect to {} failed: {}", addr, e);

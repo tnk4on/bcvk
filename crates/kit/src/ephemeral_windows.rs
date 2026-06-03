@@ -152,24 +152,32 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     }
 
     for vm in &vms {
-        let _ = crate::hyperv::vm::remove_vm(&vm.vm_name);
+        if let Err(e) = crate::hyperv::vm::remove_vm(&vm.vm_name) {
+            tracing::debug!("failed to remove VM {}: {}", vm.vm_name, e);
+        }
         if let Some(ref nbd) = vm.nbd_container {
-            let _ = std::process::Command::new("podman")
+            if let Err(e) = std::process::Command::new("podman")
                 .args(["rm", "-f", nbd])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status();
+                .status()
+            {
+                tracing::debug!("failed to remove container {}: {}", nbd, e);
+            }
         }
         EphemeralVmMetadata::remove(&vm.name);
         println!("Removed {}", vm.name);
     }
 
     // Sweep orphaned nbdkit containers
-    let _ = std::process::Command::new("podman")
+    if let Err(e) = std::process::Command::new("podman")
         .args(["rm", "-f", "--filter", "name=bcvk-nbd-"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to sweep orphaned nbdkit containers: {}", e);
+    }
 
     Ok(())
 }

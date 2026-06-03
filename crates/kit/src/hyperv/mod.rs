@@ -219,9 +219,12 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         if use_gui {
-            let _ = std::process::Command::new("vmconnect.exe")
+            if let Err(e) = std::process::Command::new("vmconnect.exe")
                 .args(["localhost", &meta.vm_name])
-                .spawn();
+                .spawn()
+            {
+                tracing::debug!("failed to launch vmconnect: {}", e);
+            }
         }
         return Ok(());
     }
@@ -231,9 +234,12 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     spawn_vm_service(name, &mut meta)?;
     println!("VM '{}' started successfully", name);
     if use_gui {
-        let _ = std::process::Command::new("vmconnect.exe")
+        if let Err(e) = std::process::Command::new("vmconnect.exe")
             .args(["localhost", &meta.vm_name])
-            .spawn();
+            .spawn()
+        {
+            tracing::debug!("failed to launch vmconnect: {}", e);
+        }
     }
     if ssh {
         println!("Connecting to running VM...");
@@ -281,8 +287,12 @@ pub(crate) fn kill_vm_service(meta: &VmMetadata) {
         let handle = OpenProcess(PROCESS_TERMINATE, false, meta.service_pid);
         match handle {
             Ok(h) => {
-                let _ = TerminateProcess(h, 1);
-                let _ = CloseHandle(h);
+                if let Err(e) = TerminateProcess(h, 1) {
+                    tracing::debug!("TerminateProcess failed: {}", e);
+                }
+                if let Err(e) = CloseHandle(h) {
+                    tracing::debug!("CloseHandle failed: {}", e);
+                }
             }
             Err(e) => {
                 tracing::debug!("failed to open process {}: {}", meta.service_pid, e);
