@@ -486,23 +486,26 @@ impl VsockRelay {
                             relay_one_connection_cached(vm_sock, podman_sock, cc.clone());
                             // Connection dropped (e.g. switch_root) — retry VM only.
                             // podman_sock is kept alive so nbdkit doesn't die.
-                            for retry in 0..3u32 {
+                            {
                                 info!(
-                                    "vsock relay[{}]: connection closed, reconnect attempt {}/3 (VM only)",
+                                    "vsock relay[{}]: connection closed, attempting reconnect",
                                     idx,
-                                    retry + 1
                                 );
                                 std::thread::sleep(std::time::Duration::from_secs(2));
                                 let new_vm = match unsafe {
-                                    hvsock_connect_retry(&eph_g2, vsock_port, 150, 200)
+                                    hvsock_connect_retry(&eph_g2, vsock_port, 30, 200)
                                 } {
                                     Ok(s) => s,
                                     Err(e) => {
-                                        info!("vsock relay[{}]: VM reconnect failed: {}", idx, e);
-                                        break;
+                                        info!("vsock relay[{}]: reconnect failed: {}", idx, e);
+                                        // skip relay retry
+                                        unsafe {
+                                            ws::closesocket(to_socket(podman_sock));
+                                        }
+                                        return;
                                     }
                                 };
-                                info!("vsock relay[{}]: reconnected (attempt {})", idx, retry + 1);
+                                info!("vsock relay[{}]: reconnected", idx);
                                 relay_one_connection_cached(new_vm, podman_sock, cc.clone());
                             }
                             // Final cleanup: close podman socket

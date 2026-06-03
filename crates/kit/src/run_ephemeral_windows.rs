@@ -524,31 +524,30 @@ fn create_boot_disk(ctx: &RunContext, p0: &SetupResult) -> Result<BootDiskResult
                 image = NBDKIT_IMAGE,
                 ssh = ssh,
             );
-            let result = ps.ssh_cmd(&run_script)?;
-            for i in 0..600 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let check = ps.ssh_cmd(&format!("{} logs {} 2>&1", run_str, container_name));
-                if let Ok(out) = check {
-                    let logs = String::from_utf8_lossy(&out);
-                    if logs.contains("bound to vsock") {
-                        return Ok(result);
-                    }
-                    if logs.contains("exit") || logs.contains("panic") {
-                        bail!(
-                            "nbdkit container '{}' crashed: {}",
-                            container_name,
-                            logs.lines().last().unwrap_or("")
-                        );
-                    }
-                }
-                if i == 59 {
-                    info!("nbdkit: still waiting for vsock bind (30s)...");
-                }
+            let run_and_wait = format!(
+                "{}; \
+                 for i in $(seq 1 120); do \
+                   sleep 1; \
+                   if {run} logs {name} 2>&1 | grep -q 'bound to vsock'; then exit 0; fi; \
+                   if ! {run} ps -q --filter name={name} 2>/dev/null | grep -q .; then \
+                     echo 'nbdkit container exited'; exit 1; \
+                   fi; \
+                 done; \
+                 echo 'nbdkit vsock bind timeout (120s)'; exit 1",
+                run_script,
+                run = run_str,
+                name = nbd_name,
+            );
+            let result = ps.ssh_cmd(&run_and_wait)?;
+            let result_str = String::from_utf8_lossy(&result);
+            if result_str.contains("timeout") || result_str.contains("exited") {
+                bail!(
+                    "nbdkit container '{}' failed: {}",
+                    container_name,
+                    result_str.trim()
+                );
             }
-            bail!(
-                "nbdkit container '{}' failed to bind vsock within 300s",
-                container_name
-            )
+            Ok(result)
         })
     };
 
