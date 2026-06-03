@@ -144,7 +144,7 @@ pub(crate) fn start_nbdkit_erofs_plugin(
         // Check if container is still alive (no fixed timeout — wait as long
         // as plugin_get_ready() is running, which scans the entire overlay
         // directory and scales with image size)
-        let status = Command::new("podman")
+        let ps_output = Command::new("podman")
             .args([
                 "machine",
                 "ssh",
@@ -152,15 +152,16 @@ pub(crate) fn start_nbdkit_erofs_plugin(
                 "--",
                 "podman",
                 "ps",
+                "-a",
                 "--filter",
-                &format!("name={}", container_name),
+                &format!("name=^{}$", container_name),
                 "--format",
                 "{{.Status}}",
             ])
             .output();
-        match status {
-            Ok(out) if String::from_utf8_lossy(&out.stdout).contains("Up") => {}
-            _ => {
+        if let Ok(out) = &ps_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.contains("Exited") {
                 let _ = Command::new("podman")
                     .args([
                         "machine",
