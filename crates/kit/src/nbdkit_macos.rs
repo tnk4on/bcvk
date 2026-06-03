@@ -129,7 +129,7 @@ pub(crate) fn start_nbdkit_erofs_plugin(
     }
 
     info!("waiting for nbdkit on port {}...", nbd_port);
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], nbd_port)),
