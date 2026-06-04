@@ -14,7 +14,7 @@ use crate::run_ephemeral_macos::{
 };
 use crate::vm_helpers::{
     detect_machine_name, ensure_image_and_get_digest, parse_memory_to_mb, remove_file_if_exists,
-    sanitize_vm_name, wait_for_ssh,
+    run_ssh_interactive, sanitize_vm_name, wait_for_ssh,
 };
 
 /// Port mapping from host to VM (format: host_port:guest_port).
@@ -81,7 +81,7 @@ pub struct VmRunOpts {
     #[clap(long)]
     pub gui: bool,
     /// Disk size for to-disk (e.g. "10G", "20G")
-    #[clap(long, default_value = "10G")]
+    #[clap(long, default_value = "20G")]
     pub disk_size: String,
     /// Installation options (filesystem, root-size, etc.)
     #[clap(flatten)]
@@ -95,6 +95,15 @@ pub struct VmRunOpts {
     /// User-defined labels for organizing VMs (comma not allowed in labels)
     #[clap(long)]
     pub label: Vec<String>,
+    /// Automatically SSH into the VM after creation
+    #[clap(long)]
+    pub ssh: bool,
+    /// Wait for SSH to become available and verify connectivity (for testing)
+    #[clap(long, conflicts_with = "ssh")]
+    pub ssh_wait: bool,
+    /// Keep the VM running in background after creation (always true for vfkit)
+    #[clap(long, short = 'd')]
+    pub detach: bool,
 }
 
 fn validate_labels(labels: &[String]) -> Result<()> {
@@ -351,6 +360,15 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     println!();
     println!("To connect:  bcvk vm ssh {}", vm_name);
     println!("To stop:     bcvk vm stop {}", vm_name);
+
+    if opts.ssh_wait {
+        println!("Ready; use bcvk vm ssh to connect");
+        return Ok(());
+    }
+    if opts.ssh {
+        let status = run_ssh_interactive(ssh_port, key_path, &opts.ssh_user)?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 
     Ok(())
 }

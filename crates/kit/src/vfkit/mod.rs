@@ -28,6 +28,8 @@ pub enum OutputFormat {
     Json,
     /// YAML-like key-value format (default for inspect)
     Yaml,
+    /// XML format (not yet implemented)
+    Xml,
 }
 
 /// Subcommands for persistent VM management via vfkit.

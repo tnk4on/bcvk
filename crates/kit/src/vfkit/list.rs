@@ -75,6 +75,11 @@ pub fn run(opts: VmListOpts) -> Result<()> {
                 println!("  ssh_port: {}", vm.ssh_port);
             }
         }
+        OutputFormat::Xml => {
+            return Err(color_eyre::eyre::eyre!(
+                "XML format is not supported for list command"
+            ));
+        }
     }
     Ok(())
 }

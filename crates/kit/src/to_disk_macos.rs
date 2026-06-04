@@ -29,7 +29,7 @@ pub struct ToDiskMacosOpts {
     /// Target disk path (output .raw file)
     pub target_disk: String,
     /// Disk size (e.g. "10G", "5120M", or plain number for bytes)
-    #[clap(long, default_value = "10G")]
+    #[clap(long, default_value = "20G")]
     pub disk_size: String,
     /// Installation options (filesystem, root-size, etc.)
     #[clap(flatten)]

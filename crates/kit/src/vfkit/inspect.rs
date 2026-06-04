@@ -24,6 +24,11 @@ pub fn run(opts: VmInspectOpts) -> Result<()> {
             return Ok(());
         }
         OutputFormat::Yaml | OutputFormat::Table => {}
+        OutputFormat::Xml => {
+            return Err(color_eyre::eyre::eyre!(
+                "XML format is not supported for inspect command"
+            ));
+        }
     }
 
     let state = if meta.is_alive() {
