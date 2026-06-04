@@ -46,10 +46,7 @@ pub enum VmCommands {
     Ssh(ssh::VmSshOpts),
 
     /// Stop a running VM
-    Stop {
-        /// VM name
-        name: String,
-    },
+    Stop(stop::VmStopOpts),
 
     /// Start a stopped VM
     Start(start::VmStartOpts),
@@ -73,7 +70,7 @@ impl VmCommands {
             VmCommands::Run(opts) => run::run(opts),
             VmCommands::List(opts) => list::run(opts),
             VmCommands::Ssh(opts) => ssh::run(opts),
-            VmCommands::Stop { name } => stop::run(&name),
+            VmCommands::Stop(opts) => stop::run(opts),
             VmCommands::Start(opts) => start::run(opts),
             VmCommands::Remove(opts) => rm::run(opts),
             VmCommands::RemoveAll(opts) => rm_all::run(opts),

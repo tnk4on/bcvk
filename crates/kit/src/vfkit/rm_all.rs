@@ -59,13 +59,17 @@ pub fn run(opts: VmRmAllOpts) -> Result<()> {
 
     for vm in &vms {
         if vm.is_alive() && opts.stop {
-            if let Err(e) = super::stop::run(&vm.name) {
+            if let Err(e) = super::stop::run(super::stop::VmStopOpts {
+                name: vm.name.clone(),
+                force: false,
+            }) {
                 tracing::warn!("failed to stop '{}': {}", vm.name, e);
             }
         }
         let rm_opts = super::rm::VmRmOpts {
             name: vm.name.clone(),
             force: true,
+            stop: false,
         };
         super::rm::run(rm_opts)?;
     }

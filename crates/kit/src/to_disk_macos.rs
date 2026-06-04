@@ -34,6 +34,12 @@ pub struct ToDiskMacosOpts {
     /// Installation options (filesystem, root-size, etc.)
     #[clap(flatten)]
     pub install: InstallOptions,
+    /// Configure logging for `bootc install` by setting the `RUST_LOG` environment variable
+    #[clap(long)]
+    pub install_log: Option<String>,
+    /// Add metadata to the container in key=value form
+    #[clap(long = "label")]
+    pub label: Vec<String>,
     /// Check if the disk would be regenerated without actually creating it
     #[clap(long)]
     pub dry_run: bool,
@@ -83,6 +89,8 @@ fn generate_bootc_install_script(
     install_opts: &InstallOptions,
     ssh_pubkey: &str,
     rootful: bool,
+    install_log: &Option<String>,
+    labels: &[String],
 ) -> String {
     let bootc_args = install_opts
         .to_bootc_args()
@@ -104,8 +112,34 @@ fn generate_bootc_install_script(
 
     let sudo = if rootful { "" } else { "sudo " };
 
+    let rust_log_line = if let Some(ref level) = install_log {
+        format!(
+            "export RUST_LOG={}\n",
+            shlex::try_quote(level).unwrap_or(std::borrow::Cow::Borrowed(level))
+        )
+    } else {
+        String::new()
+    };
+
+    let label_args = labels
+        .iter()
+        .map(|l| {
+            format!(
+                "--label {}",
+                shlex::try_quote(l).unwrap_or(std::borrow::Cow::Borrowed(l))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" \\\n  ");
+    let label_line = if label_args.is_empty() {
+        String::new()
+    } else {
+        format!("  {} \\\n", label_args)
+    };
+
     format!(
         r#"set -euo pipefail
+{rust_log}
 LOOP=$({sudo}losetup -fP --show {disk_path})
 echo "Loop device: $LOOP"
 trap '{sudo}losetup -d $LOOP 2>/dev/null' EXIT
@@ -117,7 +151,7 @@ podman run --rm --privileged --pid=host --net=none \
   -v /dev:/dev \
   -v /dev/shm:/dev/shm \
   -v /var/lib/containers:/var/lib/containers \
-  {image} bootc install to-disk \
+{label_line}  {image} bootc install to-disk \
   --generic-image --skip-fetch-check --wipe \
   --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
   {bootc_args} $LOOP
@@ -126,11 +160,13 @@ rm -f /dev/shm/bcvk-ssh-key.pub
 
 echo "Installation complete!"
 "#,
+        rust_log = rust_log_line,
         sudo = sudo,
         disk_path = disk_path_in_machine,
         b64 = pub_key_b64,
         image = image_quoted,
         bootc_args = bootc_args,
+        label_line = label_line,
     )
 }
 
@@ -179,6 +215,8 @@ pub fn find_or_create_base_disk(
     install_options: &InstallOptions,
     disk_size: &str,
     machine: &str,
+    install_log: &Option<String>,
+    labels: &[String],
 ) -> Result<PathBuf> {
     let cache_hash = compute_cache_hash(image_digest, source_image, install_options);
     let short_hash = cache_hash
@@ -224,6 +262,8 @@ pub fn find_or_create_base_disk(
         install_options,
         &ssh_pubkey,
         rootful,
+        install_log,
+        labels,
     );
 
     info!("running bootc install to-disk in podman machine...");
@@ -318,6 +358,8 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
         &opts.install,
         &opts.disk_size,
         &machine,
+        &opts.install_log,
+        &opts.label,
     )?;
 
     // Copy base disk to target via APFS clonefile

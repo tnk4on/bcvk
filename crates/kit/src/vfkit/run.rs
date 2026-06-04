@@ -205,6 +205,8 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
                 &opts.install,
                 &opts.disk_size,
                 &machine,
+                &None,
+                &[],
             )?;
 
             crate::to_disk_macos::clone_base_disk(&base_disk_path, &disk_path)?;

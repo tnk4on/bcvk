@@ -16,6 +16,9 @@ pub struct VmRmOpts {
     /// Force removal even if running
     #[clap(short, long)]
     pub force: bool,
+    /// Stop domain if it's running (implied by --force)
+    #[clap(long)]
+    pub stop: bool,
 }
 
 /// Remove a persistent VM, optionally force-killing it.
@@ -23,14 +26,17 @@ pub fn run(opts: VmRmOpts) -> Result<()> {
     let meta = VmMetadata::load(&opts.name)?;
 
     if meta.is_alive() {
-        if !opts.force {
+        if !(opts.force || opts.stop) {
             color_eyre::eyre::bail!(
-                "VM '{}' is running. Stop it first or use --force",
+                "VM '{}' is running. Stop it first or use --force/--stop",
                 opts.name
             );
         }
         info!("force stopping VM '{}'...", opts.name);
-        crate::vfkit::stop::run(&opts.name)?;
+        crate::vfkit::stop::run(crate::vfkit::stop::VmStopOpts {
+            name: opts.name.clone(),
+            force: true,
+        })?;
     }
 
     // Remove disk image and SSH keys if they are inside the bcvk vms directory

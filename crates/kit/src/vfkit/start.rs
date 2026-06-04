@@ -10,7 +10,7 @@ use super::VmMetadata;
 use crate::run_ephemeral_macos::{
     clear_xattr, expose_port, find_vfkit, generate_mac, start_gvproxy,
 };
-use crate::vm_helpers::wait_for_ssh;
+use crate::vm_helpers::{run_ssh_interactive, wait_for_ssh};
 
 /// Options for `vm start`.
 #[derive(Parser, Debug)]
@@ -20,6 +20,9 @@ pub struct VmStartOpts {
     /// Display VM console in GUI window
     #[clap(long)]
     pub gui: bool,
+    /// Automatically SSH into the VM after starting
+    #[clap(long)]
+    pub ssh: bool,
 }
 
 /// Restart a stopped persistent VM by re-launching vfkit.
@@ -117,5 +120,11 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
         "  ssh -p {} -i {} {}@localhost",
         meta.ssh_port, meta.ssh_key, meta.ssh_user
     );
+
+    if opts.ssh {
+        let status = run_ssh_interactive(meta.ssh_port, key_path, &meta.ssh_user)?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     Ok(())
 }
