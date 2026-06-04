@@ -64,7 +64,8 @@ pub fn run(opts: HypervRmOpts) -> Result<()> {
     vm::remove_vm(&meta.vm_name)?;
     info!("removed Hyper-V VM: {}", meta.vm_name);
 
-    if !meta.vhdx_path.is_empty() {
+    let vms_dir = VmMetadata::vms_dir();
+    if !meta.vhdx_path.is_empty() && std::path::Path::new(&meta.vhdx_path).starts_with(&vms_dir) {
         if let Err(e) = std::fs::remove_file(&meta.vhdx_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::debug!("failed to remove VHDX {}: {}", meta.vhdx_path, e);
@@ -73,15 +74,17 @@ pub fn run(opts: HypervRmOpts) -> Result<()> {
     }
 
     let key_path = std::path::Path::new(&meta.ssh_key);
-    if let Err(e) = std::fs::remove_file(key_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!("failed to remove SSH key: {}", e);
+    if key_path.starts_with(&vms_dir) {
+        if let Err(e) = std::fs::remove_file(key_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove SSH key: {}", e);
+            }
         }
-    }
-    let pub_path = std::path::PathBuf::from(format!("{}.pub", meta.ssh_key));
-    if let Err(e) = std::fs::remove_file(pub_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!("failed to remove SSH pubkey: {}", e);
+        let pub_path = std::path::PathBuf::from(format!("{}.pub", meta.ssh_key));
+        if let Err(e) = std::fs::remove_file(pub_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("failed to remove SSH pubkey: {}", e);
+            }
         }
     }
 

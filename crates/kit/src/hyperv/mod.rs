@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use color_eyre::Result;
+use color_eyre::{eyre::bail, Result};
+use tracing::info;
 
 // Shared infrastructure (used by both ephemeral and persistent VMs)
 pub(crate) mod boot_files;
@@ -190,12 +191,18 @@ fn stop(name: &str, force: bool) -> Result<()> {
         vm::turn_off_vm(&meta.vm_name)?;
     } else {
         vm::stop_vm(&meta.vm_name)?;
+        let mut stopped = false;
         for _ in 0..30 {
             let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
             if s.contains("Off") || s.is_empty() {
+                stopped = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        if !stopped {
+            info!("ACPI shutdown timed out after 30s, forcing power off");
+            vm::turn_off_vm(&meta.vm_name)?;
         }
     }
     meta.state = "stopped".into();
@@ -210,7 +217,6 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     let state = vm::get_vm_state(&meta.vm_name)?;
     let use_gui = gui || meta.gui;
     if state.contains("Running") {
-        println!("VM '{}' is already running", name);
         if ssh {
             println!("Connecting to running VM...");
             let key_path = std::path::Path::new(&meta.ssh_key);
@@ -226,7 +232,7 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
                 tracing::debug!("failed to launch vmconnect: {}", e);
             }
         }
-        return Ok(());
+        bail!("VM '{}' is already running", name);
     }
     println!("Starting VM '{}'...", name);
     vm::start_vm(&meta.vm_name)?;
