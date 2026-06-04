@@ -70,7 +70,7 @@ pub fn run(opts: HypervRmAllOpts) -> Result<()> {
         // Stop if running
         let state = vm::get_vm_state(&vm_meta.vm_name).unwrap_or_default();
         if state.contains("Running") {
-            if opts.stop {
+            if opts.stop || opts.force {
                 println!("  Stopping running VM...");
                 super::kill_vm_service(vm_meta);
                 if let Err(e) = vm::turn_off_vm(&vm_meta.vm_name) {
