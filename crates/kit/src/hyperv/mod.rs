@@ -239,29 +239,12 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     vm::start_vm(&meta.vm_name)?;
     meta.gui = use_gui;
     spawn_vm_service(name, &mut meta)?;
-    // Wait for service process to report SSH ready (via log file)
-    let vms_dir = VmMetadata::vms_dir();
-    let log_path = vms_dir.join(format!("{}.log", name));
-    let deadline = std::time::Instant::now() + crate::vm_helpers::SSH_TIMEOUT;
-    loop {
-        if std::time::Instant::now() > deadline {
-            bail!(
-                "VM '{}' SSH not ready within {}s",
-                name,
-                crate::vm_helpers::SSH_TIMEOUT.as_secs()
-            );
-        }
-        if let Ok(log) = std::fs::read_to_string(&log_path) {
-            if log.contains("SSH ready") {
-                break;
-            }
-            if log.contains("Error:") {
-                bail!("VM '{}' service failed: check {}", name, log_path.display());
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
     println!("VM '{}' started successfully", name);
+    println!("SSH will be available once the service process reports ready.");
+    println!(
+        "Use 'bcvk vm ssh {}' to connect (may take a few seconds).",
+        name
+    );
     if use_gui {
         if let Err(e) = std::process::Command::new("vmconnect.exe")
             .args(["localhost", &meta.vm_name])
@@ -286,11 +269,15 @@ pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> 
     let log_path = vms_dir.join(format!("{}.log", name));
     let log_file = std::fs::File::create(&log_path)?;
 
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let child = std::process::Command::new(exe)
         .args(["vm", "run", "--_internal", name])
         .stdin(std::process::Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()?;
 
     meta.service_pid = child.id();
@@ -380,6 +367,15 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
                 guest_port
             );
             _port_fwds.push(fwd);
+        }
+
+        // Wait for VM to reach Running state before checking SSH
+        for _ in 0..60 {
+            let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
+            if s.contains("Running") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
         let key_path = std::path::Path::new(&meta.ssh_key);
