@@ -67,4 +67,10 @@ update-manpages:
 
 update-generated: sync-manpages manpages
 
-.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options
+.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options plugin-so
+
+.PHONY: plugin-so
+plugin-so:
+	cargo zigbuild --target aarch64-unknown-linux-gnu --release -p nbdkit-erofs-plugin
+	cp target/aarch64-unknown-linux-gnu/release/libnbdkit_erofs_plugin.so \
+	   crates/kit/nbdkit-erofs-plugin.so
