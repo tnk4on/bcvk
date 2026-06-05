@@ -21,7 +21,7 @@ pub fn run(opts: HypervSshOpts) -> Result<()> {
     let meta = VmMetadata::load(&opts.name)?;
 
     let state = vm::get_vm_state(&meta.vm_name)?;
-    if !state.contains("Running") {
+    if !state.contains("Running") && !state.contains("Starting") {
         bail!(
             "VM '{}' is not running (state: {})",
             opts.name,
