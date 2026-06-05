@@ -829,11 +829,15 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         args.push("sleep infinity".to_string());
     }
 
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let _child = Command::new(exe)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()?;
 
     // Save metadata so bcvk ephemeral stop/ssh can find this VM
