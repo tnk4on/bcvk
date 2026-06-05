@@ -239,8 +239,28 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     vm::start_vm(&meta.vm_name)?;
     meta.gui = use_gui;
     spawn_vm_service(name, &mut meta)?;
-    let key_path = std::path::Path::new(&meta.ssh_key);
-    crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+    // Wait for service process to report SSH ready (via log file)
+    let vms_dir = VmMetadata::vms_dir();
+    let log_path = vms_dir.join(format!("{}.log", name));
+    let deadline = std::time::Instant::now() + crate::vm_helpers::SSH_TIMEOUT;
+    loop {
+        if std::time::Instant::now() > deadline {
+            bail!(
+                "VM '{}' SSH not ready within {}s",
+                name,
+                crate::vm_helpers::SSH_TIMEOUT.as_secs()
+            );
+        }
+        if let Ok(log) = std::fs::read_to_string(&log_path) {
+            if log.contains("SSH ready") {
+                break;
+            }
+            if log.contains("Error:") {
+                bail!("VM '{}' service failed: check {}", name, log_path.display());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
     println!("VM '{}' started successfully", name);
     if use_gui {
         if let Err(e) = std::process::Command::new("vmconnect.exe")
@@ -251,7 +271,9 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
         }
     }
     if ssh {
-        let status = crate::vm_helpers::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
+        let updated = VmMetadata::load(name).unwrap_or(meta);
+        let key_path = std::path::Path::new(&updated.ssh_key);
+        let status = crate::vm_helpers::run_ssh_interactive(updated.ssh_port, key_path, "root")?;
         std::process::exit(status.code().unwrap_or(1));
     }
     println!("Use 'bcvk vm ssh {}' to connect.", name);
@@ -318,11 +340,32 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         let _dhcp_handle = dhcp.start_background();
         tracing::info!("persistent VM '{}': DHCP started on {}", name, server_ip);
 
-        let _ssh_fwd = ssh_forward::SshForward::start_on_port(&client_ip, meta.ssh_port).await?;
+        let _ssh_fwd = match ssh_forward::SshForward::start_on_port(&client_ip, meta.ssh_port).await
+        {
+            Ok(fwd) => fwd,
+            Err(e) => {
+                tracing::info!(
+                    "persistent VM '{}': port {} bind failed ({}), using random port",
+                    name,
+                    meta.ssh_port,
+                    e
+                );
+                let fwd = ssh_forward::SshForward::start(&client_ip).await?;
+                let new_port = fwd.port();
+                // Update metadata with new port
+                if let Ok(mut updated_meta) = VmMetadata::load(name) {
+                    updated_meta.ssh_port = new_port;
+                    let _ = updated_meta.save();
+                }
+                fwd
+            }
+        };
+        let actual_port = _ssh_fwd.port();
+        tracing::info!("SSH forward: localhost:{}  {}:22", actual_port, client_ip);
         tracing::info!(
             "persistent VM '{}': SSH forward on port {}",
             name,
-            meta.ssh_port
+            actual_port
         );
 
         // Additional port forwarding
@@ -340,7 +383,7 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         }
 
         let key_path = std::path::Path::new(&meta.ssh_key);
-        crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
+        crate::vm_helpers::wait_for_ssh(actual_port, key_path, "root")?;
         tracing::info!("persistent VM '{}': SSH ready", name);
 
         loop {
