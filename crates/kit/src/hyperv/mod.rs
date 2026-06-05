@@ -272,6 +272,22 @@ pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> 
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Temporarily disable handle inheritance on parent stdout/stderr
+    // to prevent the child from inheriting pipe handles that would
+    // cause callers to block until the child exits.
+    #[allow(unsafe_code)]
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{
+            SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+        };
+        let stdout_h = HANDLE(std::io::stdout().as_raw_handle() as *mut _);
+        let stderr_h = HANDLE(std::io::stderr().as_raw_handle() as *mut _);
+        let _ = SetHandleInformation(stdout_h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+        let _ = SetHandleInformation(stderr_h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+    }
+
     let child = std::process::Command::new(exe)
         .args(["vm", "run", "--_internal", name])
         .stdin(std::process::Stdio::null())
@@ -279,6 +295,17 @@ pub(crate) fn spawn_vm_service(name: &str, meta: &mut VmMetadata) -> Result<()> 
         .stderr(log_file)
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()?;
+
+    // Restore handle inheritance
+    #[allow(unsafe_code)]
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+        let stdout_h = HANDLE(std::io::stdout().as_raw_handle() as *mut _);
+        let stderr_h = HANDLE(std::io::stderr().as_raw_handle() as *mut _);
+        let _ = SetHandleInformation(stdout_h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+        let _ = SetHandleInformation(stderr_h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT);
+    }
 
     meta.service_pid = child.id();
     meta.state = "running".into();
