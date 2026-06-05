@@ -234,6 +234,7 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
         }
         bail!("VM '{}' is already running", name);
     }
+    kill_vm_service(&meta);
     println!("Starting VM '{}'...", name);
     vm::start_vm(&meta.vm_name)?;
     meta.gui = use_gui;

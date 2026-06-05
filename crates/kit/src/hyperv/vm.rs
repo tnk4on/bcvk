@@ -494,7 +494,7 @@ fn wmi_request_state_change(vm_name: &str, state: u16) -> Result<()> {
         services.ExecMethod(
             &BSTR::from(vm_path),
             &BSTR::from("RequestStateChange"),
-            WBEM_GENERIC_FLAG_TYPE(0),
+            WBEM_FLAG_RETURN_IMMEDIATELY,
             None,
             &in_params,
             None,
@@ -1029,7 +1029,15 @@ pub fn turn_off_vm(name: &str) -> Result<()> {
 
 pub fn start_vm(name: &str) -> Result<()> {
     wmi_request_state_change(name, 2)?;
-    debug!("started VM: {}", name);
+    for _ in 0..10 {
+        let s = get_vm_state(name).unwrap_or_default();
+        if s.contains("Running") {
+            debug!("started VM: {}", name);
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    debug!("started VM (state not yet Running): {}", name);
     Ok(())
 }
 
