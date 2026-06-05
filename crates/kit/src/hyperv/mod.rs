@@ -192,7 +192,7 @@ fn stop(name: &str, force: bool) -> Result<()> {
     } else {
         vm::stop_vm(&meta.vm_name)?;
         let mut stopped = false;
-        for _ in 0..30 {
+        for _ in 0..60 {
             let s = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
             if s.contains("Off") || s.is_empty() {
                 stopped = true;
@@ -201,7 +201,7 @@ fn stop(name: &str, force: bool) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
         if !stopped {
-            info!("ACPI shutdown timed out after 30s, forcing power off");
+            info!("ACPI shutdown timed out after 60s, forcing power off");
             vm::turn_off_vm(&meta.vm_name)?;
         }
     }
@@ -239,6 +239,8 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     vm::start_vm(&meta.vm_name)?;
     meta.gui = use_gui;
     spawn_vm_service(name, &mut meta)?;
+    let key_path = std::path::Path::new(&meta.ssh_key);
+    crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
     println!("VM '{}' started successfully", name);
     if use_gui {
         if let Err(e) = std::process::Command::new("vmconnect.exe")
@@ -249,9 +251,6 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
         }
     }
     if ssh {
-        println!("Connecting to running VM...");
-        let key_path = std::path::Path::new(&meta.ssh_key);
-        crate::vm_helpers::wait_for_ssh(meta.ssh_port, key_path, "root")?;
         let status = crate::vm_helpers::run_ssh_interactive(meta.ssh_port, key_path, "root")?;
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -347,8 +346,12 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let state = vm::get_vm_state(&meta.vm_name).unwrap_or_default();
-            if !state.contains("Running") {
-                tracing::info!("persistent VM '{}': VM stopped, exiting service", name);
+            if !state.contains("Running") && !state.contains("Starting") && !state.is_empty() {
+                tracing::info!(
+                    "persistent VM '{}': VM stopped (state: {}), exiting service",
+                    name,
+                    state
+                );
                 break;
             }
         }
