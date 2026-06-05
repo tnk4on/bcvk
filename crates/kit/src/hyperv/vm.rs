@@ -1128,6 +1128,7 @@ pub fn get_vm_state(name: &str) -> Result<String> {
                 3 => "Off".to_string(),
                 6 => "Saved".to_string(),
                 9 => "Paused".to_string(),
+                10 => "Starting".to_string(),
                 _ => format!("Unknown({})", state),
             });
         }
