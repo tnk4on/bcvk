@@ -67,10 +67,7 @@ update-manpages:
 
 update-generated: sync-manpages manpages
 
-.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options plugin-so plugin-so-aarch64 plugin-so-x86_64
-
-.PHONY: plugin-so
-plugin-so: plugin-so-aarch64
+.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options plugin-so-aarch64 plugin-so-x86_64
 
 .PHONY: plugin-so-aarch64
 plugin-so-aarch64:
