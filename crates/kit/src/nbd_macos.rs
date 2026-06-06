@@ -65,10 +65,11 @@ pub(crate) fn deploy_nbd_server(machine: &str) -> Result<()> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(NBD_SERVER);
     let script = format!(
         "set -e; \
-         H=/usr/local/bin/bcvk-nbd.sha256; \
+         mkdir -p /var/tmp/bcvk; \
+         H=/var/tmp/bcvk/bcvk-nbd.sha256; \
          if [ -f \"$H\" ] && [ \"$(cat \"$H\")\" = '{hash}' ]; then exit 0; fi; \
-         printf '%s' '{b64}' | base64 -d > /usr/local/bin/bcvk-nbd; \
-         chmod +x /usr/local/bin/bcvk-nbd; \
+         printf '%s' '{b64}' | base64 -d > /var/tmp/bcvk/bcvk-nbd; \
+         chmod +x /var/tmp/bcvk/bcvk-nbd; \
          printf '{hash}' > \"$H\"",
         hash = hash,
         b64 = b64,
@@ -132,7 +133,7 @@ pub(crate) fn start_nbd_server(
         "podman run -d --name {name} --security-opt label=disable \
          -p {port}:10809 \
          -v {merged}:{merged}:ro \
-         -v /usr/local/bin/bcvk-nbd:/nbd:ro \
+         -v /var/tmp/bcvk/bcvk-nbd:/nbd:ro \
          --entrypoint /nbd \
          quay.io/fedora/fedora-minimal:latest \
          --dir {merged} --port 10809 \
