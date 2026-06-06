@@ -172,7 +172,7 @@ impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
         if let Some(ref name) = self.nbd_container {
-            crate::nbdkit_macos::stop_nbdkit_container(name);
+            crate::nbd_macos::stop_nbd_container(name);
         }
         if let Err(e) = rustix::process::kill_process(
             rustix::process::Pid::from_raw(self.vfkit_pid as i32).unwrap(),
@@ -289,16 +289,16 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
 
-    // Ensure nbdkit container image is ready (auto-build on first run)
-    crate::nbdkit_macos::ensure_nbdkit_ready(&machine)?;
+    // Deploy NBD server binary to podman machine (hash-checked, idempotent)
+    crate::nbd_macos::deploy_nbd_server(&machine)?;
 
     // Get container image merged overlay path
-    let merged_path = crate::nbdkit_macos::get_merged_path(&machine, rootful, &opts.image)?;
+    let merged_path = crate::nbd_macos::get_merged_path(&machine, rootful, &opts.image)?;
     info!("overlay merged: {}", merged_path);
 
-    let nbd_port = crate::nbdkit_macos::find_available_nbd_port();
+    let nbd_port = crate::nbd_macos::find_available_nbd_port();
     info!("NBD transport: TCP (port {})", nbd_port);
-    let nbd_container_name = crate::nbdkit_macos::start_nbdkit_erofs_plugin(
+    let nbd_container_name = crate::nbd_macos::start_nbd_server(
         &machine,
         &merged_path,
         &cmdline,
@@ -463,7 +463,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
-    crate::nbdkit_macos::stop_nbdkit_container(&nbd_container_name);
+    crate::nbd_macos::stop_nbd_container(&nbd_container_name);
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }

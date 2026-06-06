@@ -1,4 +1,9 @@
-//! nbdkit EROFS plugin management for macOS ephemeral VMs.
+//! NBD server management for macOS ephemeral VMs.
+//!
+//! Replaces nbdkit_macos.rs: uses a statically-linked bcvk-nbd binary
+//! instead of nbdkit + C plugin. The binary is deployed to the podman
+//! machine via base64/SSH and run inside a thin container for TCP port
+//! forwarding (podman -p).
 
 use color_eyre::{
     eyre::{bail, Context},
@@ -10,11 +15,22 @@ use tracing::info;
 
 use crate::vm_helpers::detect_machine_name;
 
-/// EROFS plugin shared library, embedded at compile time.
-const EROFS_PLUGIN_SO: &[u8] = include_bytes!("../nbdkit-erofs-plugin-aarch64.so");
+/// NBD server binary (statically linked aarch64 ELF), embedded at compile time.
+const NBD_SERVER: &[u8] = include_bytes!("../bcvk-nbd-aarch64");
 
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    data.hash(&mut h);
+    let hash1 = h.finish();
+    data.len().hash(&mut h);
+    let hash2 = h.finish();
+    format!("{:016x}{:016x}", hash1, hash2)
 }
 
 /// Get the merged overlay path from podman image mount.
@@ -42,18 +58,29 @@ pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Resu
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Ensure the nbdkit container image exists in podman machine.
-/// On first run, transfers embedded .so and builds container image.
-pub(crate) fn ensure_nbdkit_ready(machine: &str) -> Result<()> {
-    let script = crate::vm_helpers::nbdkit_setup_script(EROFS_PLUGIN_SO);
-    info!("checking nbdkit container image...");
+/// Deploy the NBD server binary to the podman machine (idempotent, hash-checked).
+pub(crate) fn deploy_nbd_server(machine: &str) -> Result<()> {
+    use base64::Engine;
+    let hash = sha256_hex(NBD_SERVER);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(NBD_SERVER);
+    let script = format!(
+        "set -e; \
+         H=/usr/local/bin/bcvk-nbd.sha256; \
+         if [ -f \"$H\" ] && [ \"$(cat \"$H\")\" = '{hash}' ]; then exit 0; fi; \
+         printf '%s' '{b64}' | base64 -d > /usr/local/bin/bcvk-nbd; \
+         chmod +x /usr/local/bin/bcvk-nbd; \
+         printf '{hash}' > \"$H\"",
+        hash = hash,
+        b64 = b64,
+    );
+    info!("deploying nbd server to podman machine...");
     let mut child = Command::new("podman")
         .args(["machine", "ssh", machine, "--", "bash", "-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("nbdkit setup in podman machine")?;
+        .context("nbd server deploy to podman machine")?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin.write_all(script.as_bytes())?;
@@ -61,15 +88,16 @@ pub(crate) fn ensure_nbdkit_ready(machine: &str) -> Result<()> {
     let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "nbdkit setup failed: {}",
+            "nbd server deploy failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(())
 }
 
+/// Start the NBD server in a thin container (for TCP port forwarding via -p).
 #[allow(dead_code)]
-pub(crate) fn start_nbdkit_erofs_plugin(
+pub(crate) fn start_nbd_server(
     machine: &str,
     merged_path: &str,
     cmdline: &str,
@@ -94,41 +122,39 @@ pub(crate) fn start_nbdkit_erofs_plugin(
         .stderr(Stdio::null())
         .status();
 
-    let cmdline_esc = shell_escape(&format!("cmdline={}", cmdline));
-    let dir_esc = shell_escape(&format!("dir={}", merged_path));
-
-    let mut ssh_param = String::new();
+    let cmdline_esc = shell_escape(cmdline);
+    let mut ssh_args = String::new();
     if !ssh_pubkey.is_empty() {
-        ssh_param = format!(" {}", shell_escape(&format!("ssh_pubkey={}", ssh_pubkey)));
+        ssh_args = format!(" --ssh-pubkey {}", shell_escape(ssh_pubkey));
     }
 
     let podman_cmd = format!(
         "podman run -d --name {name} --security-opt label=disable \
          -p {port}:10809 \
          -v {merged}:{merged}:ro \
-         {image} \
-         nbdkit -f --threads 4 -p 10809 -r /plugin.so \
-         {dir} {cmdline}{ssh}",
+         -v /usr/local/bin/bcvk-nbd:/nbd:ro \
+         --entrypoint /nbd \
+         quay.io/fedora/fedora-minimal:latest \
+         --dir {merged} --port 10809 \
+         --cmdline {cmdline}{ssh}",
         name = container_name,
         port = nbd_port,
         merged = merged_path,
-        image = crate::vm_helpers::NBDKIT_IMAGE,
-        dir = dir_esc,
         cmdline = cmdline_esc,
-        ssh = ssh_param,
+        ssh = ssh_args,
     );
 
     let output = Command::new("podman")
         .args(["machine", "ssh", machine, "--", &podman_cmd])
         .output()
-        .context("failed to start nbdkit erofs plugin")?;
+        .context("failed to start nbd server")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to start nbdkit erofs plugin: {}", stderr.trim());
+        bail!("failed to start nbd server: {}", stderr.trim());
     }
 
-    info!("waiting for nbdkit on port {}...", nbd_port);
+    info!("waiting for nbd server on port {}...", nbd_port);
     loop {
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], nbd_port)),
@@ -141,9 +167,6 @@ pub(crate) fn start_nbdkit_erofs_plugin(
                 break;
             }
         }
-        // Check if container is still alive (no fixed timeout — wait as long
-        // as plugin_get_ready() is running, which scans the entire overlay
-        // directory and scales with image size)
         let ps_output = Command::new("podman")
             .args([
                 "machine",
@@ -177,7 +200,7 @@ pub(crate) fn start_nbdkit_erofs_plugin(
                     .stderr(Stdio::null())
                     .status();
                 bail!(
-                    "nbdkit container '{}' exited before becoming ready on port {}",
+                    "nbd server container '{}' exited before becoming ready on port {}",
                     container_name,
                     nbd_port
                 );
@@ -209,8 +232,8 @@ pub fn find_available_nbd_port() -> u16 {
     PORT_RANGE_START
 }
 
-/// Stop and remove an nbdkit container (best-effort).
-pub fn stop_nbdkit_container(container_name: &str) {
+/// Stop and remove an NBD server container (best-effort).
+pub fn stop_nbd_container(container_name: &str) {
     if let Ok(machine) = detect_machine_name() {
         let _ = Command::new("podman")
             .args([
