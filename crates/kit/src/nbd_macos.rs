@@ -1,9 +1,8 @@
 //! NBD server management for macOS ephemeral VMs.
 //!
-//! Replaces nbdkit_macos.rs: uses a statically-linked bcvk-nbd binary
-//! instead of nbdkit + C plugin. The binary is deployed to the podman
-//! machine via base64/SSH and run inside a thin container for TCP port
-//! forwarding (podman -p).
+//! Deploys bcvk-nbd binary to podman machine, runs as systemd transient
+//! unit, and uses gvproxy's in-VM expose API for TCP port forwarding
+//! from macOS host. No container needed.
 
 use color_eyre::{
     eyre::{bail, Context},
@@ -70,6 +69,7 @@ pub(crate) fn deploy_nbd_server(machine: &str) -> Result<()> {
          if [ -f \"$H\" ] && [ \"$(cat \"$H\")\" = '{hash}' ]; then exit 0; fi; \
          printf '%s' '{b64}' | base64 -d > /var/tmp/bcvk/bcvk-nbd; \
          chmod +x /var/tmp/bcvk/bcvk-nbd; \
+         chcon -t bin_t /var/tmp/bcvk/bcvk-nbd 2>/dev/null || true; \
          printf '{hash}' > \"$H\"",
         hash = hash,
         b64 = b64,
@@ -96,7 +96,7 @@ pub(crate) fn deploy_nbd_server(machine: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start the NBD server in a thin container (for TCP port forwarding via -p).
+/// Start the NBD server as a systemd transient unit and expose the port via gvproxy.
 #[allow(dead_code)]
 pub(crate) fn start_nbd_server(
     machine: &str,
@@ -106,22 +106,12 @@ pub(crate) fn start_nbd_server(
     nbd_port: u16,
     vm_name: &str,
 ) -> Result<String> {
-    let container_name = format!("bcvk-nbd-{}", vm_name);
+    let unit_name = format!("bcvk-nbd-{}", vm_name);
 
-    let _ = Command::new("podman")
-        .args([
-            "machine",
-            "ssh",
-            machine,
-            "--",
-            "podman",
-            "rm",
-            "-f",
-            &container_name,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // Stop and reset previous unit if exists
+    let _ = machine_ssh(machine, &format!(
+        "systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null", u = unit_name
+    ));
 
     let cmdline_esc = shell_escape(cmdline);
     let mut ssh_args = String::new();
@@ -129,30 +119,33 @@ pub(crate) fn start_nbd_server(
         ssh_args = format!(" --ssh-pubkey {}", shell_escape(ssh_pubkey));
     }
 
-    let podman_cmd = format!(
-        "podman run -d --name {name} --security-opt label=disable \
-         -p {port}:10809 \
-         -v {merged}:{merged}:ro \
-         -v /var/tmp/bcvk/bcvk-nbd:/nbd:ro \
-         --entrypoint /nbd \
-         quay.io/fedora/fedora-minimal:latest \
-         --dir {merged} --port 10809 \
+    // Start as systemd transient unit
+    let start_cmd = format!(
+        "systemd-run --unit={unit} --service-type=simple --quiet \
+         --property=LimitNOFILE=524288 \
+         /var/tmp/bcvk/bcvk-nbd --dir {merged} --port 10809 \
          --cmdline {cmdline}{ssh}",
-        name = container_name,
-        port = nbd_port,
+        unit = unit_name,
         merged = merged_path,
         cmdline = cmdline_esc,
         ssh = ssh_args,
     );
-
-    let output = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", &podman_cmd])
-        .output()
-        .context("failed to start nbd server")?;
-
+    let output = machine_ssh_output(machine, &start_cmd)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("failed to start nbd server: {}", stderr.trim());
+    }
+
+    // Expose port via gvproxy's in-VM API
+    let expose_cmd = format!(
+        "curl -sf -X POST http://192.168.127.1:80/services/forwarder/expose \
+         -H 'Content-Type: application/json' \
+         -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:10809\",\"protocol\":\"tcp\"}}'",
+        nbd_port = nbd_port,
+    );
+    let output = machine_ssh_output(machine, &expose_cmd)?;
+    if !output.status.success() {
+        bail!("gvproxy expose failed for port {}", nbd_port);
     }
 
     info!("waiting for nbd server on port {}...", nbd_port);
@@ -168,41 +161,14 @@ pub(crate) fn start_nbd_server(
                 break;
             }
         }
-        let ps_output = Command::new("podman")
-            .args([
-                "machine",
-                "ssh",
-                machine,
-                "--",
-                "podman",
-                "ps",
-                "-a",
-                "--filter",
-                &format!("name=^{}$", container_name),
-                "--format",
-                "{{.Status}}",
-            ])
-            .output();
-        if let Ok(out) = &ps_output {
+        // Check if unit is still active
+        let status = machine_ssh_output(machine, &format!("systemctl is-active {}", unit_name));
+        if let Ok(out) = status {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.contains("Exited") {
-                let _ = Command::new("podman")
-                    .args([
-                        "machine",
-                        "ssh",
-                        machine,
-                        "--",
-                        "podman",
-                        "rm",
-                        "-f",
-                        &container_name,
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+            if stdout.trim() == "inactive" || stdout.trim() == "failed" {
                 bail!(
-                    "nbd server container '{}' exited before becoming ready on port {}",
-                    container_name,
+                    "nbd server '{}' died before becoming ready on port {}",
+                    unit_name,
                     nbd_port
                 );
             }
@@ -210,7 +176,7 @@ pub(crate) fn start_nbd_server(
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    Ok(container_name)
+    Ok(unit_name)
 }
 
 /// Find an available TCP port for NBD in range 10800-10900.
@@ -233,22 +199,43 @@ pub fn find_available_nbd_port() -> u16 {
     PORT_RANGE_START
 }
 
-/// Stop and remove an NBD server container (best-effort).
-pub fn stop_nbd_container(container_name: &str) {
+/// Stop an NBD server systemd unit and unexpose its port (best-effort).
+pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
     if let Ok(machine) = detect_machine_name() {
-        let _ = Command::new("podman")
-            .args([
-                "machine",
-                "ssh",
+        let _ = machine_ssh(
+            &machine,
+            &format!("systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null", u = unit_name),
+        );
+        if let Some(port) = nbd_port {
+            let _ = machine_ssh(
                 &machine,
-                "--",
-                "podman",
-                "rm",
-                "-f",
-                container_name,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+                &format!(
+                    "curl -sf -X POST http://192.168.127.1:80/services/forwarder/unexpose \
+                     -H 'Content-Type: application/json' \
+                     -d '{{\"local\":\":{}\",\"protocol\":\"tcp\"}}'",
+                    port
+                ),
+            );
+        }
     }
+}
+
+fn machine_ssh(machine: &str, cmd: &str) -> Result<()> {
+    let status = Command::new("podman")
+        .args(["machine", "ssh", machine, "--", cmd])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("podman machine ssh")?;
+    if !status.success() {
+        bail!("machine ssh command failed");
+    }
+    Ok(())
+}
+
+fn machine_ssh_output(machine: &str, cmd: &str) -> Result<std::process::Output> {
+    Command::new("podman")
+        .args(["machine", "ssh", machine, "--", cmd])
+        .output()
+        .context("podman machine ssh")
 }

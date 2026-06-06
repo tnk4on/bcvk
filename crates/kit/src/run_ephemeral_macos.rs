@@ -164,6 +164,7 @@ struct VmCleanup {
     vfkit_pid: u32,
     gvproxy_pid: u32,
     nbd_container: Option<String>,
+    nbd_port: Option<u16>,
     image: String,
     vm_name: String,
 }
@@ -172,7 +173,7 @@ impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
         if let Some(ref name) = self.nbd_container {
-            crate::nbd_macos::stop_nbd_container(name);
+            crate::nbd_macos::stop_nbd_server(name, self.nbd_port);
         }
         if let Err(e) = rustix::process::kill_process(
             rustix::process::Pid::from_raw(self.vfkit_pid as i32).unwrap(),
@@ -410,6 +411,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
         nbd_container: Some(nbd_container_name.clone()),
+        nbd_port: Some(nbd_port),
         image: opts.image.clone(),
         vm_name: vm_name.clone(),
     };
@@ -463,7 +465,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
-    crate::nbd_macos::stop_nbd_container(&nbd_container_name);
+    crate::nbd_macos::stop_nbd_server(&nbd_container_name, Some(nbd_port));
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }

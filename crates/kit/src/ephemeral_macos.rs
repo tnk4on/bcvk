@@ -158,8 +158,8 @@ fn cmd_rm_all(force: bool) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
-        if let Some(ref container) = vm.nbd_container {
-            crate::nbd_macos::stop_nbd_container(container);
+        if let Some(ref name) = vm.nbd_container {
+            crate::nbd_macos::stop_nbd_server(name, vm.nbd_port);
         }
         EphemeralVmMetadata::remove(&vm.name);
         println!("Removed {}", vm.name);
@@ -167,18 +167,15 @@ fn cmd_rm_all(force: bool) -> Result<()> {
 
     // Sweep orphaned resources inside podman machine
     if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
-        // Remove orphaned nbdkit containers
+        // Stop orphaned bcvk-nbd systemd units
         let _ = Command::new("podman")
             .args([
                 "machine",
                 "ssh",
                 &machine,
                 "--",
-                "podman",
-                "rm",
-                "-f",
-                "--filter",
-                "name=bcvk-nbd-",
+                "bash", "-c",
+                "systemctl list-units --plain --no-legend 'bcvk-nbd-*' 2>/dev/null | awk '{print $1}' | xargs -r systemctl stop 2>/dev/null",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
