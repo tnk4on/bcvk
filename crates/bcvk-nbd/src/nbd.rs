@@ -143,7 +143,6 @@ pub fn serve_vsock<B: BlockDevice + 'static>(port: u32, device: B) {
     }
 
     let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
-    addr.svm_len = std::mem::size_of::<libc::sockaddr_vm>() as u8;
     addr.svm_family = libc::AF_VSOCK as _;
     addr.svm_port = port;
     addr.svm_cid = libc::VMADDR_CID_ANY;
