@@ -151,6 +151,24 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         }
     }
 
+    // Kill detached bcvk ephemeral processes before removing VMs.
+    // run_detached() spawns a child that may re-save metadata via
+    // start_vm_and_services(), so we must kill it first.
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \
+             \"Name='bcvk.exe' AND CommandLine LIKE '%ephemeral%run%' \
+             AND CommandLine NOT LIKE '%rm-all%'\" \
+             -EA SilentlyContinue | \
+             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
     for vm in &vms {
         if let Err(e) = crate::hyperv::vm::remove_vm(&vm.vm_name) {
             tracing::debug!("failed to remove VM {}: {}", vm.vm_name, e);
