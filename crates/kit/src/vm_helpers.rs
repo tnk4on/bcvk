@@ -277,31 +277,6 @@ pub fn parse_size(size_str: &str) -> Result<u64> {
     Ok(num * multiplier)
 }
 
-/// Container image name for nbdkit with EROFS plugin baked in.
-pub const NBDKIT_IMAGE: &str = "localhost/bcvk-nbdkit:latest";
-
-/// Generate the shell script for checking/building nbdkit image with .so baked in.
-///
-/// `plugin_so` is provided by the caller via `include_bytes!` (cannot be placed here
-/// because `vm_helpers.rs` may be compiled on platforms where the .so doesn't exist).
-pub fn nbdkit_setup_script(plugin_so: &[u8]) -> String {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(plugin_so);
-    format!(
-        "set -e; \
-         if podman image exists {image}; then exit 0; fi; \
-         mkdir -p /var/tmp/bcvk; \
-         printf '%s' '{b64}' | base64 -d > /var/tmp/bcvk/plugin.so; \
-         printf 'FROM quay.io/fedora/fedora:latest\\n\
-         RUN dnf install -y nbdkit nbdkit-basic-plugins && dnf clean all\\n\
-         COPY plugin.so /plugin.so\\n' | \
-         podman build -t {image} -f - /var/tmp/bcvk; \
-         rm -f /var/tmp/bcvk/plugin.so",
-        image = NBDKIT_IMAGE,
-        b64 = b64,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

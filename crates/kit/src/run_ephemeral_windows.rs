@@ -1,9 +1,9 @@
 //! Ephemeral VM launch flow for Windows using Hyper-V VHDX + NBD over vsock.
 //!
 //! Architecture:
-//! 1. nbdkit --vsock listens directly on vsock port 1030 in podman machine
+//! 1. bcvk-nbd --vsock listens on vsock port in podman machine (systemd-run)
 //! 2. vsock relay on host connects to both VMs (Host-initiated, ~1 GB/s each)
-//! 3. Hyper-V Gen2 VM boots → standard nbd.ko + nbd-vsock (socketpair relay) → EROFS rootfs
+//! 3. Hyper-V Gen2 VM boots → nbd.ko + nbd-vsock → EROFS rootfs
 //! 4. Supports WSL2 (default) and Hyper-V podman machine backends
 
 use color_eyre::{
@@ -22,11 +22,9 @@ use crate::hyperv::vm;
 use crate::vm_helpers::{
     default_vcpus, detect_machine_name, detect_podman_vmtype, ensure_image_and_get_digest,
     is_machine_rootful, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
-    NBDKIT_IMAGE,
 };
 
 const VM_PREFIX: &str = "bcvk-ephemeral-";
-const EROFS_PLUGIN_SO: &[u8] = include_bytes!("../nbdkit-erofs-plugin.so");
 
 // --- Metadata ---
 
@@ -126,7 +124,7 @@ impl Drop for VmCleanup {
             tracing::debug!("failed to remove VM {}: {}", self.vm_name, e);
         }
         if let Some(ref name) = self.nbd_container {
-            stop_nbdkit_container(name);
+            crate::nbd_windows::stop_nbd_server(name);
         }
         if let Some(ref vhdx) = self.vhdx_path {
             if let Err(e) = std::fs::remove_file(vhdx) {
@@ -178,14 +176,7 @@ fn spawn_cleanup(c: &VmCleanup) {
         vm::remove_internal_switch(sw);
     }
     if let Some(ref name) = c.nbd_container {
-        if let Err(e) = Command::new("podman")
-            .args(["rm", "-f", name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            tracing::debug!("failed to remove container {}: {}", name, e);
-        }
+        crate::nbd_windows::stop_nbd_server(name);
     }
     if let Some(ref vhdx) = c.vhdx_path {
         if let Err(e) = std::fs::remove_file(vhdx) {
@@ -484,70 +475,27 @@ fn setup_image_and_guid(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Set
 
 struct BootDiskResult {
     vhdx_path: String,
-    nbdkit_handle: Option<std::thread::JoinHandle<Result<Vec<u8>>>>,
+    nbd_handle: Option<std::thread::JoinHandle<Result<String>>>,
 }
 
 fn create_boot_disk(ctx: &RunContext, p0: &SetupResult) -> Result<BootDiskResult> {
-    let mut ssh_param_str = String::new();
-    if !p0.ssh_pubkey.is_empty() {
-        let param = format!("ssh_pubkey={}", p0.ssh_pubkey);
-        let escaped = shlex::try_quote(&param)
-            .map_err(|e| color_eyre::eyre::eyre!("shell escape failed: {}", e))?;
-        ssh_param_str = format!(" {}", escaped);
-    }
-
-    let nbdkit_handle = {
+    let nbd_handle = {
         let ps = ctx.podman_ssh.clone();
-        let run_cmd = if ctx.rootful { "sudo podman" } else { "podman" };
-        let nbd_name = ctx.nbd_container_name.clone();
+        let name = ctx.name.clone();
         let merged = p0.merged_path.clone();
-        let ssh = ssh_param_str.clone();
-        let run_str = run_cmd.to_string();
+        let ssh_pubkey = p0.ssh_pubkey.clone();
         let vsock_port = ctx.vsock_port;
-        let container_name = nbd_name.clone();
-        std::thread::spawn(move || -> Result<Vec<u8>> {
-            let setup_script = crate::vm_helpers::nbdkit_setup_script(EROFS_PLUGIN_SO);
-            ps.ssh_cmd_stdin(&setup_script)?;
-            let run_script = format!(
-                "{run} rm -f -t 0 {name} 2>/dev/null; \
-                 {run} run -d --name {name} --privileged \
-                 --network=host --device /dev/vsock \
-                 -v {merged}:{merged}:ro \
-                 {image} \
-                 nbdkit -fv --threads 4 --vsock -p {port} -r /plugin.so \
-                 dir={merged} \
-                 'cmdline=root=PARTLABEL=bcvk-root ro rootfstype=erofs'{ssh}",
-                run = run_str,
-                name = nbd_name,
-                merged = merged,
-                port = vsock_port,
-                image = NBDKIT_IMAGE,
-                ssh = ssh,
-            );
-            let run_and_wait = format!(
-                "{}; \
-                 for i in $(seq 1 120); do \
-                   sleep 1; \
-                   if {run} logs {name} 2>&1 | grep -q 'bound to vsock'; then exit 0; fi; \
-                   if ! {run} ps -q --filter name={name} 2>/dev/null | grep -q .; then \
-                     echo 'nbdkit container exited'; exit 1; \
-                   fi; \
-                 done; \
-                 echo 'nbdkit vsock bind timeout (120s)'; exit 1",
-                run_script,
-                run = run_str,
-                name = nbd_name,
-            );
-            let result = ps.ssh_cmd(&run_and_wait)?;
-            let result_str = String::from_utf8_lossy(&result);
-            if result_str.contains("timeout") || result_str.contains("exited") {
-                bail!(
-                    "nbdkit container '{}' failed: {}",
-                    container_name,
-                    result_str.trim()
-                );
-            }
-            Ok(result)
+        std::thread::spawn(move || -> Result<String> {
+            crate::nbd_windows::deploy_nbd_server(&ps)?;
+            let cmdline = "root=PARTLABEL=bcvk-root ro rootfstype=erofs";
+            crate::nbd_windows::start_nbd_server(
+                &ps,
+                &merged,
+                cmdline,
+                &ssh_pubkey,
+                vsock_port,
+                &name,
+            )
         })
     };
 
@@ -563,7 +511,7 @@ fn create_boot_disk(ctx: &RunContext, p0: &SetupResult) -> Result<BootDiskResult
 
     Ok(BootDiskResult {
         vhdx_path,
-        nbdkit_handle: Some(nbdkit_handle),
+        nbd_handle: Some(nbd_handle),
     })
 }
 
@@ -778,16 +726,16 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("VM created");
 
     let mut boot_disk = boot_disk;
-    if let Err(e) = boot_disk
-        .nbdkit_handle
-        .take()
-        .unwrap()
-        .join()
-        .map_err(|_| eyre!("nbdkit panicked"))?
-    {
-        info!("nbdkit warning: {}", e);
+    if let Some(handle) = boot_disk.nbd_handle.take() {
+        match handle
+            .join()
+            .map_err(|_| eyre!("nbd server thread panicked"))?
+        {
+            Ok(unit) => info!("nbd server ready: {}", unit),
+            Err(e) => info!("nbd server warning: {}", e),
+        }
     }
-    elapsed!("nbdkit ready");
+    elapsed!("nbd server ready");
 
     // VM start + serial + relay + DHCP + SSH
     start_vm_and_services(&ctx, &setup, &boot_disk, &opts, &t_start)
@@ -886,17 +834,6 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
     info!("log: {}", log_path.display());
     println!("{}", vm_name);
     Ok(())
-}
-
-fn stop_nbdkit_container(name: &str) {
-    if let Err(e) = Command::new("podman")
-        .args(["rm", "-f", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        tracing::debug!("failed to remove nbdkit container {}: {}", name, e);
-    }
 }
 
 // --- Shared helpers (ported from run_ephemeral_macos.rs, no Unix deps) ---

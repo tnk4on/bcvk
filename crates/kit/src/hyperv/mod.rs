@@ -256,6 +256,7 @@ fn start(name: &str, ssh: bool, gui: bool) -> Result<()> {
     if ssh {
         let updated = VmMetadata::load(name).unwrap_or(meta);
         let key_path = std::path::Path::new(&updated.ssh_key);
+        crate::vm_helpers::wait_for_ssh(updated.ssh_port, key_path, "root")?;
         let status = crate::vm_helpers::run_ssh_interactive(updated.ssh_port, key_path, "root")?;
         std::process::exit(status.code().unwrap_or(1));
     }
