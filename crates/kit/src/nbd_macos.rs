@@ -38,15 +38,24 @@ pub(crate) fn start_nbd_server(
         "--port 10809",
     )?;
 
-    // macOS-specific: expose port via gvproxy's in-VM API
+    // macOS-specific: expose port via gvproxy's in-VM API (retry on transient failure)
     let expose_cmd = format!(
         "curl -sf -X POST http://192.168.127.1:80/services/forwarder/expose \
          -H 'Content-Type: application/json' \
          -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:10809\",\"protocol\":\"tcp\"}}'",
         nbd_port = nbd_port,
     );
-    let output = vm_helpers::machine_ssh_output(machine, &expose_cmd)?;
-    if !output.status.success() {
+    let mut exposed = false;
+    for _ in 0..5 {
+        if let Ok(output) = vm_helpers::machine_ssh_output(machine, &expose_cmd) {
+            if output.status.success() {
+                exposed = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !exposed {
         bail!("gvproxy expose failed for port {}", nbd_port);
     }
 
