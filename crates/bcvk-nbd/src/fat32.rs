@@ -360,11 +360,7 @@ pub fn build_esp_regions(
                     regions.push(Region {
                         start: offset,
                         len: *len,
-                        region_type: RegionType::File {
-                            file: std::sync::Arc::new(
-                                std::fs::File::open(path).expect("failed to open file for region"),
-                            ),
-                        },
+                        region_type: RegionType::FilePath { path: path.clone() },
                     });
                     offset += len;
                     file_offset += len;

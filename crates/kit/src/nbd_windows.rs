@@ -85,15 +85,16 @@ pub(crate) fn start_nbd_server(
         "set -e\n\
          systemctl stop {u} 2>/dev/null || true\n\
          systemctl reset-failed {u} 2>/dev/null || true\n\
+         fallocate -l 512M /dev/shm/.bcvk-mem-reserve 2>/dev/null && rm -f /dev/shm/.bcvk-mem-reserve || true\n\
          systemd-run --unit={u} --service-type=simple --quiet \
            --property=LimitNOFILE=524288 \
            /var/tmp/bcvk/bcvk-nbd --vsock --port {port} \
            --dir {merged} --cmdline {cmdline}{ssh}\n\
-         for i in $(seq 1 30); do\n\
+         for i in $(seq 1 120); do\n\
            if journalctl -u {u} --no-pager -n 10 2>/dev/null | grep -q 'listening on vsock'; then exit 0; fi\n\
            sleep 1\n\
          done\n\
-         echo 'nbd vsock bind timeout (30s)' >&2\n\
+         echo 'nbd vsock bind timeout (120s)' >&2\n\
          exit 1",
         u = unit_name,
         port = vsock_port,
