@@ -157,28 +157,14 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         }
         crate::hyperv::vm::remove_internal_switch(&vm.vm_name);
         if let Some(ref nbd) = vm.nbd_container {
-            if let Err(e) = std::process::Command::new("podman")
-                .args(["rm", "-f", nbd])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-            {
-                tracing::debug!("failed to remove container {}: {}", nbd, e);
-            }
+            crate::nbd_windows::stop_nbd_server(nbd);
         }
         EphemeralVmMetadata::remove(&vm.name);
         println!("Removed {}", vm.name);
     }
 
-    // Sweep orphaned nbdkit containers
-    if let Err(e) = std::process::Command::new("podman")
-        .args(["rm", "-f", "--filter", "name=bcvk-nbd-"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        tracing::debug!("failed to sweep orphaned nbdkit containers: {}", e);
-    }
+    // Sweep orphaned bcvk-nbd systemd units
+    crate::nbd_windows::sweep_orphaned_nbd_units();
 
     Ok(())
 }

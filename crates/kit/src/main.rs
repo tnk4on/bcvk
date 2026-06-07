@@ -67,6 +67,8 @@ mod ephemeral_windows;
 #[cfg(target_os = "windows")]
 mod hyperv;
 #[cfg(target_os = "windows")]
+mod nbd_windows;
+#[cfg(target_os = "windows")]
 mod run_ephemeral_windows;
 #[cfg(target_os = "windows")]
 mod to_disk_windows;
