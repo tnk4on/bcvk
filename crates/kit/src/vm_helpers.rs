@@ -370,8 +370,8 @@ pub fn deploy_nbd_server(machine: &str, binary: &[u8]) -> Result<()> {
 
 /// Start the NBD server as a systemd-run unit inside the podman machine.
 ///
-/// `listen_arg` controls the transport: `"--port 10809"` for TCP (macOS)
-/// or `"--vsock --port 1030"` for vsock (Windows).
+/// `listen_arg` controls the transport: `"--port {nbd_port}"` for TCP (macOS)
+/// or `"--vsock --port {vsock_port}"` for vsock (Windows).
 pub fn start_nbd_unit(
     machine: &str,
     unit_name: &str,
@@ -380,13 +380,15 @@ pub fn start_nbd_unit(
     ssh_pubkey: &str,
     listen_arg: &str,
 ) -> Result<()> {
-    let _ = machine_ssh(
+    if let Err(e) = machine_ssh(
         machine,
         &format!(
             "systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null",
             u = unit_name
         ),
-    );
+    ) {
+        tracing::debug!("pre-cleanup of unit {} failed: {}", unit_name, e);
+    }
 
     let cmdline_esc = shell_escape(cmdline);
     let mut ssh_args = String::new();
@@ -415,13 +417,15 @@ pub fn start_nbd_unit(
 
 /// Stop an NBD server systemd-run unit (best-effort).
 pub fn stop_nbd_unit(machine: &str, unit_name: &str) {
-    let _ = machine_ssh(
+    if let Err(e) = machine_ssh(
         machine,
         &format!(
             "systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null",
             u = unit_name
         ),
-    );
+    ) {
+        tracing::debug!("stop_nbd_unit failed for {}: {}", unit_name, e);
+    }
 }
 
 /// Check if a systemd-run unit has died.

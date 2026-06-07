@@ -175,7 +175,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
                 &machine,
                 "--",
                 "bash", "-c",
-                "systemctl list-units --plain --no-legend 'bcvk-nbd-*' 2>/dev/null | awk '{print $1}' | xargs -r systemctl stop 2>/dev/null",
+                "systemctl list-units --plain --no-legend 'bcvk-nbd-*' 2>/dev/null | awk '{print $1}' | xargs -r -I{} sh -c 'systemctl stop {} 2>/dev/null; systemctl reset-failed {} 2>/dev/null'",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

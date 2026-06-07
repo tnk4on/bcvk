@@ -35,14 +35,14 @@ pub(crate) fn start_nbd_server(
         merged_path,
         cmdline,
         ssh_pubkey,
-        "--port 10809",
+        &format!("--port {}", nbd_port),
     )?;
 
     // macOS-specific: expose port via gvproxy's in-VM API (retry on transient failure)
     let expose_cmd = format!(
         "curl -sf -X POST http://192.168.127.1:80/services/forwarder/expose \
          -H 'Content-Type: application/json' \
-         -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:10809\",\"protocol\":\"tcp\"}}'",
+         -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:{nbd_port}\",\"protocol\":\"tcp\"}}'",
         nbd_port = nbd_port,
     );
     let mut exposed = false;
