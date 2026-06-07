@@ -1,102 +1,23 @@
 //! NBD server management for macOS ephemeral VMs.
 //!
-//! Deploys bcvk-nbd binary to podman machine, runs as systemd transient
-//! unit, and uses gvproxy's in-VM expose API for TCP port forwarding
-//! from macOS host. No container needed.
+//! macOS-specific: gvproxy expose API for TCP port forwarding.
+//! Common logic (deploy, systemd-run, stop) lives in vm_helpers.rs.
 
-use color_eyre::{
-    eyre::{bail, Context},
-    Result,
-};
-use std::process::{Command, Stdio};
+use color_eyre::{eyre::bail, Result};
 use std::time::Duration;
 use tracing::info;
 
-use crate::vm_helpers::detect_machine_name;
+use crate::vm_helpers;
 
-/// NBD server binary (statically linked aarch64 ELF), embedded at compile time.
+/// NBD server binary (aarch64 ELF), embedded at compile time.
 const NBD_SERVER: &[u8] = include_bytes!("../bcvk-nbd-aarch64");
 
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    data.hash(&mut h);
-    let hash1 = h.finish();
-    data.len().hash(&mut h);
-    let hash2 = h.finish();
-    format!("{:016x}{:016x}", hash1, hash2)
-}
-
-/// Get the merged overlay path from podman image mount.
-pub(crate) fn get_merged_path(machine: &str, rootful: bool, image: &str) -> Result<String> {
-    let output = if rootful {
-        Command::new("podman")
-            .args([
-                "machine", "ssh", machine, "--", "podman", "image", "mount", image,
-            ])
-            .output()
-            .context("podman image mount")?
-    } else {
-        Command::new("podman")
-            .args([
-                "machine", "ssh", machine, "--", "podman", "unshare", "podman", "image", "mount",
-                image,
-            ])
-            .output()
-            .context("podman image mount")?
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("podman image mount failed: {}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Deploy the NBD server binary to the podman machine (idempotent, hash-checked).
+/// Deploy the NBD server binary to the podman machine.
 pub(crate) fn deploy_nbd_server(machine: &str) -> Result<()> {
-    use base64::Engine;
-    let hash = sha256_hex(NBD_SERVER);
-    let b64 = base64::engine::general_purpose::STANDARD.encode(NBD_SERVER);
-    let script = format!(
-        "set -e; \
-         mkdir -p /var/tmp/bcvk; \
-         H=/var/tmp/bcvk/bcvk-nbd.sha256; \
-         if [ -f \"$H\" ] && [ \"$(cat \"$H\")\" = '{hash}' ]; then exit 0; fi; \
-         printf '%s' '{b64}' | base64 -d > /var/tmp/bcvk/bcvk-nbd; \
-         chmod +x /var/tmp/bcvk/bcvk-nbd; \
-         chcon -t bin_t /var/tmp/bcvk/bcvk-nbd 2>/dev/null || true; \
-         printf '{hash}' > \"$H\"",
-        hash = hash,
-        b64 = b64,
-    );
-    info!("deploying nbd server to podman machine...");
-    let mut child = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", "bash", "-s"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("nbd server deploy to podman machine")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(script.as_bytes())?;
-    }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!(
-            "nbd server deploy failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    vm_helpers::deploy_nbd_server(machine, NBD_SERVER)
 }
 
-/// Start the NBD server as a systemd transient unit and expose the port via gvproxy.
+/// Start the NBD server via systemd-run and expose the port via gvproxy.
 #[allow(dead_code)]
 pub(crate) fn start_nbd_server(
     machine: &str,
@@ -108,42 +29,23 @@ pub(crate) fn start_nbd_server(
 ) -> Result<String> {
     let unit_name = format!("bcvk-nbd-{}", vm_name);
 
-    // Stop and reset previous unit if exists
-    let _ = machine_ssh(machine, &format!(
-        "systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null", u = unit_name
-    ));
+    vm_helpers::start_nbd_unit(
+        machine,
+        &unit_name,
+        merged_path,
+        cmdline,
+        ssh_pubkey,
+        "--port 10809",
+    )?;
 
-    let cmdline_esc = shell_escape(cmdline);
-    let mut ssh_args = String::new();
-    if !ssh_pubkey.is_empty() {
-        ssh_args = format!(" --ssh-pubkey {}", shell_escape(ssh_pubkey));
-    }
-
-    // Start as systemd transient unit
-    let start_cmd = format!(
-        "systemd-run --unit={unit} --service-type=simple --quiet \
-         --property=LimitNOFILE=524288 \
-         /var/tmp/bcvk/bcvk-nbd --dir {merged} --port 10809 \
-         --cmdline {cmdline}{ssh}",
-        unit = unit_name,
-        merged = merged_path,
-        cmdline = cmdline_esc,
-        ssh = ssh_args,
-    );
-    let output = machine_ssh_output(machine, &start_cmd)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to start nbd server: {}", stderr.trim());
-    }
-
-    // Expose port via gvproxy's in-VM API
+    // macOS-specific: expose port via gvproxy's in-VM API
     let expose_cmd = format!(
         "curl -sf -X POST http://192.168.127.1:80/services/forwarder/expose \
          -H 'Content-Type: application/json' \
          -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:10809\",\"protocol\":\"tcp\"}}'",
         nbd_port = nbd_port,
     );
-    let output = machine_ssh_output(machine, &expose_cmd)?;
+    let output = vm_helpers::machine_ssh_output(machine, &expose_cmd)?;
     if !output.status.success() {
         bail!("gvproxy expose failed for port {}", nbd_port);
     }
@@ -161,17 +63,12 @@ pub(crate) fn start_nbd_server(
                 break;
             }
         }
-        // Check if unit is still active
-        let status = machine_ssh_output(machine, &format!("systemctl is-active {}", unit_name));
-        if let Ok(out) = status {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.trim() == "inactive" || stdout.trim() == "failed" {
-                bail!(
-                    "nbd server '{}' died before becoming ready on port {}",
-                    unit_name,
-                    nbd_port
-                );
-            }
+        if vm_helpers::is_nbd_unit_dead(machine, &unit_name) {
+            bail!(
+                "nbd server '{}' died before becoming ready on port {}",
+                unit_name,
+                nbd_port
+            );
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -199,15 +96,13 @@ pub fn find_available_nbd_port() -> u16 {
     PORT_RANGE_START
 }
 
-/// Stop an NBD server systemd unit and unexpose its port (best-effort).
+/// Stop an NBD server and unexpose its gvproxy port (best-effort).
 pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
-    if let Ok(machine) = detect_machine_name() {
-        let _ = machine_ssh(
-            &machine,
-            &format!("systemctl stop {u} 2>/dev/null; systemctl reset-failed {u} 2>/dev/null", u = unit_name),
-        );
+    if let Ok(machine) = vm_helpers::detect_machine_name() {
+        vm_helpers::stop_nbd_unit(&machine, unit_name);
+        // macOS-specific: unexpose gvproxy port
         if let Some(port) = nbd_port {
-            let _ = machine_ssh(
+            let _ = vm_helpers::machine_ssh(
                 &machine,
                 &format!(
                     "curl -sf -X POST http://192.168.127.1:80/services/forwarder/unexpose \
@@ -220,22 +115,5 @@ pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
     }
 }
 
-fn machine_ssh(machine: &str, cmd: &str) -> Result<()> {
-    let status = Command::new("podman")
-        .args(["machine", "ssh", machine, "--", cmd])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("podman machine ssh")?;
-    if !status.success() {
-        bail!("machine ssh command failed");
-    }
-    Ok(())
-}
-
-fn machine_ssh_output(machine: &str, cmd: &str) -> Result<std::process::Output> {
-    Command::new("podman")
-        .args(["machine", "ssh", machine, "--", cmd])
-        .output()
-        .context("podman machine ssh")
-}
+/// Re-export for run_ephemeral_macos.rs
+pub use vm_helpers::get_merged_path;
