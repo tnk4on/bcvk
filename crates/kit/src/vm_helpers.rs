@@ -133,6 +133,21 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     }
 }
 
+/// Flush guest filesystem to ensure tmpfiles.d-created files (e.g. authorized_keys)
+/// are persisted to the Hyper-V differencing VHDX before the VM can be stopped.
+pub fn flush_guest_filesystem(port: u16, key_path: &Path, user: &str) {
+    let ssh_opts = CommonSshOptions::default();
+    let user_host = format!("{}@localhost", user);
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
+    ssh_opts.apply_to_command(&mut cmd);
+    cmd.args(["-o", "BatchMode=yes", &user_host, "sync"]);
+    match cmd.stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        Ok(s) if s.success() => info!("filesystem sync completed"),
+        _ => tracing::debug!("filesystem sync skipped (non-critical)"),
+    }
+}
+
 /// Execute a command via SSH and return the exit status.
 pub fn run_ssh_command(
     port: u16,

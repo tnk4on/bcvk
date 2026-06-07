@@ -407,6 +407,7 @@ pub(crate) fn run_vm_service(name: &str) -> Result<()> {
 
         let key_path = std::path::Path::new(&meta.ssh_key);
         crate::vm_helpers::wait_for_ssh(actual_port, key_path, "root")?;
+        crate::vm_helpers::flush_guest_filesystem(actual_port, key_path, "root");
         tracing::info!("persistent VM '{}': SSH ready", name);
 
         loop {

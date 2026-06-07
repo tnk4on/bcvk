@@ -155,6 +155,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         if let Err(e) = crate::hyperv::vm::remove_vm(&vm.vm_name) {
             tracing::debug!("failed to remove VM {}: {}", vm.vm_name, e);
         }
+        crate::hyperv::vm::remove_internal_switch(&vm.vm_name);
         if let Some(ref nbd) = vm.nbd_container {
             if let Err(e) = std::process::Command::new("podman")
                 .args(["rm", "-f", nbd])
