@@ -38,20 +38,31 @@ pub(crate) fn start_nbd_server(
         &format!("--port {}", nbd_port),
     )?;
 
-    // macOS-specific: expose port via gvproxy's in-VM API (retry on transient failure)
+    // macOS-specific: unexpose stale entry then expose via gvproxy's in-VM API
+    let unexpose_cmd = format!(
+        "curl -s -X POST http://192.168.127.1:80/services/forwarder/unexpose \
+         -H 'Content-Type: application/json' \
+         -d '{{\"local\":\":{nbd_port}\",\"protocol\":\"tcp\"}}' >/dev/null 2>&1; true",
+        nbd_port = nbd_port,
+    );
+    let _ = vm_helpers::machine_ssh(machine, &unexpose_cmd);
+
     let expose_cmd = format!(
-        "curl -sf -X POST http://192.168.127.1:80/services/forwarder/expose \
+        "curl -s -X POST http://192.168.127.1:80/services/forwarder/expose \
          -H 'Content-Type: application/json' \
          -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:{nbd_port}\",\"protocol\":\"tcp\"}}'",
         nbd_port = nbd_port,
     );
     let mut exposed = false;
-    for _ in 0..5 {
+    for i in 0..5 {
         if let Ok(output) = vm_helpers::machine_ssh_output(machine, &expose_cmd) {
             if output.status.success() {
                 exposed = true;
                 break;
             }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::debug!("gvproxy expose attempt {}: {}{}", i + 1, stdout.trim(), stderr.trim());
         }
         std::thread::sleep(Duration::from_millis(500));
     }
