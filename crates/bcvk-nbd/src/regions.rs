@@ -1,13 +1,13 @@
 //! Region-based virtual block device composition.
 //! Inspired by the regions pattern in nbdkit's floppy plugin (BSD-3-Clause).
 
-use std::fs::File;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum RegionType {
     Data(Arc<Vec<u8>>),
-    File { file: Arc<File> },
+    FilePath { path: PathBuf },
     Zero,
 }
 
@@ -43,15 +43,13 @@ const PRELOAD_THRESHOLD: u64 = 4096;
 const MERGE_CHUNK_MAX: u64 = 4 * 1024 * 1024;
 
 pub fn consolidate_regions(regions: Vec<Region>) -> Vec<Region> {
-    use std::os::unix::fs::FileExt;
-
     let mut out: Vec<Region> = Vec::new();
     let mut merge_buf: Vec<u8> = Vec::new();
     let mut merge_start: u64 = 0;
 
     for r in regions {
         let should_inline = match &r.region_type {
-            RegionType::File { .. } => r.len <= PRELOAD_THRESHOLD,
+            RegionType::FilePath { .. } => r.len <= PRELOAD_THRESHOLD,
             RegionType::Data(_) | RegionType::Zero => true,
         };
 
@@ -78,11 +76,14 @@ pub fn consolidate_regions(regions: Vec<Region>) -> Vec<Region> {
                     merge_buf[offset_in_buf..offset_in_buf + r.len as usize]
                         .copy_from_slice(&data[..r.len as usize]);
                 }
-                RegionType::File { file } => {
-                    let _ = file.read_exact_at(
-                        &mut merge_buf[offset_in_buf..offset_in_buf + r.len as usize],
-                        0,
-                    );
+                RegionType::FilePath { path } => {
+                    if let Ok(file) = std::fs::File::open(path) {
+                        use std::os::unix::fs::FileExt;
+                        let _ = file.read_exact_at(
+                            &mut merge_buf[offset_in_buf..offset_in_buf + r.len as usize],
+                            0,
+                        );
+                    }
                 }
                 RegionType::Zero => {
                     merge_buf[offset_in_buf..offset_in_buf + r.len as usize].fill(0);
@@ -131,8 +132,9 @@ pub fn pread(regions: &[Region], buf: &mut [u8], offset: u64) -> std::io::Result
                 let start = region_offset as usize;
                 buf[buf_offset..buf_offset + len].copy_from_slice(&data[start..start + len]);
             }
-            RegionType::File { file } => {
+            RegionType::FilePath { path } => {
                 use std::os::unix::fs::FileExt;
+                let file = std::fs::File::open(path)?;
                 file.read_exact_at(&mut buf[buf_offset..buf_offset + len], region_offset)?;
             }
             RegionType::Zero => {
