@@ -150,7 +150,7 @@ impl VmMetadata {
     /// Remove metadata file for the named VM.
     pub fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
-        let _ = fs::remove_file(path);
+        crate::vm_helpers::remove_file_if_exists(&path);
     }
 
     /// List all persistent VM metadata from the VMs directory.

@@ -83,7 +83,7 @@ impl EphemeralVmMetadata {
     /// Remove metadata file for the named VM.
     pub fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
-        let _ = fs::remove_file(path);
+        crate::vm_helpers::remove_file_if_exists(&path);
     }
 
     /// Load metadata for the named VM from its JSON file.
@@ -254,8 +254,8 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let mut ssh_pubkey = String::new();
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("generating SSH keypair...");
-        let _ = fs::remove_file(&ssh_key_path);
-        let _ = fs::remove_file(ssh_key_path.with_extension("pub"));
+        crate::vm_helpers::remove_file_if_exists(&ssh_key_path);
+        crate::vm_helpers::remove_file_if_exists(&ssh_key_path.with_extension("pub"));
         let status = Command::new("ssh-keygen")
             .args([
                 "-t",
@@ -595,8 +595,8 @@ fn find_gvproxy() -> Result<String> {
 /// Start a gvproxy instance with the given socket paths.
 pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::process::Child> {
     let gvproxy_bin = find_gvproxy()?;
-    let _ = fs::remove_file(gvproxy_sock);
-    let _ = fs::remove_file(services_sock);
+    crate::vm_helpers::remove_file_if_exists(std::path::Path::new(gvproxy_sock));
+    crate::vm_helpers::remove_file_if_exists(std::path::Path::new(services_sock));
     let child = Command::new(&gvproxy_bin)
         .args([
             "-listen-vfkit",
