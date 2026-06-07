@@ -1093,6 +1093,17 @@ pub fn remove_vm(name: &str) -> Result<()> {
             }
         }
     }
+    // Wait for VM to be fully removed from WMI (DestroySystem is async)
+    for i in 0..20 {
+        let state = get_vm_state(name).unwrap_or_default();
+        if state.is_empty() {
+            if i > 0 {
+                tracing::debug!("VM '{}' fully removed after {}ms", name, i * 500);
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
     debug!("removed VM: {}", name);
     Ok(())
 }
