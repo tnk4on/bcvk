@@ -62,7 +62,12 @@ pub(crate) fn start_nbd_server(
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            tracing::debug!("gvproxy expose attempt {}: {}{}", i + 1, stdout.trim(), stderr.trim());
+            tracing::debug!(
+                "gvproxy expose attempt {}: {}{}",
+                i + 1,
+                stdout.trim(),
+                stderr.trim()
+            );
         }
         std::thread::sleep(Duration::from_millis(500));
     }

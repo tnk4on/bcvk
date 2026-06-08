@@ -360,9 +360,7 @@ pub fn build_esp_regions(
                     regions.push(Region {
                         start: offset,
                         len: *len,
-                        region_type: RegionType::FilePath {
-                            path: path.clone(),
-                        },
+                        region_type: RegionType::FilePath { path: path.clone() },
                     });
                     offset += len;
                     file_offset += len;
