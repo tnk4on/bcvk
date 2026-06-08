@@ -45,7 +45,9 @@ pub(crate) fn start_nbd_server(
          -d '{{\"local\":\":{nbd_port}\",\"protocol\":\"tcp\"}}' >/dev/null 2>&1; true",
         nbd_port = nbd_port,
     );
-    let _ = vm_helpers::machine_ssh(machine, &unexpose_cmd);
+    if let Err(e) = vm_helpers::machine_ssh(machine, &unexpose_cmd) {
+        tracing::debug!("failed to unexpose port {}: {}", nbd_port, e);
+    }
 
     let expose_cmd = format!(
         "curl -s -X POST http://192.168.127.1:80/services/forwarder/expose \
@@ -127,7 +129,7 @@ pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
         vm_helpers::stop_nbd_unit(&machine, unit_name);
         // macOS-specific: unexpose gvproxy port
         if let Some(port) = nbd_port {
-            let _ = vm_helpers::machine_ssh(
+            if let Err(e) = vm_helpers::machine_ssh(
                 &machine,
                 &format!(
                     "curl -sf -X POST http://192.168.127.1:80/services/forwarder/unexpose \
@@ -135,7 +137,9 @@ pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
                      -d '{{\"local\":\":{}\",\"protocol\":\"tcp\"}}'",
                     port
                 ),
-            );
+            ) {
+                tracing::debug!("failed to unexpose port {}: {}", port, e);
+            }
         }
     }
 }

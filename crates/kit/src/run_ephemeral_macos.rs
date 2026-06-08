@@ -189,7 +189,7 @@ impl Drop for VmCleanup {
         }
         // Release container image overlay mount
         if let Ok(machine) = detect_machine_name() {
-            let _ = Command::new("podman")
+            if let Err(e) = Command::new("podman")
                 .args([
                     "machine",
                     "ssh",
@@ -202,7 +202,10 @@ impl Drop for VmCleanup {
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
+                .status()
+            {
+                tracing::debug!("failed to umount image {}: {}", self.image, e);
+            }
         }
         EphemeralVmMetadata::remove(&self.vm_name);
     }
@@ -470,7 +473,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }
     // Release container image overlay mount
-    let _ = Command::new("podman")
+    if let Err(e) = Command::new("podman")
         .args([
             "machine",
             "ssh",
@@ -483,7 +486,10 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to umount image {}: {}", opts.image, e);
+    }
     EphemeralVmMetadata::remove(&vm_name);
     Ok(())
 }
@@ -549,11 +555,14 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
 /// `security.selinux` or `user.containers.override_stat` that are added
 /// by podman/buildah when creating images inside containers.
 pub fn clear_xattr(path: &Path) {
-    let _ = Command::new("xattr")
+    if let Err(e) = Command::new("xattr")
         .args(["-c", &path.to_string_lossy()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        tracing::debug!("failed to clear xattr on {}: {}", path.display(), e);
+    }
 }
 
 /// Find the vfkit binary, checking PATH and Podman PKG location.
@@ -643,7 +652,9 @@ pub fn expose_port(
     std::io::Write::write_all(&mut stream, request.as_bytes())?;
     std::io::Write::flush(&mut stream)?;
     let mut response = vec![0u8; 1024];
-    let _ = std::io::Read::read(&mut stream, &mut response);
+    if let Err(e) = std::io::Read::read(&mut stream, &mut response) {
+        tracing::debug!("failed to read gvproxy response: {}", e);
+    }
     let response_str = String::from_utf8_lossy(&response);
     if !response_str.contains("200") {
         bail!(
