@@ -334,7 +334,6 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
         gvproxy_pid: gvproxy_child.id(),
         ssh_port,
         ssh_key: ssh_key_path.clone(),
-        ssh_user: "root".to_string(),
         vcpus,
         memory_mb,
         efi_store: efi_store.to_string_lossy().to_string(),
