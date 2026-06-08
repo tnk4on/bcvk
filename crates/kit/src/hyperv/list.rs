@@ -81,8 +81,8 @@ pub fn run(opts: HypervListOpts) -> Result<()> {
                     vm_meta.image.clone()
                 };
                 println!(
-                    "{:<20} {:<10} {:<40} ssh -p {} -i {} root@localhost",
-                    vm_meta.name, state, image, vm_meta.ssh_port, vm_meta.ssh_key
+                    "{:<20} {:<10} {:<40} :{}",
+                    vm_meta.name, state, image, vm_meta.ssh_port
                 );
             }
         }
