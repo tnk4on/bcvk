@@ -33,10 +33,10 @@ struct CacheMetadata {
 #[derive(Parser, Debug)]
 pub struct ToDiskWindowsOpts {
     /// Container image to install
-    pub image: String,
+    pub source_image: String,
 
     /// Output VHDX path
-    pub output: Utf8PathBuf,
+    pub target_disk: Utf8PathBuf,
 
     /// Disk size (e.g. "20G", "10240M")
     #[clap(long, default_value = "20G")]
@@ -323,10 +323,10 @@ fn create_base_disk(
 
 pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     // Get image digest for caching
-    let image_digest = crate::vm_helpers::ensure_image_and_get_digest(&opts.image)?;
+    let image_digest = crate::vm_helpers::ensure_image_and_get_digest(&opts.source_image)?;
 
     if opts.dry_run {
-        let cache_hash = compute_cache_hash(&image_digest, &opts.image, &opts.install);
+        let cache_hash = compute_cache_hash(&image_digest, &opts.source_image, &opts.install);
         let short_hash: String = cache_hash
             .strip_prefix("sha256:")
             .unwrap_or(&cache_hash)
@@ -339,12 +339,12 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
             if let Some(meta) = read_cache_metadata(&base_path.to_string_lossy()) {
                 if meta.cache_hash == cache_hash {
                     println!("Would reuse cached base disk: {}", base_path.display());
-                    if opts.output.exists() {
-                        println!("Output already exists: {}", opts.output);
+                    if opts.target_disk.exists() {
+                        println!("Output already exists: {}", opts.target_disk);
                     } else {
                         println!(
                             "Would create differencing disk: {} (from base)",
-                            opts.output
+                            opts.target_disk
                         );
                     }
                     return Ok(());
@@ -352,14 +352,17 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
             }
             println!("Would regenerate base disk (hash mismatch)");
         } else {
-            println!("Would create new base disk and output: {}", opts.output);
+            println!(
+                "Would create new base disk and output: {}",
+                opts.target_disk
+            );
         }
         return Ok(());
     }
 
     // Find or create base disk (with caching)
     let base_disk = find_or_create_base_disk(
-        &opts.image,
+        &opts.source_image,
         &image_digest,
         &opts.install,
         &opts.disk_size,
@@ -368,9 +371,9 @@ pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
     )?;
 
     // Create output as differencing disk from base
-    let output_str = opts.output.as_str();
-    if opts.output.exists() {
-        bail!("output file already exists: {}", opts.output);
+    let output_str = opts.target_disk.as_str();
+    if opts.target_disk.exists() {
+        bail!("output file already exists: {}", opts.target_disk);
     }
     create_differencing_vhdx(&base_disk, output_str)?;
 
