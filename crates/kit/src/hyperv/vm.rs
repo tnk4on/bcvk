@@ -1261,17 +1261,22 @@ pub fn register_vsock_service(port: u32) -> Result<()> {
         guid
     );
     let key_path_w: Vec<u16> = key_path.encode_utf16().chain(std::iter::once(0)).collect();
-    let value_name: Vec<u16> = "ElementName"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let value_data: Vec<u16> = "bcvk-nbd"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
 
     unsafe {
         let mut hkey = HKEY::default();
+        let rc = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_path_w.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        );
+        if rc.is_ok() {
+            let _ = RegCloseKey(hkey);
+            debug!("vsock service already registered: {}", guid);
+            return Ok(());
+        }
+
         let rc = RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(key_path_w.as_ptr()),
@@ -1284,9 +1289,19 @@ pub fn register_vsock_service(port: u32) -> Result<()> {
             None,
         );
         if rc.is_err() {
-            debug!("registry write failed (may need admin): {}", guid);
-            return Ok(());
+            bail!(
+                "vsock service registration requires admin privileges: {}",
+                guid
+            );
         }
+        let value_name: Vec<u16> = "ElementName"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let value_data: Vec<u16> = "bcvk-nbd"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let data_bytes: &[u8] =
             std::slice::from_raw_parts(value_data.as_ptr() as *const u8, value_data.len() * 2);
         let _ = RegSetValueExW(
@@ -1299,13 +1314,6 @@ pub fn register_vsock_service(port: u32) -> Result<()> {
         let _ = RegCloseKey(hkey);
     }
     debug!("registered vsock service GUID: {}", guid);
-    Ok(())
-}
-
-pub fn unregister_vsock_service(_port: u32) -> Result<()> {
-    // GUID is kept permanently. Deleting it caused re-registration failures
-    // because powershell_ignore_error silently swallowed HKLM write errors.
-    // The key only permits vsock on one port — no cleanup needed.
     Ok(())
 }
 

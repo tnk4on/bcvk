@@ -110,7 +110,6 @@ struct VmCleanup {
     image: String,
     vhdx_path: Option<String>,
     ssh_forward: Option<SshForward>,
-    vsock_port: Option<u32>,
     switch_name: Option<String>,
 }
 
@@ -152,11 +151,6 @@ impl Drop for VmCleanup {
                 tracing::debug!("failed to umount image {}: {}", self.image, e);
             }
         }
-        if let Some(port) = self.vsock_port {
-            if let Err(e) = vm::unregister_vsock_service(port) {
-                tracing::debug!("failed to unregister vsock service port {}: {}", port, e);
-            }
-        }
         if let Some(ref sw) = self.switch_name {
             vm::remove_internal_switch(sw);
         }
@@ -195,11 +189,6 @@ fn spawn_cleanup(c: &VmCleanup) {
             .spawn()
         {
             tracing::debug!("failed to umount image {}: {}", c.image, e);
-        }
-    }
-    if let Some(port) = c.vsock_port {
-        if let Err(e) = vm::unregister_vsock_service(port) {
-            tracing::debug!("failed to unregister vsock service port {}: {}", port, e);
         }
     }
     EphemeralVmMetadata::remove(&c.name);
@@ -582,7 +571,6 @@ fn start_vm_and_services(
         image: opts.image.clone(),
         vhdx_path: Some(p1.vhdx_path.clone()),
         ssh_forward: None,
-        vsock_port: Some(ctx.vsock_port),
         switch_name: Some(ctx.switch_name.clone()),
     };
 
