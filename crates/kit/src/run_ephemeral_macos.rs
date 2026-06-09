@@ -205,25 +205,25 @@ impl Drop for VmCleanup {
         }
         // Release container image overlay mount (podman mode only)
         if self.backend != "native" {
-        if let Ok(machine) = detect_machine_name() {
-            if let Err(e) = Command::new("podman")
-                .args([
-                    "machine",
-                    "ssh",
-                    &machine,
-                    "--",
-                    "podman",
-                    "image",
-                    "umount",
-                    &self.image,
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-            {
-                tracing::debug!("failed to umount image {}: {}", self.image, e);
+            if let Ok(machine) = detect_machine_name() {
+                if let Err(e) = Command::new("podman")
+                    .args([
+                        "machine",
+                        "ssh",
+                        &machine,
+                        "--",
+                        "podman",
+                        "image",
+                        "umount",
+                        &self.image,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                {
+                    tracing::debug!("failed to umount image {}: {}", self.image, e);
+                }
             }
-        }
         } // end if backend != "native"
         EphemeralVmMetadata::remove(&self.vm_name);
     }

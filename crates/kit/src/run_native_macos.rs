@@ -258,7 +258,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
     EphemeralVmMetadata::remove(&vm_name);
     // Clean up extracted kernel files
-    let _ = fs::remove_dir_all(&kernel_dir);
+    if let Err(e) = fs::remove_dir_all(&kernel_dir) {
+        debug!("failed to clean up kernel dir: {}", e);
+    }
     Ok(())
 }
 
@@ -389,11 +391,7 @@ fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, Path
 
     // Find kernel version directory
     let output = Command::new(&debugfs)
-        .args([
-            "-R",
-            "ls -p /usr/lib/modules/",
-            &rootfs.to_string_lossy(),
-        ])
+        .args(["-R", "ls -p /usr/lib/modules/", &rootfs.to_string_lossy()])
         .output()
         .context("failed to run debugfs ls")?;
 
@@ -435,10 +433,7 @@ fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, Path
         .status()
         .context("failed to extract vmlinuz")?;
     if !vmlinuz_path.exists() || fs::metadata(&vmlinuz_path)?.len() == 0 {
-        bail!(
-            "vmlinuz extraction failed (debugfs exit: {})",
-            status
-        );
+        bail!("vmlinuz extraction failed (debugfs exit: {})", status);
     }
 
     // Extract initramfs.img
@@ -455,21 +450,14 @@ fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, Path
         .status()
         .context("failed to extract initramfs")?;
     if !initramfs_path.exists() || fs::metadata(&initramfs_path)?.len() == 0 {
-        bail!(
-            "initramfs extraction failed (debugfs exit: {})",
-            status
-        );
+        bail!("initramfs extraction failed (debugfs exit: {})", status);
     }
 
     Ok((vmlinuz_path, initramfs_path))
 }
 
 /// Build a combined initramfs by concatenating the original with bcvk CPIO archives.
-fn build_combined_initramfs(
-    original: &Path,
-    ssh_pubkey: &str,
-    dest: &Path,
-) -> Result<()> {
+fn build_combined_initramfs(original: &Path, ssh_pubkey: &str, dest: &Path) -> Result<()> {
     let mut out = fs::read(original).context("failed to read original initramfs")?;
 
     // Align to 4 bytes

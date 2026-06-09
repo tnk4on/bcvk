@@ -209,7 +209,11 @@ pub fn create_ssh_cpio(pubkey: &str) -> io::Result<Vec<u8>> {
     write_directory(&mut buf, "usr/lib/systemd/system")?;
     write_directory(&mut buf, "usr/lib/systemd/system/initrd-fs.target.d")?;
 
-    write_executable(&mut buf, "usr/lib/bcvk/setup-ssh.sh", setup_script.as_bytes())?;
+    write_executable(
+        &mut buf,
+        "usr/lib/bcvk/setup-ssh.sh",
+        setup_script.as_bytes(),
+    )?;
 
     write_file(
         &mut buf,
@@ -378,9 +382,13 @@ mod tests {
 
         // Must contain the common units
         assert!(names.iter().any(|n| n.contains("bcvk-etc-overlay.service")));
-        assert!(names.iter().any(|n| n.contains("bcvk-var-ephemeral.service")));
+        assert!(names
+            .iter()
+            .any(|n| n.contains("bcvk-var-ephemeral.service")));
         assert!(names.iter().any(|n| n.contains("bcvk-copy-units.service")));
-        assert!(names.iter().any(|n| n.contains("bcvk-journal-stream.service")));
+        assert!(names
+            .iter()
+            .any(|n| n.contains("bcvk-journal-stream.service")));
     }
 
     #[test]

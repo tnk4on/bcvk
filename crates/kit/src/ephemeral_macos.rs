@@ -170,9 +170,9 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     // Sweep orphaned resources inside podman machine (skip if no podman VMs)
     let has_podman_vms = vms.iter().any(|vm| vm.backend != "native");
     if has_podman_vms {
-    if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
-        // Stop orphaned bcvk-nbd systemd units
-        if let Err(e) = Command::new("podman")
+        if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
+            // Stop orphaned bcvk-nbd systemd units
+            if let Err(e) = Command::new("podman")
             .args([
                 "machine",
                 "ssh",
@@ -187,18 +187,18 @@ fn cmd_rm_all(force: bool) -> Result<()> {
         {
             tracing::debug!("failed to stop orphaned nbd units: {}", e);
         }
-        // Unmount any remaining container image overlays
-        if let Err(e) = Command::new("podman")
-            .args([
-                "machine", "ssh", &machine, "--", "podman", "image", "umount", "--all",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
-            tracing::debug!("failed to unmount container images: {}", e);
+            // Unmount any remaining container image overlays
+            if let Err(e) = Command::new("podman")
+                .args([
+                    "machine", "ssh", &machine, "--", "podman", "image", "umount", "--all",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                tracing::debug!("failed to unmount container images: {}", e);
+            }
         }
-    }
     } // end if has_podman_vms
     Ok(())
 }
