@@ -123,11 +123,11 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
             }
         }
         let backoff = if attempt < 2 {
-            500
+            100
         } else if attempt < 4 {
-            1000
+            200
         } else {
-            2000
+            500
         };
         std::thread::sleep(Duration::from_millis(backoff));
         attempt += 1;
