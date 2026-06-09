@@ -63,8 +63,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let work_dir = cache_base.join(format!("{}-kernel", vm_name));
     fs::create_dir_all(&work_dir)?;
 
-    // Extract kernel assets from rootfs.ext4
-    let (vmlinuz, initramfs_orig, grub_efi) = extract_boot_assets(&rootfs_path, &work_dir)?;
+    // Extract kernel assets from rootfs.ext4 (cached by digest)
+    let (vmlinuz, initramfs_orig, grub_efi) =
+        extract_boot_assets(&rootfs_path, &work_dir, &snapshot_digest)?;
     info!("extracted: vmlinuz, initramfs, grub");
 
     // Generate SSH keypair if needed
@@ -467,13 +468,33 @@ fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
 
 /// Extract vmlinuz, initramfs.img, and GRUB EFI binary from an EXT4 rootfs.
 ///
-/// Uses debugfs batch mode (`-f`) to minimize process startup overhead:
-/// a single debugfs invocation lists directories and extracts all files.
-fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    let debugfs = debugfs_path();
+/// Uses a digest-based cache to skip debugfs extraction on repeated runs.
+/// On cache miss, uses debugfs batch mode (`-f`) to minimize overhead.
+fn extract_boot_assets(
+    rootfs: &Path,
+    dest: &Path,
+    digest: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let vmlinuz_path = dest.join("vmlinuz");
     let initramfs_path = dest.join("initramfs.img");
     let grub_path = dest.join("grub.efi");
+
+    // Check cache first
+    let cache_dir = ephemeral_base_dir().join("kernel-cache").join(digest);
+    if cache_dir.join("vmlinuz").exists()
+        && cache_dir.join("initramfs.img").exists()
+        && cache_dir.join("grub.efi").exists()
+    {
+        fs::copy(cache_dir.join("vmlinuz"), &vmlinuz_path)?;
+        fs::copy(cache_dir.join("initramfs.img"), &initramfs_path)?;
+        fs::copy(cache_dir.join("grub.efi"), &grub_path)?;
+        if let Ok(kver) = fs::read_to_string(cache_dir.join("kernel-version")) {
+            info!("using cached kernel: {}", kver.trim());
+        }
+        return Ok((vmlinuz_path, initramfs_path, grub_path));
+    }
+
+    let debugfs = debugfs_path();
 
     // Phase 1: batch list kernel version + GRUB search dirs (single debugfs call)
     let list_cmds = "ls -p /usr/lib/modules/\nls -p /usr/lib/efi/grub2/\n";
@@ -574,7 +595,23 @@ fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, 
         bail!("grubaa64.efi not found in rootfs (checked bootupd + /usr/lib/efi/)");
     }
 
+    // Save to cache for next run
+    if let Err(e) = save_kernel_cache(&cache_dir, dest, &kernel_version) {
+        debug!("failed to save kernel cache: {}", e);
+    }
+
     Ok((vmlinuz_path, initramfs_path, grub_path))
+}
+
+/// Save extracted boot assets to the digest-based cache.
+fn save_kernel_cache(cache_dir: &Path, src: &Path, kernel_version: &str) -> Result<()> {
+    fs::create_dir_all(cache_dir)?;
+    fs::copy(src.join("vmlinuz"), cache_dir.join("vmlinuz"))?;
+    fs::copy(src.join("initramfs.img"), cache_dir.join("initramfs.img"))?;
+    fs::copy(src.join("grub.efi"), cache_dir.join("grub.efi"))?;
+    fs::write(cache_dir.join("kernel-version"), kernel_version)?;
+    debug!("saved kernel cache to {}", cache_dir.display());
+    Ok(())
 }
 
 /// Parse directory names from debugfs `ls -p` output lines.
