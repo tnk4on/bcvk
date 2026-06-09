@@ -36,6 +36,10 @@ const CONTAINER_APP_ROOT: &str = "Library/Application Support/com.apple.containe
 
 /// Run an ephemeral VM using apple/container CLI and vfkit EFI boot.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
+    if opts.detach {
+        return run_detached_native(&opts);
+    }
+
     check_prerequisites()?;
     ensure_container_system()?;
 
@@ -274,6 +278,61 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if let Err(e) = fs::remove_dir_all(&work_dir) {
         debug!("failed to clean up work dir: {}", e);
     }
+    Ok(())
+}
+
+/// Spawn a detached native mode VM by re-invoking bcvk without --detach.
+fn run_detached_native(opts: &RunEphemeralOpts) -> Result<()> {
+    let cache_base = ephemeral_base_dir();
+    fs::create_dir_all(&cache_base)?;
+
+    let vm_name = opts
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("native-detach-{}", &opts.image.len().to_string()[..1]));
+    let log_path = cache_base.join(format!("bcvk-{}.log", vm_name));
+    let log_file = fs::File::create(&log_path)?;
+
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--detach" && a != "-d")
+        .collect();
+    if !args.contains(&"-K".to_string()) && !args.contains(&"--ssh-keygen".to_string()) {
+        args.insert(args.len() - 1, "-K".to_string());
+    }
+    if opts.name.is_none() {
+        args.insert(args.len() - 1, "--name".to_string());
+        args.insert(args.len() - 1, vm_name.clone());
+    }
+
+    let child = Command::new(exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    let metadata = EphemeralVmMetadata {
+        name: vm_name.clone(),
+        image: opts.image.clone(),
+        pid: child.id(),
+        gvproxy_pid: 0,
+        ssh_port: 0,
+        ssh_key: cache_base
+            .join(format!("{}-key", vm_name))
+            .to_string_lossy()
+            .to_string(),
+        serial_log: String::new(),
+        log_path: Some(log_path.to_string_lossy().to_string()),
+        created: chrono::Utc::now().to_rfc3339(),
+        nbd_container: None,
+        nbd_port: None,
+        backend: "native".to_string(),
+        rootfs_path: None,
+    };
+    metadata.save()?;
+    println!("{}", vm_name);
     Ok(())
 }
 
