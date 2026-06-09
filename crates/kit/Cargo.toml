@@ -63,6 +63,7 @@ libsystemd = "0.7"
 rustix = { version = "1", features = ["process"] }
 zstd = "0.13"
 bcvk-nbd = { path = "../bcvk-nbd" }
+ext4-view = { version = "0.9", features = ["std"] }
 
 [dev-dependencies]
 similar-asserts = "1.5"
