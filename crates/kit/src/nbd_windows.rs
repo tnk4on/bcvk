@@ -92,7 +92,7 @@ pub(crate) fn start_nbd_server(
            --dir {merged} --cmdline {cmdline}{ssh}\n\
          for i in $(seq 1 120); do\n\
            if journalctl -u {u} --no-pager -n 10 2>/dev/null | grep -q 'listening on vsock'; then exit 0; fi\n\
-           sleep 1\n\
+           sleep 0.2\n\
          done\n\
          echo 'nbd vsock bind timeout (120s)' >&2\n\
          exit 1",

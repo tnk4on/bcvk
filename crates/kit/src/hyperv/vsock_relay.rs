@@ -151,41 +151,48 @@ fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
     }
     let export_size = u64::from_be_bytes(reply[0..8].try_into().unwrap());
 
-    // Prefetch first 256 MB (GPT + ESP + EROFS metadata + early rootfs files)
-    const PREFETCH_LIMIT: u64 = 256 * 1024 * 1024;
-    let prefetch_end = std::cmp::min(PREFETCH_LIMIT, export_size);
+    // Prefetch head (GPT + ESP + early EROFS) and tail (EROFS metadata at image end)
+    const PREFETCH_HEAD: u64 = 256 * 1024 * 1024;
+    const PREFETCH_TAIL: u64 = 256 * 1024 * 1024;
     let chunk_size: u32 = 512 * 1024;
-    let mut offset: u64 = 0;
     let mut cached_bytes: u64 = 0;
     let start = std::time::Instant::now();
 
-    while offset < prefetch_end {
-        let len = std::cmp::min(chunk_size as u64, prefetch_end - offset) as u32;
-        let mut req = [0u8; 28];
-        req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
-        req[8..16].copy_from_slice(&offset.to_be_bytes());
-        req[16..24].copy_from_slice(&offset.to_be_bytes());
-        req[24..28].copy_from_slice(&len.to_be_bytes());
-        if !wsa_send_all(podman_sock, &req) {
-            break;
-        }
+    let mut regions: Vec<(u64, u64)> = vec![(0, std::cmp::min(PREFETCH_HEAD, export_size))];
+    if export_size > PREFETCH_HEAD + PREFETCH_TAIL {
+        regions.push((export_size - PREFETCH_TAIL, export_size));
+    }
 
-        let mut reply_hdr = [0u8; 16];
-        if !wsa_recv_exact(podman_sock, &mut reply_hdr) {
-            break;
-        }
-        if u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap()) != 0 {
-            break;
-        }
+    for (region_start, region_end) in &regions {
+        let mut offset = *region_start;
+        while offset < *region_end {
+            let len = std::cmp::min(chunk_size as u64, *region_end - offset) as u32;
+            let mut req = [0u8; 28];
+            req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+            req[8..16].copy_from_slice(&offset.to_be_bytes());
+            req[16..24].copy_from_slice(&offset.to_be_bytes());
+            req[24..28].copy_from_slice(&len.to_be_bytes());
+            if !wsa_send_all(podman_sock, &req) {
+                break;
+            }
 
-        let mut data = vec![0u8; len as usize];
-        if !wsa_recv_exact(podman_sock, &mut data) {
-            break;
-        }
+            let mut reply_hdr = [0u8; 16];
+            if !wsa_recv_exact(podman_sock, &mut reply_hdr) {
+                break;
+            }
+            if u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap()) != 0 {
+                break;
+            }
 
-        cache.write().unwrap().insert(offset, data);
-        cached_bytes += len as u64;
-        offset += len as u64;
+            let mut data = vec![0u8; len as usize];
+            if !wsa_recv_exact(podman_sock, &mut data) {
+                break;
+            }
+
+            cache.write().unwrap().insert(offset, data);
+            cached_bytes += len as u64;
+            offset += len as u64;
+        }
     }
 
     let elapsed = start.elapsed();
@@ -299,7 +306,7 @@ fn relay_vm_to_podman_tracked(
                 continue;
             }
             cache_misses += 1;
-            info!("relay cache MISS: offset={}, length={}", offset, length);
+            debug!("relay cache MISS: offset={}, length={}", offset, length);
             pending
                 .write()
                 .unwrap()
@@ -651,7 +658,7 @@ unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
                 n, select_err
             );
             ws::closesocket(sock);
-            return Err(color_eyre::eyre::eyre!("connect timed out (1s)"));
+            return Err(color_eyre::eyre::eyre!("connect timed out (200ms)"));
         }
     }
 
