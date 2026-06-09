@@ -421,14 +421,18 @@ impl VsockRelay {
         let mut handles = Vec::new();
         let cache = cache_new();
 
-        // Prefetch boot regions in background (with retry, parallel with relay)
+        // Prefetch boot regions after relay's podman connection succeeds
+        let (prefetch_tx, prefetch_rx) = tokio::sync::oneshot::channel::<()>();
         {
             let pod_prefetch = podman_guid.clone();
             let cache_prefetch = cache.clone();
             tokio::task::spawn_blocking(move || {
+                if prefetch_rx.blocking_recv().is_err() {
+                    return;
+                }
                 info!("vsock relay: prefetching boot regions from podman");
                 let podman_sock =
-                    match unsafe { hvsock_connect_retry(&pod_prefetch, vsock_port, 75, 200) } {
+                    match unsafe { hvsock_connect_retry(&pod_prefetch, vsock_port, 10, 200) } {
                         Ok(s) => s,
                         Err(e) => {
                             info!("vsock relay: prefetch connect failed: {}", e);
@@ -437,15 +441,17 @@ impl VsockRelay {
                     };
                 prefetch_boot_regions(podman_sock, cache_prefetch);
             });
-            // NOT awaited — runs in parallel with relay connections
         }
 
         let mut connect_handles = Vec::new();
+        let prefetch_tx = std::sync::Mutex::new(Some(prefetch_tx));
+        let prefetch_tx = std::sync::Arc::new(prefetch_tx);
         for i in 0..num_connections {
             let pod_g = podman_guid.clone();
             let eph_g = ephemeral_guid.clone();
             let stop_clone = stop.clone();
             let cache_clone = cache.clone();
+            let prefetch_tx_clone = prefetch_tx.clone();
             connect_handles.push(tokio::task::spawn_blocking(
                 move || -> Option<JoinHandle<()>> {
                     info!(
@@ -460,6 +466,9 @@ impl VsockRelay {
                                 return None;
                             }
                         };
+                    if let Some(tx) = prefetch_tx_clone.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
                     info!(
                         "vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)",
                         i, vsock_port
@@ -491,9 +500,8 @@ impl VsockRelay {
                                     "vsock relay[{}]: connection closed, attempting reconnect",
                                     idx,
                                 );
-                                std::thread::sleep(std::time::Duration::from_secs(2));
                                 let new_vm = match unsafe {
-                                    hvsock_connect_retry(&eph_g2, vsock_port, 30, 200)
+                                    hvsock_connect_retry(&eph_g2, vsock_port, 5, 200)
                                 } {
                                     Ok(s) => s,
                                     Err(e) => {
@@ -632,14 +640,14 @@ unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
         wfds.fd_count = 1;
         wfds.fd_array[0] = sock;
         let timeout = ws::TIMEVAL {
-            tv_sec: 1,
-            tv_usec: 0,
+            tv_sec: 0,
+            tv_usec: 200_000,
         };
         let n = ws::select(0, None, Some(&mut wfds), None, Some(&timeout));
         if n <= 0 {
             let select_err = if n < 0 { ws::WSAGetLastError().0 } else { 0 };
             debug!(
-                "hvsock_connect: select returned {} (WSA err {}, timeout 1s)",
+                "hvsock_connect: select returned {} (WSA err {}, timeout 200ms)",
                 n, select_err
             );
             ws::closesocket(sock);
