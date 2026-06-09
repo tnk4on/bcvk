@@ -447,6 +447,11 @@ fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, 
     // Find and extract GRUB EFI binary
     let grub_path = dest.join("grub.efi");
     let grub_candidates = [
+        // bootc/ostree images store EFI binaries under bootupd
+        "/usr/lib/bootupd/updates/EFI/fedora/grubaa64.efi",
+        "/usr/lib/bootupd/updates/EFI/centos/grubaa64.efi",
+        "/usr/lib/bootupd/updates/EFI/redhat/grubaa64.efi",
+        // Traditional paths (non-bootc images)
         "/usr/lib/grub/arm64-efi-sb/grubaa64.efi",
         "/usr/lib/grub/arm64-efi/grubaa64.efi",
         "/boot/efi/EFI/fedora/grubaa64.efi",
