@@ -471,19 +471,55 @@ fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, 
     }
 
     if !grub_found {
-        // Fallback: search recursively
-        let output = Command::new(&debugfs)
-            .args(["-R", "find / -name grubaa64.efi", &rootfs.to_string_lossy()])
-            .output()?;
-        let find_output = String::from_utf8_lossy(&output.stdout);
-        debug!("debugfs find grub: {}", find_output.trim());
-        bail!(
-            "grubaa64.efi not found in rootfs. Checked: {:?}",
-            grub_candidates
-        );
+        // Fallback: Fedora 44+ stores GRUB under /usr/lib/efi/grub2/<version>/EFI/fedora/
+        grub_found = find_grub_efi_recursive(&debugfs, rootfs, "/usr/lib/efi/grub2", &grub_path)?
+            || find_grub_efi_recursive(&debugfs, rootfs, "/usr/lib/efi/shim", &grub_path)?;
+    }
+
+    if !grub_found {
+        bail!("grubaa64.efi not found in rootfs. Checked static paths and /usr/lib/efi/");
     }
 
     Ok((vmlinuz_path, initramfs_path, grub_path))
+}
+
+/// Search for grubaa64.efi under a versioned directory tree using debugfs.
+///
+/// Handles paths like `/usr/lib/efi/grub2/1:2.12-58.fc44/EFI/fedora/grubaa64.efi`
+/// where the version directory is unknown at compile time.
+fn find_grub_efi_recursive(
+    debugfs_bin: &str,
+    rootfs: &Path,
+    base_dir: &str,
+    dest: &Path,
+) -> Result<bool> {
+    let output = Command::new(debugfs_bin)
+        .args([
+            "-R",
+            &format!("ls -p {}/", base_dir),
+            &rootfs.to_string_lossy(),
+        ])
+        .output()?;
+
+    let ls_output = String::from_utf8_lossy(&output.stdout);
+    for line in ls_output.lines() {
+        let parts: Vec<&str> = line.split('/').collect();
+        if parts.len() >= 7 {
+            let name = parts[5].trim();
+            if name.is_empty() || name == "." || name == ".." {
+                continue;
+            }
+            let candidate = format!("{}/{}/EFI/fedora/grubaa64.efi", base_dir, name);
+            if debugfs_dump(debugfs_bin, rootfs, &candidate, dest).is_ok()
+                && dest.exists()
+                && fs::metadata(dest)?.len() > 0
+            {
+                info!("found GRUB at {}", candidate);
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Run debugfs dump command. Returns Ok if the file was extracted successfully.
