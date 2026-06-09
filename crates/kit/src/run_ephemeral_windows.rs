@@ -439,20 +439,11 @@ fn setup_image_and_guid(ctx: &RunContext, opts: &RunEphemeralOpts) -> Result<Set
         } else {
             "podman unshare podman"
         };
-        let script = format!(
-            "MERGED=$({pfx} image mount {image}); echo MERGED=$MERGED",
-            pfx = pfx,
-            image = image_mount,
-        );
+        let script = format!("{pfx} image mount {image}", pfx = pfx, image = image_mount);
         let out = ps_mount.ssh_cmd(&script)?;
-        let stdout = String::from_utf8_lossy(&out);
-        let merged = stdout
-            .lines()
-            .find(|l| l.starts_with("MERGED="))
-            .map(|l| l.trim_start_matches("MERGED=").trim().to_string())
-            .unwrap_or_default();
+        let merged = String::from_utf8_lossy(&out).trim().to_string();
         if merged.is_empty() {
-            bail!("failed to get MERGED path");
+            bail!("failed to get MERGED path: podman image mount returned empty output");
         }
         Ok(merged)
     });
