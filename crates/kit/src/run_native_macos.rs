@@ -386,8 +386,15 @@ fn ensure_container_system() -> Result<()> {
     Ok(())
 }
 
-/// Pull image and return the platform-specific snapshot digest (without sha256: prefix).
+/// Ensure image is available locally and return the platform-specific snapshot digest.
 fn pull_image(image: &str) -> Result<String> {
+    // Try inspect first (fast path for cached images)
+    if let Ok(digest) = inspect_image_digest(image) {
+        debug!("image already cached, digest: {}", digest);
+        return Ok(digest);
+    }
+
+    // Image not found locally — pull it
     info!("pulling image: {}", image);
     let status = Command::new("container")
         .args(["image", "pull", "--platform", "linux/arm64", image])
@@ -400,13 +407,20 @@ fn pull_image(image: &str) -> Result<String> {
         bail!("container image pull failed");
     }
 
+    inspect_image_digest(image)
+}
+
+/// Get the platform-specific snapshot digest from a locally cached image.
+fn inspect_image_digest(image: &str) -> Result<String> {
     let output = Command::new("container")
         .args(["image", "inspect", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .output()
         .context("failed to run container image inspect")?;
 
     if !output.status.success() {
-        bail!("container image inspect failed");
+        bail!("image not found locally");
     }
 
     let json_str = String::from_utf8_lossy(&output.stdout);
@@ -429,7 +443,6 @@ fn pull_image(image: &str) -> Result<String> {
             color_eyre::eyre::eyre!("could not find platform-specific digest in image inspect")
         })?;
 
-    debug!("platform-specific snapshot digest: {}", digest);
     Ok(digest)
 }
 
@@ -453,28 +466,40 @@ fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
 }
 
 /// Extract vmlinuz, initramfs.img, and GRUB EFI binary from an EXT4 rootfs.
+///
+/// Uses debugfs batch mode (`-f`) to minimize process startup overhead:
+/// a single debugfs invocation lists directories and extracts all files.
 fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let debugfs = debugfs_path();
+    let vmlinuz_path = dest.join("vmlinuz");
+    let initramfs_path = dest.join("initramfs.img");
+    let grub_path = dest.join("grub.efi");
 
-    // Find kernel version directory
+    // Phase 1: batch list kernel version + GRUB search dirs (single debugfs call)
+    let list_cmds = "ls -p /usr/lib/modules/\nls -p /usr/lib/efi/grub2/\n";
     let output = Command::new(&debugfs)
-        .args(["-R", "ls -p /usr/lib/modules/", &rootfs.to_string_lossy()])
-        .output()
-        .context("failed to run debugfs ls")?;
+        .args(["-f", "/dev/stdin", &rootfs.to_string_lossy()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(list_cmds.as_bytes())?;
+            child.wait_with_output()
+        })
+        .context("failed to run debugfs batch ls")?;
 
     let ls_output = String::from_utf8_lossy(&output.stdout);
-    let kernel_version = ls_output
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split('/').collect();
-            if parts.len() >= 7 {
-                let name = parts[5].trim();
-                if !name.is_empty() && name != "." && name != ".." {
-                    return Some(name.to_string());
-                }
-            }
-            None
-        })
+    let mut lines = ls_output.lines();
+
+    // Parse kernel version from first ls output
+    let kernel_version = parse_debugfs_ls_names(&mut lines)
+        .into_iter()
         .next()
         .ok_or_else(|| {
             color_eyre::eyre::eyre!(
@@ -482,119 +507,92 @@ fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, 
                 rootfs.display()
             )
         })?;
-
     info!("found kernel version: {}", kernel_version);
 
-    // Extract vmlinuz
-    let vmlinuz_path = dest.join("vmlinuz");
-    debugfs_dump(
-        &debugfs,
-        rootfs,
-        &format!("/usr/lib/modules/{}/vmlinuz", kernel_version),
-        &vmlinuz_path,
-    )?;
+    // Parse GRUB versioned dirs from second ls output
+    let grub_efi_versions = parse_debugfs_ls_names(&mut lines);
 
-    // Extract initramfs.img
-    let initramfs_path = dest.join("initramfs.img");
-    debugfs_dump(
-        &debugfs,
-        rootfs,
-        &format!("/usr/lib/modules/{}/initramfs.img", kernel_version),
-        &initramfs_path,
-    )?;
+    // Phase 2: batch extract kernel + initramfs + GRUB (single debugfs call)
+    // Build GRUB dump commands — try bootupd paths first, then versioned /usr/lib/efi/
+    let mut dump_cmds = format!(
+        "dump /usr/lib/modules/{kv}/vmlinuz {vmlinuz}\n\
+         dump /usr/lib/modules/{kv}/initramfs.img {initramfs}\n",
+        kv = kernel_version,
+        vmlinuz = vmlinuz_path.display(),
+        initramfs = initramfs_path.display(),
+    );
 
-    // Find and extract GRUB EFI binary
-    let grub_path = dest.join("grub.efi");
-    let grub_candidates = [
-        // bootc/ostree images store EFI binaries under bootupd
-        "/usr/lib/bootupd/updates/EFI/fedora/grubaa64.efi",
-        "/usr/lib/bootupd/updates/EFI/centos/grubaa64.efi",
-        "/usr/lib/bootupd/updates/EFI/redhat/grubaa64.efi",
-        // Traditional paths (non-bootc images)
-        "/usr/lib/grub/arm64-efi-sb/grubaa64.efi",
-        "/usr/lib/grub/arm64-efi/grubaa64.efi",
-        "/boot/efi/EFI/fedora/grubaa64.efi",
-        "/boot/efi/EFI/centos/grubaa64.efi",
-        "/boot/efi/EFI/redhat/grubaa64.efi",
-    ];
-
-    let mut grub_found = false;
-    for candidate in &grub_candidates {
-        if debugfs_dump(&debugfs, rootfs, candidate, &grub_path).is_ok() {
-            if grub_path.exists() && fs::metadata(&grub_path)?.len() > 0 {
-                info!("found GRUB at {}", candidate);
-                grub_found = true;
-                break;
-            }
+    // Add GRUB candidates — bootupd (Fedora 42, CentOS, RHEL)
+    let bootupd_distros = ["fedora", "centos", "redhat"];
+    for distro in &bootupd_distros {
+        dump_cmds += &format!(
+            "dump /usr/lib/bootupd/updates/EFI/{}/grubaa64.efi {}\n",
+            distro,
+            grub_path.display()
+        );
+    }
+    // Add versioned paths (Fedora 44+): /usr/lib/efi/grub2/<ver>/EFI/fedora/
+    for ver in &grub_efi_versions {
+        for distro in &bootupd_distros {
+            dump_cmds += &format!(
+                "dump /usr/lib/efi/grub2/{}/EFI/{}/grubaa64.efi {}\n",
+                ver,
+                distro,
+                grub_path.display()
+            );
         }
     }
 
-    if !grub_found {
-        // Fallback: Fedora 44+ stores GRUB under /usr/lib/efi/grub2/<version>/EFI/fedora/
-        grub_found = find_grub_efi_recursive(&debugfs, rootfs, "/usr/lib/efi/grub2", &grub_path)?
-            || find_grub_efi_recursive(&debugfs, rootfs, "/usr/lib/efi/shim", &grub_path)?;
-    }
+    Command::new(&debugfs)
+        .args(["-f", "/dev/stdin", &rootfs.to_string_lossy()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(dump_cmds.as_bytes())?;
+            child.wait_with_output()
+        })
+        .context("failed to run debugfs batch dump")?;
 
-    if !grub_found {
-        bail!("grubaa64.efi not found in rootfs. Checked static paths and /usr/lib/efi/");
+    // Verify extracted files
+    if !vmlinuz_path.exists() || fs::metadata(&vmlinuz_path)?.len() == 0 {
+        bail!("vmlinuz not found in /usr/lib/modules/{}/", kernel_version);
+    }
+    if !initramfs_path.exists() || fs::metadata(&initramfs_path)?.len() == 0 {
+        bail!(
+            "initramfs.img not found in /usr/lib/modules/{}/",
+            kernel_version
+        );
+    }
+    if !grub_path.exists() || fs::metadata(&grub_path)?.len() == 0 {
+        bail!("grubaa64.efi not found in rootfs (checked bootupd + /usr/lib/efi/)");
     }
 
     Ok((vmlinuz_path, initramfs_path, grub_path))
 }
 
-/// Search for grubaa64.efi under a versioned directory tree using debugfs.
-///
-/// Handles paths like `/usr/lib/efi/grub2/1:2.12-58.fc44/EFI/fedora/grubaa64.efi`
-/// where the version directory is unknown at compile time.
-fn find_grub_efi_recursive(
-    debugfs_bin: &str,
-    rootfs: &Path,
-    base_dir: &str,
-    dest: &Path,
-) -> Result<bool> {
-    let output = Command::new(debugfs_bin)
-        .args([
-            "-R",
-            &format!("ls -p {}/", base_dir),
-            &rootfs.to_string_lossy(),
-        ])
-        .output()?;
-
-    let ls_output = String::from_utf8_lossy(&output.stdout);
-    for line in ls_output.lines() {
+/// Parse directory names from debugfs `ls -p` output lines.
+fn parse_debugfs_ls_names(lines: &mut std::str::Lines<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            break;
+        }
         let parts: Vec<&str> = line.split('/').collect();
         if parts.len() >= 7 {
             let name = parts[5].trim();
-            if name.is_empty() || name == "." || name == ".." {
-                continue;
-            }
-            let candidate = format!("{}/{}/EFI/fedora/grubaa64.efi", base_dir, name);
-            if debugfs_dump(debugfs_bin, rootfs, &candidate, dest).is_ok()
-                && dest.exists()
-                && fs::metadata(dest)?.len() > 0
-            {
-                info!("found GRUB at {}", candidate);
-                return Ok(true);
+            if !name.is_empty() && name != "." && name != ".." {
+                names.push(name.to_string());
             }
         }
     }
-    Ok(false)
-}
-
-/// Run debugfs dump command. Returns Ok if the file was extracted successfully.
-fn debugfs_dump(debugfs_bin: &str, rootfs: &Path, src: &str, dest: &Path) -> Result<()> {
-    let dump_cmd = format!("dump {} {}", src, dest.display());
-    Command::new(debugfs_bin)
-        .args(["-R", &dump_cmd, &rootfs.to_string_lossy()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to run debugfs dump")?;
-
-    if !dest.exists() || fs::metadata(dest)?.len() == 0 {
-        bail!("failed to extract {} from rootfs", src);
-    }
-    Ok(())
+    names
 }
 
 /// Build ESP disk image (GPT with FAT32 ESP partition) from boot assets.
