@@ -1,21 +1,25 @@
 //! Native mode ephemeral VM launch for macOS.
 //!
-//! Uses apple/container CLI for image management and vfkit with direct
-//! kernel boot (no podman machine, no NBD, no GRUB).
+//! Uses apple/container CLI for image management and vfkit with EFI boot
+//! (no podman machine, no NBD). The ESP disk image is built from components
+//! extracted from the rootfs.ext4 snapshot.
 //!
 //! Boot flow:
 //! 1. `container image pull` (macOS native, no Linux VM)
 //! 2. Locate rootfs.ext4 snapshot via `container image inspect`
-//! 3. Extract vmlinuz + initramfs from rootfs.ext4 via `debugfs`
+//! 3. Extract vmlinuz, initramfs, and GRUB from rootfs.ext4 via `debugfs`
 //! 4. Concatenate bcvk CPIO units to initramfs
-//! 5. Launch vfkit with `--bootloader linux` (direct kernel boot)
-//! 6. rootfs.ext4 attached as virtio-blk device
+//! 5. Build ESP disk image (FAT32 + GPT) using bcvk-nbd fat32/gpt modules
+//! 6. Launch vfkit with `--bootloader efi` and two virtio-blk devices:
+//!    - ESP disk image (GRUB + vmlinuz + initramfs)
+//!    - rootfs.ext4 (readonly)
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use bcvk_nbd::{fat32, gpt, regions};
 use color_eyre::eyre::{bail, Context};
 use color_eyre::Result;
 use tracing::{debug, info};
@@ -30,7 +34,7 @@ use crate::vm_helpers::{
 
 const CONTAINER_APP_ROOT: &str = "Library/Application Support/com.apple.container";
 
-/// Run an ephemeral VM using apple/container CLI and vfkit direct kernel boot.
+/// Run an ephemeral VM using apple/container CLI and vfkit EFI boot.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     check_prerequisites()?;
     ensure_container_system()?;
@@ -40,9 +44,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     let vfkit_bin = find_vfkit()?;
 
-    info!(image = %opts.image, "starting ephemeral VM (native mode, direct kernel boot)");
+    info!(image = %opts.image, "starting ephemeral VM (native mode, EFI boot)");
 
-    // Pull image and get platform-specific snapshot digest
     let snapshot_digest = pull_image(&opts.image)?;
     let rootfs_path = find_rootfs_snapshot(&snapshot_digest)?;
     info!("rootfs snapshot: {}", rootfs_path.display());
@@ -53,12 +56,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("native-{}", &digest_short[..8]));
 
-    let kernel_dir = cache_base.join(format!("{}-kernel", vm_name));
-    fs::create_dir_all(&kernel_dir)?;
+    let work_dir = cache_base.join(format!("{}-kernel", vm_name));
+    fs::create_dir_all(&work_dir)?;
 
-    // Extract kernel and initramfs from rootfs.ext4
-    let (vmlinuz, initramfs_orig) = extract_kernel_from_ext4(&rootfs_path, &kernel_dir)?;
-    info!("extracted kernel: {}", vmlinuz.display());
+    // Extract kernel assets from rootfs.ext4
+    let (vmlinuz, initramfs_orig, grub_efi) = extract_boot_assets(&rootfs_path, &work_dir)?;
+    info!("extracted: vmlinuz, initramfs, grub");
 
     // Generate SSH keypair if needed
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
@@ -87,13 +90,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     }
 
     // Build combined initramfs
-    let combined_initramfs = kernel_dir.join("initramfs-combined.img");
+    let combined_initramfs = work_dir.join("initramfs-combined.img");
     build_combined_initramfs(&initramfs_orig, &ssh_pubkey, &combined_initramfs)?;
-    info!("combined initramfs: {}", combined_initramfs.display());
 
-    // Build kernel cmdline
+    // Build kernel cmdline — rootfs is the second virtio-blk device (/dev/vdb)
     let mut cmdline_parts: Vec<&str> = vec![
-        "root=/dev/vda",
+        "root=/dev/vdb",
         "ro",
         "rootfstype=ext4",
         "console=tty0",
@@ -106,6 +108,20 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let user_args: Vec<&str> = opts.kernel_args.iter().map(|s| s.as_str()).collect();
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
+
+    // Build ESP disk image
+    let esp_disk = work_dir.join("esp.img");
+    build_esp_disk(
+        &vmlinuz,
+        &combined_initramfs,
+        &grub_efi,
+        &cmdline,
+        &esp_disk,
+    )?;
+    info!("ESP disk image: {}", esp_disk.display());
+
+    // EFI variable store
+    let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
 
     // Start gvproxy
     let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
@@ -132,14 +148,9 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .map(Ok)
         .unwrap_or_else(|| parse_memory_to_mb(&opts.memory))?;
 
-    let bootloader_arg = format!(
-        "linux,kernel={},initrd={},cmdline={}",
-        vmlinuz.display(),
-        combined_initramfs.display(),
-        cmdline
-    );
-
+    let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
+
     let mut vfkit_args = vec![
         "--cpus".to_string(),
         vcpus.to_string(),
@@ -147,6 +158,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         memory_mb.to_string(),
         "--bootloader".to_string(),
         bootloader_arg,
+        // ESP disk (first virtio-blk = /dev/vda)
+        "--device".to_string(),
+        format!("virtio-blk,path={}", esp_disk.display()),
+        // rootfs (second virtio-blk = /dev/vdb, readonly)
         "--device".to_string(),
         format!("virtio-blk,path={},readonly", rootfs_path.display()),
         "--device".to_string(),
@@ -164,7 +179,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         vfkit_args.push("--gui".to_string());
     }
 
-    info!("launching vfkit (direct kernel boot)...");
+    info!("launching vfkit (EFI boot)...");
     let vfkit_log = cache_base.join(format!("{}-vfkit.log", vm_name));
     let vfkit_log_file = fs::File::create(&vfkit_log)?;
     let mut vfkit_child = Command::new(&vfkit_bin)
@@ -249,7 +264,6 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         }
     }
 
-    // No SSH: wait for vfkit to exit
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
@@ -257,9 +271,8 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         debug!("failed to kill gvproxy: {}", e);
     }
     EphemeralVmMetadata::remove(&vm_name);
-    // Clean up extracted kernel files
-    if let Err(e) = fs::remove_dir_all(&kernel_dir) {
-        debug!("failed to clean up kernel dir: {}", e);
+    if let Err(e) = fs::remove_dir_all(&work_dir) {
+        debug!("failed to clean up work dir: {}", e);
     }
     Ok(())
 }
@@ -290,7 +303,6 @@ fn check_prerequisites() -> Result<()> {
 }
 
 fn debugfs_path() -> String {
-    // e2fsprogs is keg-only on Homebrew, not in PATH
     let brew_path = "/opt/homebrew/opt/e2fsprogs/sbin/debugfs";
     if Path::new(brew_path).exists() {
         return brew_path.to_string();
@@ -308,7 +320,6 @@ fn ensure_container_system() -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Already running is fine
         if !stderr.contains("already") {
             debug!("container system start stderr: {}", stderr);
         }
@@ -330,7 +341,6 @@ fn pull_image(image: &str) -> Result<String> {
         bail!("container image pull failed");
     }
 
-    // Get the platform-specific digest from image inspect
     let output = Command::new("container")
         .args(["image", "inspect", image])
         .output()
@@ -344,7 +354,6 @@ fn pull_image(image: &str) -> Result<String> {
     let data: serde_json::Value =
         serde_json::from_str(&json_str).context("failed to parse image inspect output")?;
 
-    // Find platform-specific descriptor digest in variants
     let digest = data
         .as_array()
         .and_then(|arr| arr.first())
@@ -352,8 +361,7 @@ fn pull_image(image: &str) -> Result<String> {
         .and_then(|v| v.as_array())
         .and_then(|variants| {
             variants.iter().find_map(|v| {
-                v.get("descriptor")
-                    .and_then(|d| d.get("digest"))
+                v.get("digest")
                     .and_then(|d| d.as_str())
                     .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string())
             })
@@ -385,8 +393,8 @@ fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
     Ok(snapshot_path)
 }
 
-/// Extract vmlinuz and initramfs.img from an EXT4 rootfs using debugfs.
-fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf)> {
+/// Extract vmlinuz, initramfs.img, and GRUB EFI binary from an EXT4 rootfs.
+fn extract_boot_assets(rootfs: &Path, dest: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let debugfs = debugfs_path();
 
     // Find kernel version directory
@@ -399,7 +407,6 @@ fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, Path
     let kernel_version = ls_output
         .lines()
         .filter_map(|line| {
-            // debugfs -p format: /inode/type/perms/uid/gid/name/size/
             let parts: Vec<&str> = line.split('/').collect();
             if parts.len() >= 7 {
                 let name = parts[5].trim();
@@ -421,53 +428,138 @@ fn extract_kernel_from_ext4(rootfs: &Path, dest: &Path) -> Result<(PathBuf, Path
 
     // Extract vmlinuz
     let vmlinuz_path = dest.join("vmlinuz");
-    let dump_cmd = format!(
-        "dump /usr/lib/modules/{}/vmlinuz {}",
-        kernel_version,
-        vmlinuz_path.display()
-    );
-    let status = Command::new(&debugfs)
-        .args(["-R", &dump_cmd, &rootfs.to_string_lossy()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to extract vmlinuz")?;
-    if !vmlinuz_path.exists() || fs::metadata(&vmlinuz_path)?.len() == 0 {
-        bail!("vmlinuz extraction failed (debugfs exit: {})", status);
-    }
+    debugfs_dump(
+        &debugfs,
+        rootfs,
+        &format!("/usr/lib/modules/{}/vmlinuz", kernel_version),
+        &vmlinuz_path,
+    )?;
 
     // Extract initramfs.img
     let initramfs_path = dest.join("initramfs.img");
-    let dump_cmd = format!(
-        "dump /usr/lib/modules/{}/initramfs.img {}",
-        kernel_version,
-        initramfs_path.display()
-    );
-    let status = Command::new(&debugfs)
+    debugfs_dump(
+        &debugfs,
+        rootfs,
+        &format!("/usr/lib/modules/{}/initramfs.img", kernel_version),
+        &initramfs_path,
+    )?;
+
+    // Find and extract GRUB EFI binary
+    let grub_path = dest.join("grub.efi");
+    let grub_candidates = [
+        "/usr/lib/grub/arm64-efi-sb/grubaa64.efi",
+        "/usr/lib/grub/arm64-efi/grubaa64.efi",
+        "/boot/efi/EFI/fedora/grubaa64.efi",
+        "/boot/efi/EFI/centos/grubaa64.efi",
+        "/boot/efi/EFI/redhat/grubaa64.efi",
+    ];
+
+    let mut grub_found = false;
+    for candidate in &grub_candidates {
+        if debugfs_dump(&debugfs, rootfs, candidate, &grub_path).is_ok() {
+            if grub_path.exists() && fs::metadata(&grub_path)?.len() > 0 {
+                info!("found GRUB at {}", candidate);
+                grub_found = true;
+                break;
+            }
+        }
+    }
+
+    if !grub_found {
+        // Fallback: search recursively
+        let output = Command::new(&debugfs)
+            .args(["-R", "find / -name grubaa64.efi", &rootfs.to_string_lossy()])
+            .output()?;
+        let find_output = String::from_utf8_lossy(&output.stdout);
+        debug!("debugfs find grub: {}", find_output.trim());
+        bail!(
+            "grubaa64.efi not found in rootfs. Checked: {:?}",
+            grub_candidates
+        );
+    }
+
+    Ok((vmlinuz_path, initramfs_path, grub_path))
+}
+
+/// Run debugfs dump command. Returns Ok if the file was extracted successfully.
+fn debugfs_dump(debugfs_bin: &str, rootfs: &Path, src: &str, dest: &Path) -> Result<()> {
+    let dump_cmd = format!("dump {} {}", src, dest.display());
+    Command::new(debugfs_bin)
         .args(["-R", &dump_cmd, &rootfs.to_string_lossy()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("failed to extract initramfs")?;
-    if !initramfs_path.exists() || fs::metadata(&initramfs_path)?.len() == 0 {
-        bail!("initramfs extraction failed (debugfs exit: {})", status);
-    }
+        .context("failed to run debugfs dump")?;
 
-    Ok((vmlinuz_path, initramfs_path))
+    if !dest.exists() || fs::metadata(dest)?.len() == 0 {
+        bail!("failed to extract {} from rootfs", src);
+    }
+    Ok(())
+}
+
+/// Build ESP disk image (GPT with FAT32 ESP partition) from boot assets.
+fn build_esp_disk(
+    vmlinuz: &Path,
+    initramfs: &Path,
+    grub_efi: &Path,
+    cmdline: &str,
+    output: &Path,
+) -> Result<()> {
+    let kernel_size = fs::metadata(vmlinuz)?.len();
+    let initrd_size = fs::metadata(initramfs)?.len();
+    let grub_size = fs::metadata(grub_efi)?.len();
+
+    let grub_cfg = format!(
+        "set timeout=0\nset default=0\nmenuentry \"bcvk\" {{\n  linux /boot/vmlinuz {}\n  initrd /boot/initrd.img\n}}\n",
+        cmdline
+    );
+
+    let initrd_parts = vec![(
+        fat32::FileDataRegion::FromFile {
+            path: initramfs.to_path_buf(),
+            len: initrd_size,
+        },
+        initrd_size,
+    )];
+
+    let (esp_regions, esp_size) = fat32::build_esp_regions(
+        grub_efi,
+        grub_size,
+        grub_cfg.as_bytes(),
+        vmlinuz,
+        kernel_size,
+        initrd_parts,
+        initrd_size,
+    );
+
+    // Build GPT with ESP only (no EROFS partition — rootfs is a separate virtio-blk)
+    let esp_regions = regions::consolidate_regions(esp_regions);
+
+    // Create a minimal GPT with just the ESP
+    let disk = gpt::build_gpt_disk(
+        esp_regions,
+        esp_size,
+        Vec::new(), // no second partition
+        0,
+    )?;
+
+    // Write regions to file
+    let mut file_data = vec![0u8; disk.total_size as usize];
+    regions::pread(&disk.regions, &mut file_data, 0)?;
+    fs::write(output, &file_data).context("failed to write ESP disk image")?;
+
+    Ok(())
 }
 
 /// Build a combined initramfs by concatenating the original with bcvk CPIO archives.
 fn build_combined_initramfs(original: &Path, ssh_pubkey: &str, dest: &Path) -> Result<()> {
     let mut out = fs::read(original).context("failed to read original initramfs")?;
 
-    // Align to 4 bytes
     let padding = out.len().next_multiple_of(4) - out.len();
     out.extend(vec![0u8; padding]);
 
-    // Append native mode units CPIO (without sysroot.mount)
     out.extend(crate::cpio::create_native_initramfs_units_cpio()?);
 
-    // Append SSH setup CPIO if pubkey provided
     if !ssh_pubkey.is_empty() {
         let aligned = out.len().next_multiple_of(4);
         out.resize(aligned, 0);

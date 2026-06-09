@@ -219,6 +219,7 @@ name = "bcvk"
 version = "0.17.0"
 dependencies = [
  "base64",
+ "bcvk-nbd",
  "bcvk-qemu",
  "bootc-mount",
  "bootc-utils",

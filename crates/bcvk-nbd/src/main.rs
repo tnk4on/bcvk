@@ -1,10 +1,8 @@
 mod dir_walk;
 mod erofs;
-mod fat32;
-mod gpt;
-mod initramfs;
-pub mod nbd;
-pub mod regions;
+mod nbd;
+
+use bcvk_nbd::{fat32, gpt, initramfs, regions};
 
 use std::net::TcpListener;
 use std::path::PathBuf;
