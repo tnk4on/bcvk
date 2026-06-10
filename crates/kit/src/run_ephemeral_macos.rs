@@ -253,42 +253,21 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
 
     fs::create_dir_all(&cache_base)?;
 
-    // Generate SSH keypair on macOS host
     let mut ssh_pubkey = String::new();
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("generating SSH keypair...");
-        crate::vm_helpers::remove_file_if_exists(&ssh_key_path);
-        crate::vm_helpers::remove_file_if_exists(&ssh_key_path.with_extension("pub"));
-        let status = Command::new("ssh-keygen")
-            .args([
-                "-t",
-                "ed25519",
-                "-f",
-                &ssh_key_path.to_string_lossy(),
-                "-N",
-                "",
-                "-q",
-            ])
-            .status()?;
-        if !status.success() {
-            bail!("ssh-keygen failed");
-        }
-        ssh_pubkey = fs::read_to_string(ssh_key_path.with_extension("pub"))?
-            .trim()
-            .to_string();
+        ssh_pubkey = crate::vm_helpers::generate_ssh_keypair(&ssh_key_path)?;
     }
 
-    let mut cmdline_parts: Vec<&str> = vec![
+    let mut cmdline_parts: Vec<&str> = Vec::from(crate::kernel_cmdline::BASE_KERNEL_CMDLINE);
+    cmdline_parts.extend([
         "root=/dev/vda2",
         "ro",
         "rootfstype=erofs",
         "console=tty0",
-        "console=hvc0",
         "loglevel=4",
-        "selinux=0",
         "net.ifnames=0",
-        "systemd.journald.storage=volatile",
-    ];
+    ]);
     let user_args: Vec<&str> = opts.kernel_args.iter().map(|s| s.as_str()).collect();
     cmdline_parts.extend(&user_args);
     let cmdline = cmdline_parts.join(" ");
