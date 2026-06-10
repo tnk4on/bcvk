@@ -41,21 +41,21 @@ pub(crate) fn start_nbd_server(
     )?;
 
     // macOS-specific: unexpose stale entry then expose via gvproxy's in-VM API
+    let gw = vm_helpers::GVPROXY_GATEWAY;
+    let vm_ip = vm_helpers::GVPROXY_VM_IP;
     let unexpose_cmd = format!(
-        "curl -s -X POST http://192.168.127.1:80/services/forwarder/unexpose \
+        "curl -s -X POST http://{gw}:80/services/forwarder/unexpose \
          -H 'Content-Type: application/json' \
          -d '{{\"local\":\":{nbd_port}\",\"protocol\":\"tcp\"}}' >/dev/null 2>&1; true",
-        nbd_port = nbd_port,
     );
     if let Err(e) = vm_helpers::machine_ssh(machine, &unexpose_cmd) {
         tracing::debug!("failed to unexpose port {}: {}", nbd_port, e);
     }
 
     let expose_cmd = format!(
-        "curl -s -X POST http://192.168.127.1:80/services/forwarder/expose \
+        "curl -s -X POST http://{gw}:80/services/forwarder/expose \
          -H 'Content-Type: application/json' \
-         -d '{{\"local\":\":{nbd_port}\",\"remote\":\"192.168.127.2:{nbd_port}\",\"protocol\":\"tcp\"}}'",
-        nbd_port = nbd_port,
+         -d '{{\"local\":\":{nbd_port}\",\"remote\":\"{vm_ip}:{nbd_port}\",\"protocol\":\"tcp\"}}'",
     );
     let expose_cmd_clone = expose_cmd.clone();
     let machine_clone = machine.to_string();
@@ -134,9 +134,10 @@ pub fn stop_nbd_server(unit_name: &str, nbd_port: Option<u16>) {
             if let Err(e) = vm_helpers::machine_ssh(
                 &machine,
                 &format!(
-                    "curl -sf -X POST http://192.168.127.1:80/services/forwarder/unexpose \
+                    "curl -sf -X POST http://{}:80/services/forwarder/unexpose \
                      -H 'Content-Type: application/json' \
                      -d '{{\"local\":\":{}\",\"protocol\":\"tcp\"}}'",
+                    vm_helpers::GVPROXY_GATEWAY,
                     port
                 ),
             ) {

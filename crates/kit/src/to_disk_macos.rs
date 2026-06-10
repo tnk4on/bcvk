@@ -366,6 +366,7 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 

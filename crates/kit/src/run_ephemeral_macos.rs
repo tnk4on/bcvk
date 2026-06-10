@@ -401,7 +401,12 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");
         for attempt in 0..15u32 {
-            match expose_port(&services_sock_str, "192.168.127.2", ssh_port, 22) {
+            match expose_port(
+                &services_sock_str,
+                crate::vm_helpers::GVPROXY_VM_IP,
+                ssh_port,
+                22,
+            ) {
                 Ok(_) => {
                     info!("SSH port {} forwarded", ssh_port);
                     break;
@@ -556,7 +561,7 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
-/// Fixed MAC address matching gvproxy's DHCP static lease for 192.168.127.2.
+/// Fixed MAC address matching gvproxy's DHCP static lease for [`GVPROXY_VM_IP`](crate::vm_helpers::GVPROXY_VM_IP).
 const GVPROXY_STATIC_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
 
 /// Generate the fixed MAC address for gvproxy DHCP static lease.
