@@ -30,7 +30,7 @@ use crate::vm_helpers::{
     default_vcpus, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
 };
 
-const CONTAINER_APP_ROOT: &str = "Library/Application Support/com.apple.container";
+pub(crate) const CONTAINER_APP_ROOT: &str = "Library/Application Support/com.apple.container";
 
 /// Run an ephemeral VM using apple/container CLI and vfkit EFI boot.
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
@@ -333,7 +333,7 @@ fn run_detached_native(opts: &RunEphemeralOpts) -> Result<()> {
     Ok(())
 }
 
-fn check_prerequisites() -> Result<()> {
+pub(crate) fn check_prerequisites() -> Result<()> {
     if Command::new("container")
         .arg("--version")
         .stdout(Stdio::null())
@@ -350,7 +350,7 @@ fn check_prerequisites() -> Result<()> {
     Ok(())
 }
 
-fn ensure_container_system() -> Result<()> {
+pub(crate) fn ensure_container_system() -> Result<()> {
     let output = Command::new("container")
         .args(["system", "start", "--disable-kernel-install"])
         .stdout(Stdio::null())
@@ -368,7 +368,7 @@ fn ensure_container_system() -> Result<()> {
 }
 
 /// Ensure image is available locally and return the platform-specific snapshot digest.
-fn pull_image(image: &str) -> Result<String> {
+pub(crate) fn pull_image(image: &str) -> Result<String> {
     // Try inspect first (fast path for cached images)
     if let Ok(digest) = inspect_image_digest(image) {
         debug!("image already cached, digest: {}", digest);
@@ -392,7 +392,7 @@ fn pull_image(image: &str) -> Result<String> {
 }
 
 /// Get the platform-specific snapshot digest from a locally cached image.
-fn inspect_image_digest(image: &str) -> Result<String> {
+pub(crate) fn inspect_image_digest(image: &str) -> Result<String> {
     let output = Command::new("container")
         .args(["image", "inspect", image])
         .stdout(Stdio::piped())
@@ -428,7 +428,7 @@ fn inspect_image_digest(image: &str) -> Result<String> {
 }
 
 /// Find the rootfs.ext4 snapshot file for the given digest.
-fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
+pub(crate) fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| color_eyre::eyre::eyre!("cannot find home dir"))?;
     let snapshot_path = home
         .join(CONTAINER_APP_ROOT)
@@ -449,7 +449,7 @@ fn find_rootfs_snapshot(digest: &str) -> Result<PathBuf> {
 /// Read vmlinuz, initramfs.img, and GRUB EFI binary from an EXT4 rootfs.
 ///
 /// Uses ext4-view for Rust-native EXT4 reading — no external processes.
-fn read_boot_assets(rootfs: &Path) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub(crate) fn read_boot_assets(rootfs: &Path) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let file = fs::File::open(rootfs).context("failed to open rootfs.ext4")?;
     let ext4 = Ext4::load(Box::new(file)).context("failed to load ext4 filesystem")?;
 
@@ -520,7 +520,7 @@ fn find_grub_in_ext4(ext4: &Ext4) -> Result<Vec<u8>> {
 }
 
 /// Build combined initramfs in memory by concatenating with bcvk CPIO archives.
-fn build_combined_initramfs_mem(initramfs: &[u8], ssh_pubkey: &str) -> Result<Vec<u8>> {
+pub(crate) fn build_combined_initramfs_mem(initramfs: &[u8], ssh_pubkey: &str) -> Result<Vec<u8>> {
     let mut out = initramfs.to_vec();
 
     let padding = out.len().next_multiple_of(4) - out.len();
@@ -538,7 +538,7 @@ fn build_combined_initramfs_mem(initramfs: &[u8], ssh_pubkey: &str) -> Result<Ve
 }
 
 /// Build ESP disk image from in-memory boot assets (zero intermediate files).
-fn build_esp_disk_mem(
+pub(crate) fn build_esp_disk_mem(
     vmlinuz: &[u8],
     initramfs: &[u8],
     grub_efi: &[u8],
