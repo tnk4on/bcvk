@@ -1,12 +1,10 @@
 //! bcvk library - exposes internal modules for testing
 
 pub mod cpio;
+pub mod kernel_cmdline;
 pub mod qemu_img;
 pub mod ssh_options;
 pub mod xml_utils;
-
-// Cross-platform modules
-pub mod ssh_options;
 
 // Linux-only modules
 #[cfg(target_os = "linux")]
