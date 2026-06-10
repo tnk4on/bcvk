@@ -101,8 +101,8 @@ fn extract_boot_files_from_mount(mountpoint: &str, cache_dir: &Path) -> Result<B
     let vmlinuz = wsl_read_file(&vmlinuz_path)?;
     fs::write(cache_dir.join("vmlinuz"), &vmlinuz)?;
 
-    // Extract initramfs
-    let initramfs_path = format!("{mountpoint}/boot/initramfs-{kver}.img");
+    // Extract initramfs — bootc images store it alongside vmlinuz in /usr/lib/modules/<kver>/
+    let initramfs_path = format!("{mountpoint}/usr/lib/modules/{kver}/initramfs.img");
     let initramfs = wsl_read_file(&initramfs_path)?;
     fs::write(cache_dir.join("initramfs.img"), &initramfs)?;
 

@@ -74,6 +74,11 @@ mod run_ephemeral_windows;
 mod to_disk_windows;
 #[cfg(target_os = "windows")]
 mod vm_helpers;
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod wslc_com;
+#[cfg(target_os = "windows")]
+mod run_native_windows;
 
 /// Default state directory for bcvk container data
 #[cfg(target_os = "linux")]

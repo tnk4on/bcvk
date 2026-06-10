@@ -17,7 +17,7 @@ use color_eyre::Result;
 use std::ffi::c_void;
 use tracing::{debug, info};
 
-use windows::core::{Interface, GUID, HRESULT, PCSTR, PWSTR};
+use windows::core::{Interface, GUID, HRESULT, PCSTR};
 use windows::Win32::System::Com::*;
 
 // ── CLSID / IID ────────────────────────────────────────────────────
@@ -171,15 +171,18 @@ impl WslcSession {
     }
 
     /// InspectImage (vtable index 14)
+    ///
+    /// IDL: HRESULT InspectImage([in] LPCSTR ImageNameOrId, [out] LPSTR* Output)
+    /// Note: Output is LPSTR (char*), not LPWSTR (wchar_t*).
     pub fn inspect_image(&self, image: &str) -> Result<String> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
             PCSTR, // ImageNameOrId
-            *mut PWSTR, // Output
+            *mut *mut u8, // LPSTR* Output (UTF-8)
         ) -> HRESULT;
 
         let image_cstr = std::ffi::CString::new(image)?;
-        let mut output = PWSTR::null();
+        let mut output: *mut u8 = std::ptr::null_mut();
         unsafe {
             let f: Fn = self.com.vtable_fn(14);
             let hr = f(
@@ -188,7 +191,15 @@ impl WslcSession {
                 &mut output,
             );
             hr.ok().context("InspectImage failed")?;
-            output.to_string().context("InspectImage output not valid UTF-16")
+            if output.is_null() {
+                color_eyre::eyre::bail!("InspectImage returned null");
+            }
+            let cstr = std::ffi::CStr::from_ptr(output as *const i8);
+            let result = cstr.to_str().context("InspectImage output not valid UTF-8")?.to_string();
+            debug!(len = result.len(), first_100 = &result[..100.min(result.len())], "InspectImage raw output");
+            // Free COM-allocated memory
+            windows::Win32::System::Com::CoTaskMemFree(Some(output as *const c_void));
+            Ok(result)
         }
     }
 
@@ -197,9 +208,14 @@ impl WslcSession {
         let json_str = self.inspect_image(image)?;
         let data: serde_json::Value = serde_json::from_str(&json_str)
             .context("failed to parse InspectImage JSON")?;
-        let id = data
-            .as_array()
-            .and_then(|arr| arr.first())
+        // COM returns a single object; CLI wraps it in an array
+        let obj = if data.is_array() {
+            data.as_array().and_then(|a| a.first()).cloned()
+        } else {
+            Some(data.clone())
+        };
+        let id = obj
+            .as_ref()
             .and_then(|img| img.get("Id"))
             .and_then(|id| id.as_str())
             .ok_or_else(|| color_eyre::eyre::eyre!("no Id in InspectImage output"))?;
@@ -269,7 +285,49 @@ pub struct WslcContainer {
 }
 
 impl WslcContainer {
-    /// Export (vtable index 8) — writes rootfs tar to the given file handle.
+    /// Stop (vtable index 4)
+    pub fn stop(&self) -> Result<()> {
+        type Fn = unsafe extern "system" fn(
+            *mut c_void,
+            i32, // WSLCSignal (SIGTERM = 15)
+            i32, // TimeoutSeconds
+        ) -> HRESULT;
+        unsafe {
+            let f: Fn = self.com.vtable_fn(4);
+            let hr = f(self.com.as_ptr(), 15, 10);
+            hr.ok().context("Stop failed")?;
+        }
+        Ok(())
+    }
+
+    /// Start (vtable index 5)
+    pub fn start(&self) -> Result<()> {
+        type Fn = unsafe extern "system" fn(
+            *mut c_void,
+            u32,           // WSLCContainerStartFlags
+            *const c_void, // WSLCProcessStartOptions*
+            *const c_void, // WarningCallback
+        ) -> HRESULT;
+        unsafe {
+            let f: Fn = self.com.vtable_fn(5);
+            let hr = f(self.com.as_ptr(), 0, std::ptr::null(), std::ptr::null());
+            hr.ok().context("Start failed")?;
+        }
+        Ok(())
+    }
+
+    /// Delete (vtable index 6)
+    pub fn delete(&self) -> Result<()> {
+        type Fn = unsafe extern "system" fn(*mut c_void, u32) -> HRESULT;
+        unsafe {
+            let f: Fn = self.com.vtable_fn(6);
+            let hr = f(self.com.as_ptr(), 0);
+            hr.ok().context("Delete failed")?;
+        }
+        Ok(())
+    }
+
+    /// Export (vtable index 7) — writes rootfs tar to the given file handle.
     pub fn export(&self, file: &std::fs::File) -> Result<()> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
@@ -282,20 +340,9 @@ impl WslcContainer {
             handle: file.as_raw_handle() as isize,
         };
         unsafe {
-            let f: Fn = self.com.vtable_fn(8);
+            let f: Fn = self.com.vtable_fn(7);
             let hr = f(self.com.as_ptr(), handle);
             hr.ok().context("Export failed")?;
-        }
-        Ok(())
-    }
-
-    /// Delete (vtable index 7)
-    pub fn delete(&self) -> Result<()> {
-        type Fn = unsafe extern "system" fn(*mut c_void, u32) -> HRESULT;
-        unsafe {
-            let f: Fn = self.com.vtable_fn(7);
-            let hr = f(self.com.as_ptr(), 0);
-            hr.ok().context("Delete failed")?;
         }
         Ok(())
     }

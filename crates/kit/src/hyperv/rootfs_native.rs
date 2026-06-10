@@ -36,7 +36,7 @@ pub fn create_rootfs_vhdx(
 
     fs::create_dir_all(cache_dir)?;
     let tar_path = cache_dir.join(format!("rootfs-{digest_short}.tar"));
-    let vhdx_tmp = cache_dir.join(format!("rootfs-{digest_short}.vhdx.tmp"));
+    let vhdx_tmp = cache_dir.join(format!("rootfs-{digest_short}-tmp.vhdx"));
 
     // Step 1: Export container rootfs to tar
     export_rootfs_tar(session, image, digest_short, &tar_path)?;
@@ -70,6 +70,13 @@ fn export_rootfs_tar(
 
     let container = session.create_container(image, &container_name)?;
 
+    // Container must be started then stopped before export —
+    // Docker's overlay2 layers aren't materialized until first start.
+    info!("starting temporary container...");
+    container.start()?;
+    info!("stopping temporary container...");
+    container.stop()?;
+
     let file = fs::File::create(tar_path)
         .with_context(|| format!("failed to create {}", tar_path.display()))?;
 
@@ -91,9 +98,11 @@ fn export_rootfs_tar(
 
 /// Create an empty dynamic VHDX via PowerShell.
 fn create_empty_vhdx(path: &Path, size: &str) -> Result<()> {
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_string_lossy().replace('/', "\\");
     let script = format!(
-        "New-VHD -Path '{}' -SizeBytes {} -Dynamic | Out-Null; Write-Host 'OK'",
+        "$ErrorActionPreference = 'Stop'; \
+         New-VHD -Path '{}' -SizeBytes {} -Dynamic | Out-Null; \
+         Write-Host 'OK'",
         path_str, size
     );
     let output = Command::new("powershell")
@@ -103,9 +112,10 @@ fn create_empty_vhdx(path: &Path, size: &str) -> Result<()> {
         .output()
         .context("failed to run New-VHD")?;
 
-    if !output.status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || !stdout.contains("OK") {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("New-VHD failed: {stderr}");
+        bail!("New-VHD failed: {} {}", stderr.trim(), stdout.trim());
     }
     debug!(path = %path_str, "created empty VHDX");
     Ok(())
@@ -116,21 +126,37 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
     let vhdx_str = vhdx_path.to_string_lossy();
     let tar_str = tar_path.to_string_lossy();
 
+    if !vhdx_path.exists() {
+        bail!("VHDX does not exist at {}", vhdx_str);
+    }
+    let vhdx_size = std::fs::metadata(vhdx_path)?.len();
+    debug!(path = %vhdx_str, size = vhdx_size, "VHDX exists, proceeding to mount");
+
     // Convert tar path to WSL-accessible path (/mnt/c/...)
     let wsl_tar_path = windows_to_wsl_path(&tar_str)?;
 
     // Mount VHDX via wsl --mount --bare
-    info!("mounting VHDX via wsl --mount...");
+    // Use the Windows-style path for wsl.exe
+    let vhdx_win = vhdx_path.to_string_lossy().replace('/', "\\");
+    info!(path = %vhdx_win, "mounting VHDX via wsl --mount...");
     let mount_output = Command::new("wsl")
-        .args(["--mount", "--vhd", &vhdx_str, "--bare"])
+        .args(["--mount", "--vhd", &vhdx_win, "--bare"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .context("wsl --mount failed")?;
 
+    debug!(
+        exit_code = mount_output.status.code(),
+        stdout_len = mount_output.stdout.len(),
+        stderr_len = mount_output.stderr.len(),
+        "wsl --mount result"
+    );
+
     if !mount_output.status.success() {
-        let stderr = String::from_utf8_lossy(&mount_output.stderr);
-        bail!("wsl --mount failed: {stderr}");
+        let stderr = decode_wsl_output(&mount_output.stderr);
+        let stdout = decode_wsl_output(&mount_output.stdout);
+        bail!("wsl --mount failed (exit {:?}): stderr={} stdout={}", mount_output.status.code(), stderr, stdout);
     }
 
     // Find the block device — wsl --mount attaches as /dev/sdX
@@ -190,6 +216,24 @@ fn windows_to_wsl_path(win_path: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Decode wsl.exe output which may be UTF-16LE or UTF-8.
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    // Try UTF-16LE first (wsl.exe on non-English locales)
+    if bytes.len() >= 2 {
+        let u16s: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if let Ok(s) = String::from_utf16(&u16s) {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes).trim().to_string()
 }
 
 /// Find the block device attached by `wsl --mount --bare`.
