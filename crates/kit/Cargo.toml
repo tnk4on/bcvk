@@ -73,6 +73,7 @@ windows = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
 ] }
+windows-core = "0.61"
 
 [dev-dependencies]
 similar-asserts = "1.5"

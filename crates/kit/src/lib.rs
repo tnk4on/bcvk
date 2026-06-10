@@ -35,3 +35,9 @@ pub mod to_disk_windows;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod vm_helpers;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
+pub mod wslc_com;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
+pub mod run_native_windows;

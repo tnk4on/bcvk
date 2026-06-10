@@ -19,6 +19,10 @@ pub(crate) mod ssh_forward;
 pub(crate) mod vm;
 #[allow(unsafe_code)]
 pub(crate) mod vsock_relay;
+#[allow(dead_code)]
+pub(crate) mod rootfs_native;
+#[allow(dead_code)]
+pub(crate) mod boot_files_native;
 
 // Persistent VM subcommands
 mod inspect;

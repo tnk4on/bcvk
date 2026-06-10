@@ -19,6 +19,11 @@ const RPC_C_AUTHZ_NONE: u32 = 0;
 static COM_INIT: Once = Once::new();
 
 #[allow(unsafe_code)]
+pub(crate) fn com_init_once() {
+    com_init();
+}
+
+#[allow(unsafe_code)]
 fn com_init() {
     COM_INIT.call_once(|| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

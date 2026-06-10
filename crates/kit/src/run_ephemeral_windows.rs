@@ -230,6 +230,9 @@ pub struct RunEphemeralOpts {
     /// Enable debug mode
     #[clap(long)]
     pub debug: bool,
+    /// Use wslc-native mode (no podman machine required)
+    #[clap(long)]
+    pub native: bool,
 }
 
 // --- Main entry point ---
@@ -667,6 +670,10 @@ fn start_vm_and_services(
 }
 
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
+    if opts.native {
+        return crate::run_native_windows::run(opts);
+    }
+
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together");
     }
