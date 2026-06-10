@@ -7,7 +7,9 @@ pub mod xml_utils;
 
 // Cross-platform modules
 pub mod install_options;
+pub mod kernel_cmdline;
 pub mod ssh_options;
+pub mod utils;
 
 // Linux-only modules
 #[cfg(target_os = "linux")]
