@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
 use clap::Parser;
-use color_eyre::{eyre::bail, Result};
+use color_eyre::{eyre::{bail, Context}, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::info;
@@ -57,6 +57,10 @@ pub struct ToDiskWindowsOpts {
     /// Check if the disk would be regenerated without actually creating it
     #[clap(long)]
     pub dry_run: bool,
+
+    /// Use wslc-native mode (no podman machine required)
+    #[clap(long)]
+    pub native: bool,
 }
 
 fn compute_cache_hash(
@@ -97,7 +101,7 @@ fn write_cache_metadata(vhdx_path: &str, meta: &CacheMetadata) -> Result<()> {
 }
 
 /// Base disk directory for caching.
-fn base_dir() -> PathBuf {
+pub(crate) fn base_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"))
         .join("bcvk")
@@ -322,6 +326,10 @@ fn create_base_disk(
 }
 
 pub fn run(opts: ToDiskWindowsOpts) -> Result<()> {
+    if opts.native {
+        return run_native(opts);
+    }
+
     // Get image digest for caching
     let image_digest = crate::vm_helpers::ensure_image_and_get_digest(&opts.source_image)?;
 
@@ -488,4 +496,42 @@ fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
         .filter(|l| !l.is_empty())
         .collect();
     Ok(names)
+}
+
+/// Native mode to-disk: uses wslc COM Export instead of podman machine.
+///
+/// Creates a bootable VHDX by exporting the container rootfs via
+/// IWSLCContainer::Export and writing it to an ext4 VHDX.
+fn run_native(opts: ToDiskWindowsOpts) -> Result<()> {
+    info!(image = %opts.image, output = %opts.output, "to-disk (native mode)");
+
+    let session = crate::wslc_com::open_default_session()?;
+    session.pull_image(&opts.image)?;
+    let digest_short = session.inspect_image_digest(&opts.image)?;
+
+    let cache_dir = base_dir();
+    std::fs::create_dir_all(&cache_dir)?;
+
+    let output_path = std::path::PathBuf::from(opts.output.as_str());
+
+    // Use rootfs_native to create the VHDX (with caching)
+    let rootfs_vhdx = crate::hyperv::rootfs_native::create_rootfs_vhdx(
+        &session,
+        &opts.image,
+        &digest_short,
+        &cache_dir,
+    )?;
+
+    // Copy (or differencing-clone) to the output path
+    if output_path != rootfs_vhdx {
+        std::fs::copy(&rootfs_vhdx, &output_path)
+            .with_context(|| format!("failed to copy VHDX to {}", output_path.display()))?;
+    }
+
+    // Generate SSH key alongside the disk (same convention as podman mode)
+    let key_path = output_path.with_extension("vhdx.key");
+    let _pubkey = crate::vm_helpers::generate_ssh_keypair(&key_path)?;
+
+    info!(output = %output_path.display(), "to-disk (native) complete");
+    Ok(())
 }

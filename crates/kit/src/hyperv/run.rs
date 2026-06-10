@@ -126,6 +126,10 @@ pub struct HypervRunOpts {
     /// Internal: run as service process (do not use directly)
     #[clap(long = "_internal", hide = true)]
     pub _internal: Option<String>,
+
+    /// Use wslc-native mode (no podman machine required)
+    #[clap(long)]
+    pub native: bool,
 }
 
 fn is_disk_path(input: &str) -> bool {
@@ -191,31 +195,50 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
         let vhdx_path = vms_dir.join(format!("{}.vhdx", name));
 
         if !vhdx_path.exists() {
-            let digest = crate::vm_helpers::ensure_image_and_get_digest(image)?;
-            let base_disk = crate::to_disk_windows::find_or_create_base_disk(
-                image,
-                &digest,
-                &opts.install,
-                &opts.disk_size,
-                &None,
-                &[],
-            )?;
-            crate::to_disk_windows::create_differencing_vhdx(
-                &base_disk,
-                &vhdx_path.to_string_lossy(),
-            )?;
-            // Copy SSH key from base
-            let base_key = format!("{}.key", base_disk);
-            let vm_key = format!("{}.key", vhdx_path.to_string_lossy());
-            if std::path::Path::new(&base_key).exists() {
-                std::fs::copy(&base_key, &vm_key)?;
-                let base_pub = format!("{}.key.pub", base_disk);
-                let vm_pub = format!("{}.key.pub", vhdx_path.to_string_lossy());
-                if std::path::Path::new(&base_pub).exists() {
-                    std::fs::copy(&base_pub, &vm_pub)?;
+            if opts.native {
+                // Native mode: use wslc COM Export → rootfs VHDX
+                let session = crate::wslc_com::open_default_session()?;
+                session.pull_image(image)?;
+                let digest_short = session.inspect_image_digest(image)?;
+                let cache_dir = crate::to_disk_windows::base_dir();
+                let base_vhdx = super::rootfs_native::create_rootfs_vhdx(
+                    &session, image, &digest_short, &cache_dir,
+                )?;
+                crate::to_disk_windows::create_differencing_vhdx(
+                    &base_vhdx.to_string_lossy(),
+                    &vhdx_path.to_string_lossy(),
+                )?;
+                // Generate SSH key for this VM
+                let vm_key_path = std::path::PathBuf::from(format!("{}.key", vhdx_path.display()));
+                let _pubkey = crate::vm_helpers::generate_ssh_keypair(&vm_key_path)?;
+                println!("VM '{}' disk created (native) from: {}", name, base_vhdx.display());
+            } else {
+                let digest = crate::vm_helpers::ensure_image_and_get_digest(image)?;
+                let base_disk = crate::to_disk_windows::find_or_create_base_disk(
+                    image,
+                    &digest,
+                    &opts.install,
+                    &opts.disk_size,
+                    &None,
+                    &[],
+                )?;
+                crate::to_disk_windows::create_differencing_vhdx(
+                    &base_disk,
+                    &vhdx_path.to_string_lossy(),
+                )?;
+                // Copy SSH key from base
+                let base_key = format!("{}.key", base_disk);
+                let vm_key = format!("{}.key", vhdx_path.to_string_lossy());
+                if std::path::Path::new(&base_key).exists() {
+                    std::fs::copy(&base_key, &vm_key)?;
+                    let base_pub = format!("{}.key.pub", base_disk);
+                    let vm_pub = format!("{}.key.pub", vhdx_path.to_string_lossy());
+                    if std::path::Path::new(&base_pub).exists() {
+                        std::fs::copy(&base_pub, &vm_pub)?;
+                    }
                 }
+                println!("VM '{}' disk created from base: {}", name, base_disk);
             }
-            println!("VM '{}' disk created from base: {}", name, base_disk);
         } else {
             println!("Using cached disk image: {}", vhdx_path.display());
         }
