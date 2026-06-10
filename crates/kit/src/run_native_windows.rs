@@ -8,7 +8,7 @@ use color_eyre::Result;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::hyperv::{boot_files_native, dhcp, rootfs_native, ssh_forward::SshForward, vm};
+use crate::hyperv::{boot_files, boot_files_native, dhcp, rootfs_native, ssh_forward::SshForward, vm};
 use crate::run_ephemeral_windows::RunEphemeralOpts;
 use crate::vm_helpers::{
     default_vcpus, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
@@ -103,25 +103,16 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("Hyper-V VM created");
 
     // ── 7. ESP VHDX ───────────────────────────────────────────────
-    // TODO: create_boot_vhdx_from_assets — for now, use the existing
-    // boot_files::create_boot_vhdx with a native-mode kernel cmdline.
-    // This is a placeholder that will need the boot_files API to be
-    // extended to accept pre-read assets and a custom cmdline.
     let esp_path = boot_cache.join("esp-native.vhdx");
-    // For now, write a stub message — the full integration requires
-    // refactoring create_boot_vhdx to accept BootAssets directly.
-    info!(
-        "ESP VHDX would be built at {} (kernel_version={})",
-        esp_path.display(),
-        boot_assets.kernel_version
-    );
+    boot_files::create_boot_vhdx_native(&boot_assets, &ssh_pubkey, &esp_path)?;
+    elapsed!("ESP VHDX ready");
 
     // ── 8. Attach disks + boot ────────────────────────────────────
+    vm::attach_vhdx_at_slot(&vm_name, &esp_path.to_string_lossy(), 0)?;
     vm::attach_vhdx_at_slot(&vm_name, &rootfs_vhdx.to_string_lossy(), 1)?;
-    // vm::attach_vhdx_at_slot(&vm_name, &esp_path.to_string_lossy(), 0)?;
-    // vm::set_boot_order_disk_first(&vm_name);
-    // vm::start_vm(&vm_name)?;
-    elapsed!("disks attached");
+    vm::set_boot_order_disk_first(&vm_name);
+    vm::start_vm(&vm_name)?;
+    elapsed!("VM started");
 
     // ── 9. Networking (async, tokio) ──────────────────────────────
     let client_ip = format!("10.0.{subnet}.100");

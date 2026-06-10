@@ -597,3 +597,189 @@ fn append_cpio(initramfs: &mut Vec<u8>, cpio: &[u8]) {
     initramfs.resize(aligned, 0);
     initramfs.extend_from_slice(cpio);
 }
+
+/// Create a boot VHDX for native mode from pre-extracted boot assets.
+///
+/// Uses a custom kernel cmdline (root=/dev/sdb rootfstype=ext4) instead
+/// of the NBD/EROFS cmdline, and skips NBD-related CPIO content.
+pub fn create_boot_vhdx_native(
+    assets: &super::boot_files_native::BootAssets,
+    ssh_pubkey: &str,
+    output_path: &std::path::Path,
+) -> Result<String> {
+    use std::fs;
+
+    let cache_dir = output_path.parent().unwrap_or(std::path::Path::new("."));
+    fs::create_dir_all(cache_dir)?;
+
+    // Write boot assets to cache dir (needed by PowerShell script)
+    let vmlinuz_path = cache_dir.join("vmlinuz");
+    let grub_path = cache_dir.join("grubx64.efi");
+    fs::write(&vmlinuz_path, &assets.vmlinuz)?;
+    fs::write(&grub_path, &assets.grub_efi)?;
+
+    // Build initramfs: base + overlay units + SSH key (no NBD CPIO)
+    let mut initramfs = assets.initramfs.clone();
+
+    let overlay_cpio = crate::cpio::create_initramfs_units_cpio()?;
+    append_cpio(&mut initramfs, &overlay_cpio);
+
+    if !ssh_pubkey.is_empty() {
+        let ssh_cpio = crate::cpio::create_windows_ssh_cpio(ssh_pubkey.trim())?;
+        append_cpio(&mut initramfs, &ssh_cpio);
+    }
+
+    // Add vsock/hv_sock kernel modules (without nbd.ko)
+    if assets.vsock_ko.is_some() || assets.hv_sock_ko.is_some() {
+        let modules_cpio = create_native_modules_cpio(
+            assets.vsock_ko.as_deref(),
+            assets.hv_sock_ko.as_deref(),
+        )?;
+        append_cpio(&mut initramfs, &modules_cpio);
+    }
+
+    let initramfs_path = cache_dir.join("initramfs-native.img");
+    fs::write(&initramfs_path, &initramfs)?;
+    info!("native initramfs: {} bytes", initramfs.len());
+
+    // grub.cfg with native kernel cmdline
+    let grub_cfg = "set timeout=0\nset default=0\nmenuentry bcvk {\n  \
+         linux /boot/vmlinuz root=/dev/sdb rootfstype=ext4 ro \
+         console=ttyS0 console=tty0 selinux=0 net.ifnames=0 \
+         systemd.journald.storage=volatile\n  \
+         initrd /boot/initramfs.img\n}";
+    let grub_cfg_path = cache_dir.join("grub-native.cfg");
+    fs::write(&grub_cfg_path, grub_cfg)?;
+
+    // Create VHDX via PowerShell
+    let vhdx_str = output_path.to_string_lossy().to_string();
+    let ps_script = format!(
+        "Remove-Item '{vhdx}' -Force -ErrorAction SilentlyContinue; \
+         New-VHD -Path '{vhdx}' -SizeBytes 512MB -Dynamic | Out-Null; \
+         Mount-VHD -Path '{vhdx}'; \
+         $disk = Get-VHD -Path '{vhdx}' | Get-Disk; \
+         Initialize-Disk -Number $disk.Number -PartitionStyle GPT -ErrorAction SilentlyContinue; \
+         $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter; \
+         Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel ESP -Confirm:$false | Out-Null; \
+         $d = $part.DriveLetter; \
+         New-Item -Path \"${{d}}:\\EFI\\BOOT\" -ItemType Directory -Force | Out-Null; \
+         New-Item -Path \"${{d}}:\\boot\" -ItemType Directory -Force | Out-Null; \
+         Copy-Item '{grub_efi}' \"${{d}}:\\EFI\\BOOT\\BOOTX64.EFI\"; \
+         Copy-Item '{kernel}' \"${{d}}:\\boot\\vmlinuz\"; \
+         Copy-Item '{initramfs}' \"${{d}}:\\boot\\initramfs.img\"; \
+         Copy-Item '{grub_cfg}' \"${{d}}:\\EFI\\BOOT\\grub.cfg\"; \
+         Dismount-VHD -Path '{vhdx}'; \
+         Write-Host 'VHDX_OK'",
+        vhdx = vhdx_str,
+        grub_efi = grub_path.to_string_lossy(),
+        kernel = vmlinuz_path.to_string_lossy(),
+        initramfs = initramfs_path.to_string_lossy(),
+        grub_cfg = grub_cfg_path.to_string_lossy(),
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("VHDX_OK") {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("native VHDX creation failed: {} {}", stderr.trim(), stdout.trim());
+    }
+
+    // Cleanup temp files
+    let _ = fs::remove_file(&initramfs_path);
+    let _ = fs::remove_file(&grub_cfg_path);
+
+    info!("native boot VHDX: {}", vhdx_str);
+    Ok(vhdx_str)
+}
+
+/// Create CPIO with vsock/hv_sock kernel modules and a setup script.
+/// No NBD modules or nbd-vsock binary — native mode doesn't use NBD.
+fn create_native_modules_cpio(
+    vsock_ko: Option<&[u8]>,
+    hv_sock_ko: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    use cpio::newc::Builder as NewcBuilder;
+    use cpio::newc::ModeFileType;
+
+    let mut buf = Vec::new();
+
+    let dirs = [
+        "usr",
+        "usr/lib",
+        "usr/lib/bcvk",
+        "usr/lib/systemd",
+        "usr/lib/systemd/system",
+        "usr/lib/systemd/system/initrd-root-device.target.d",
+    ];
+    for dir in &dirs {
+        let b = NewcBuilder::new(dir)
+            .mode(0o755)
+            .set_mode_file_type(ModeFileType::Directory);
+        b.write(&mut buf, 0).finish()?;
+    }
+
+    // Kernel modules
+    if let Some(data) = vsock_ko {
+        let b = NewcBuilder::new("usr/lib/bcvk/vsock.ko").mode(0o644);
+        b.write(&mut buf, data.len() as u32).finish()?;
+        buf.extend_from_slice(data);
+        let padding = (4 - (data.len() % 4)) % 4;
+        buf.extend(std::iter::repeat(0).take(padding));
+    }
+    if let Some(data) = hv_sock_ko {
+        let b = NewcBuilder::new("usr/lib/bcvk/hv_sock.ko").mode(0o644);
+        b.write(&mut buf, data.len() as u32).finish()?;
+        buf.extend_from_slice(data);
+        let padding = (4 - (data.len() % 4)) % 4;
+        buf.extend(std::iter::repeat(0).take(padding));
+    }
+
+    // Setup script to load modules
+    let setup = b"#!/bin/sh\n\
+        for ko in /usr/lib/bcvk/*.ko; do\n\
+            [ -f \"$ko\" ] && insmod \"$ko\" 2>/dev/null\n\
+        done\n";
+    let b = NewcBuilder::new("usr/lib/bcvk/setup-modules.sh").mode(0o755);
+    b.write(&mut buf, setup.len() as u32).finish()?;
+    buf.extend_from_slice(setup);
+    let padding = (4 - (setup.len() % 4)) % 4;
+    buf.extend(std::iter::repeat(0).take(padding));
+
+    // systemd service to run setup
+    let svc = b"[Unit]\n\
+        Description=Load bcvk kernel modules\n\
+        DefaultDependencies=no\n\
+        Before=initrd-root-device.target\n\
+        [Service]\n\
+        Type=oneshot\n\
+        ExecStart=/usr/lib/bcvk/setup-modules.sh\n\
+        [Install]\n\
+        WantedBy=initrd-root-device.target\n";
+    let b = NewcBuilder::new("usr/lib/systemd/system/bcvk-modules.service").mode(0o644);
+    b.write(&mut buf, svc.len() as u32).finish()?;
+    buf.extend_from_slice(svc);
+    let padding = (4 - (svc.len() % 4)) % 4;
+    buf.extend(std::iter::repeat(0).take(padding));
+
+    // Symlink for WantedBy
+    let target = b"../bcvk-modules.service";
+    let b = NewcBuilder::new(
+        "usr/lib/systemd/system/initrd-root-device.target.d/bcvk-modules.service",
+    )
+    .mode(0o644);
+    b.write(&mut buf, target.len() as u32).finish()?;
+    buf.extend_from_slice(target);
+    let padding = (4 - (target.len() % 4)) % 4;
+    buf.extend(std::iter::repeat(0).take(padding));
+
+    // Trailer
+    let b = NewcBuilder::new("TRAILER!!!").mode(0);
+    b.write(&mut buf, 0).finish()?;
+
+    Ok(buf)
+}
