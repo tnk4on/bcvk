@@ -31,13 +31,13 @@ pub mod nbd_windows;
 pub mod run_ephemeral_windows;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
+pub mod run_native_windows;
+#[cfg(target_os = "windows")]
+#[allow(missing_docs)]
 pub mod to_disk_windows;
 #[cfg(target_os = "windows")]
 #[allow(missing_docs)]
 pub mod vm_helpers;
 #[cfg(target_os = "windows")]
-#[allow(missing_docs)]
+#[allow(missing_docs, unsafe_code)]
 pub mod wslc_com;
-#[cfg(target_os = "windows")]
-#[allow(missing_docs)]
-pub mod run_native_windows;

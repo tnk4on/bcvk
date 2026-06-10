@@ -202,7 +202,10 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
                 let digest_short = session.inspect_image_digest(image)?;
                 let cache_dir = crate::to_disk_windows::base_dir();
                 let base_vhdx = super::rootfs_native::create_rootfs_vhdx(
-                    &session, image, &digest_short, &cache_dir,
+                    &session,
+                    image,
+                    &digest_short,
+                    &cache_dir,
                 )?;
                 crate::to_disk_windows::create_differencing_vhdx(
                     &base_vhdx.to_string_lossy(),
@@ -211,7 +214,11 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
                 // Generate SSH key for this VM
                 let vm_key_path = std::path::PathBuf::from(format!("{}.key", vhdx_path.display()));
                 let _pubkey = crate::vm_helpers::generate_ssh_keypair(&vm_key_path)?;
-                println!("VM '{}' disk created (native) from: {}", name, base_vhdx.display());
+                println!(
+                    "VM '{}' disk created (native) from: {}",
+                    name,
+                    base_vhdx.display()
+                );
             } else {
                 let digest = crate::vm_helpers::ensure_image_and_get_digest(image)?;
                 let base_disk = crate::to_disk_windows::find_or_create_base_disk(

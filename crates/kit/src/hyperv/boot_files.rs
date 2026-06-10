@@ -631,10 +631,8 @@ pub fn create_boot_vhdx_native(
 
     // Add vsock/hv_sock kernel modules (without nbd.ko)
     if assets.vsock_ko.is_some() || assets.hv_sock_ko.is_some() {
-        let modules_cpio = create_native_modules_cpio(
-            assets.vsock_ko.as_deref(),
-            assets.hv_sock_ko.as_deref(),
-        )?;
+        let modules_cpio =
+            create_native_modules_cpio(assets.vsock_ko.as_deref(), assets.hv_sock_ko.as_deref())?;
         append_cpio(&mut initramfs, &modules_cpio);
     }
 
@@ -686,7 +684,11 @@ pub fn create_boot_vhdx_native(
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.contains("VHDX_OK") {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("native VHDX creation failed: {} {}", stderr.trim(), stdout.trim());
+        bail!(
+            "native VHDX creation failed: {} {}",
+            stderr.trim(),
+            stdout.trim()
+        );
     }
 
     // Cleanup temp files
@@ -768,10 +770,9 @@ fn create_native_modules_cpio(
 
     // Symlink for WantedBy
     let target = b"../bcvk-modules.service";
-    let b = NewcBuilder::new(
-        "usr/lib/systemd/system/initrd-root-device.target.d/bcvk-modules.service",
-    )
-    .mode(0o644);
+    let b =
+        NewcBuilder::new("usr/lib/systemd/system/initrd-root-device.target.d/bcvk-modules.service")
+            .mode(0o644);
     b.write(&mut buf, target.len() as u32).finish()?;
     buf.extend_from_slice(target);
     let padding = (4 - (target.len() % 4)) % 4;

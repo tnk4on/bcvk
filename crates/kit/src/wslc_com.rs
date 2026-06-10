@@ -7,7 +7,6 @@
 //! the `windows` crate requires `windows_core` at the crate root, which
 //! conflicts with our workspace setup.
 
-#![allow(unsafe_code)]
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
@@ -22,17 +21,13 @@ use windows::Win32::System::Com::*;
 
 // ── CLSID / IID ────────────────────────────────────────────────────
 
-const CLSID_WSLC_SESSION_MANAGER: GUID =
-    GUID::from_u128(0xa9b7a1b9_0671_405c_95f1_e0612cb4ce8f);
+const CLSID_WSLC_SESSION_MANAGER: GUID = GUID::from_u128(0xa9b7a1b9_0671_405c_95f1_e0612cb4ce8f);
 
-const IID_IWSLC_SESSION_MANAGER: GUID =
-    GUID::from_u128(0x82A7ABC8_6B50_43FC_AB96_15FBBE7E8760);
+const IID_IWSLC_SESSION_MANAGER: GUID = GUID::from_u128(0x82A7ABC8_6B50_43FC_AB96_15FBBE7E8760);
 
-const IID_IWSLC_SESSION: GUID =
-    GUID::from_u128(0xEF0661E4_6364_40EA_B433_E2FDF11F3519);
+const IID_IWSLC_SESSION: GUID = GUID::from_u128(0xEF0661E4_6364_40EA_B433_E2FDF11F3519);
 
-const IID_IWSLC_CONTAINER: GUID =
-    GUID::from_u128(0x7577FE8D_DE85_471E_B870_11669986F332);
+const IID_IWSLC_CONTAINER: GUID = GUID::from_u128(0x7577FE8D_DE85_471E_B870_11669986F332);
 
 // ── WSLCHandle (discriminated union for file handle transfer) ──────
 
@@ -82,8 +77,7 @@ impl Drop for ComPtr {
         if !self.ptr.is_null() {
             unsafe {
                 // IUnknown::Release is vtable index 2
-                let release: unsafe extern "system" fn(*mut c_void) -> u32 =
-                    self.vtable_fn(2);
+                let release: unsafe extern "system" fn(*mut c_void) -> u32 = self.vtable_fn(2);
                 release(self.ptr);
             }
         }
@@ -104,9 +98,9 @@ impl WslcSessionManager {
     pub fn create_session(&self, flags: u32) -> Result<WslcSession> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
-            *const c_void, // Settings
-            u32,           // Flags
-            *const c_void, // WarningCallback
+            *const c_void,    // Settings
+            u32,              // Flags
+            *const c_void,    // WarningCallback
             *mut *mut c_void, // Session out
         ) -> HRESULT;
 
@@ -125,7 +119,9 @@ impl WslcSessionManager {
         if session_ptr.is_null() {
             color_eyre::eyre::bail!("CreateSession returned null");
         }
-        let session = WslcSession { com: ComPtr::new(session_ptr) };
+        let session = WslcSession {
+            com: ComPtr::new(session_ptr),
+        };
         configure_com_impersonation(session_ptr)?;
         Ok(session)
     }
@@ -148,8 +144,8 @@ impl WslcSession {
     pub fn pull_image(&self, image: &str) -> Result<()> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
-            PCSTR, // Image
-            PCSTR, // RegistryAuth
+            PCSTR,         // Image
+            PCSTR,         // RegistryAuth
             *const c_void, // ProgressCallback
             *const c_void, // WarningCallback
         ) -> HRESULT;
@@ -177,7 +173,7 @@ impl WslcSession {
     pub fn inspect_image(&self, image: &str) -> Result<String> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
-            PCSTR, // ImageNameOrId
+            PCSTR,        // ImageNameOrId
             *mut *mut u8, // LPSTR* Output (UTF-8)
         ) -> HRESULT;
 
@@ -195,8 +191,15 @@ impl WslcSession {
                 color_eyre::eyre::bail!("InspectImage returned null");
             }
             let cstr = std::ffi::CStr::from_ptr(output as *const i8);
-            let result = cstr.to_str().context("InspectImage output not valid UTF-8")?.to_string();
-            debug!(len = result.len(), first_100 = &result[..100.min(result.len())], "InspectImage raw output");
+            let result = cstr
+                .to_str()
+                .context("InspectImage output not valid UTF-8")?
+                .to_string();
+            debug!(
+                len = result.len(),
+                first_100 = &result[..100.min(result.len())],
+                "InspectImage raw output"
+            );
             // Free COM-allocated memory
             windows::Win32::System::Com::CoTaskMemFree(Some(output as *const c_void));
             Ok(result)
@@ -206,8 +209,8 @@ impl WslcSession {
     /// InspectImage and extract the short digest.
     pub fn inspect_image_digest(&self, image: &str) -> Result<String> {
         let json_str = self.inspect_image(image)?;
-        let data: serde_json::Value = serde_json::from_str(&json_str)
-            .context("failed to parse InspectImage JSON")?;
+        let data: serde_json::Value =
+            serde_json::from_str(&json_str).context("failed to parse InspectImage JSON")?;
         // COM returns a single object; CLI wraps it in an array
         let obj = if data.is_array() {
             data.as_array().and_then(|a| a.first()).cloned()
@@ -229,8 +232,8 @@ impl WslcSession {
     pub fn create_container(&self, image: &str, name: &str) -> Result<WslcContainer> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
-            *const c_void, // WSLCContainerOptions*
-            *const c_void, // WarningCallback
+            *const c_void,    // WSLCContainerOptions*
+            *const c_void,    // WarningCallback
             *mut *mut c_void, // Container out
         ) -> HRESULT;
 
@@ -268,7 +271,9 @@ impl WslcSession {
         if container_ptr.is_null() {
             color_eyre::eyre::bail!("CreateContainer returned null");
         }
-        let container = WslcContainer { com: ComPtr::new(container_ptr) };
+        let container = WslcContainer {
+            com: ComPtr::new(container_ptr),
+        };
         configure_com_impersonation(container_ptr)?;
         Ok(container)
     }
@@ -329,10 +334,7 @@ impl WslcContainer {
 
     /// Export (vtable index 7) — writes rootfs tar to the given file handle.
     pub fn export(&self, file: &std::fs::File) -> Result<()> {
-        type Fn = unsafe extern "system" fn(
-            *mut c_void,
-            WSLCHandle,
-        ) -> HRESULT;
+        type Fn = unsafe extern "system" fn(*mut c_void, WSLCHandle) -> HRESULT;
 
         use std::os::windows::io::AsRawHandle;
         let handle = WSLCHandle {
@@ -355,16 +357,12 @@ pub fn create_session_manager() -> Result<WslcSessionManager> {
     crate::hyperv::vm::com_init_once();
     let mut ptr: *mut c_void = std::ptr::null_mut();
     unsafe {
-        let unknown: windows::core::IUnknown = CoCreateInstance(
-            &CLSID_WSLC_SESSION_MANAGER,
-            None,
-            CLSCTX_LOCAL_SERVER,
-        )
-        .context("failed to create WSLCSessionManager — is WSL 2.8+ installed?")?;
+        let unknown: windows::core::IUnknown =
+            CoCreateInstance(&CLSID_WSLC_SESSION_MANAGER, None, CLSCTX_LOCAL_SERVER)
+                .context("failed to create WSLCSessionManager — is WSL 2.8+ installed?")?;
         // QI for IWSLCSessionManager
-        type QiFn = unsafe extern "system" fn(
-            *mut c_void, *const GUID, *mut *mut c_void,
-        ) -> HRESULT;
+        type QiFn =
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
         let raw = unknown.as_raw();
         let vtable = *(raw as *const *const *const c_void);
         let qi: QiFn = std::mem::transmute_copy(&*vtable.add(0));
@@ -376,7 +374,9 @@ pub fn create_session_manager() -> Result<WslcSessionManager> {
         color_eyre::eyre::bail!("WSLCSessionManager QI returned null");
     }
     configure_com_impersonation(ptr)?;
-    Ok(WslcSessionManager { com: ComPtr::new(ptr) })
+    Ok(WslcSessionManager {
+        com: ComPtr::new(ptr),
+    })
 }
 
 /// Open the default wslc session (create if needed).
@@ -395,9 +395,8 @@ fn configure_com_impersonation(proxy: *mut c_void) -> Result<()> {
         let iid_client_security =
             GUID::from_u128(0x0000013Du128 << 96 | 0x0000_0000_0000_0000_C000_0000_0000_0046);
         // QI for IClientSecurity
-        type QiFn = unsafe extern "system" fn(
-            *mut c_void, *const GUID, *mut *mut c_void,
-        ) -> HRESULT;
+        type QiFn =
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
         let qi: QiFn = {
             let vtable = *(proxy as *const *const *const c_void);
             std::mem::transmute_copy(&*vtable.add(0))
@@ -412,9 +411,15 @@ fn configure_com_impersonation(proxy: *mut c_void) -> Result<()> {
 
         // IClientSecurity::QueryBlanket is vtable index 3
         type QueryBlanketFn = unsafe extern "system" fn(
-            *mut c_void, *mut c_void,
-            *mut u32, *mut u32, *mut *mut u16,
-            *mut u32, *mut u32, *mut *mut c_void, *mut u32,
+            *mut c_void,
+            *mut c_void,
+            *mut u32,
+            *mut u32,
+            *mut *mut u16,
+            *mut u32,
+            *mut u32,
+            *mut *mut c_void,
+            *mut u32,
         ) -> HRESULT;
         let query_blanket: QueryBlanketFn = {
             let vtable = *(client_security as *const *const *const c_void);
@@ -426,9 +431,14 @@ fn configure_com_impersonation(proxy: *mut c_void) -> Result<()> {
         let mut authn_lvl = 0u32;
         let mut capabilities = 0u32;
         query_blanket(
-            client_security, proxy,
-            &mut authn_svc, &mut authz_svc, std::ptr::null_mut(),
-            &mut authn_lvl, std::ptr::null_mut(), std::ptr::null_mut(),
+            client_security,
+            proxy,
+            &mut authn_svc,
+            &mut authz_svc,
+            std::ptr::null_mut(),
+            &mut authn_lvl,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
             &mut capabilities,
         )
         .ok()
@@ -440,9 +450,15 @@ fn configure_com_impersonation(proxy: *mut c_void) -> Result<()> {
 
         // IClientSecurity::SetBlanket is vtable index 4
         type SetBlanketFn = unsafe extern "system" fn(
-            *mut c_void, *mut c_void,
-            u32, u32, *mut u16,
-            u32, u32, *mut c_void, u32,
+            *mut c_void,
+            *mut c_void,
+            u32,
+            u32,
+            *mut u16,
+            u32,
+            u32,
+            *mut c_void,
+            u32,
         ) -> HRESULT;
         let set_blanket: SetBlanketFn = {
             let vtable = *(client_security as *const *const *const c_void);
@@ -451,10 +467,15 @@ fn configure_com_impersonation(proxy: *mut c_void) -> Result<()> {
 
         const RPC_C_IMP_LEVEL_IMPERSONATE: u32 = 3;
         set_blanket(
-            client_security, proxy,
-            authn_svc, authz_svc, std::ptr::null_mut(),
-            authn_lvl, RPC_C_IMP_LEVEL_IMPERSONATE,
-            std::ptr::null_mut(), capabilities,
+            client_security,
+            proxy,
+            authn_svc,
+            authz_svc,
+            std::ptr::null_mut(),
+            authn_lvl,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            std::ptr::null_mut(),
+            capabilities,
         )
         .ok()
         .context("SetBlanket failed")?;

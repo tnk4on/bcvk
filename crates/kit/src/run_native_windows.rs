@@ -8,8 +8,10 @@ use color_eyre::Result;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::hyperv::{boot_files, boot_files_native, dhcp, rootfs_native, ssh_forward::SshForward, vm};
-use crate::run_ephemeral_windows::RunEphemeralOpts;
+use crate::hyperv::{
+    boot_files, boot_files_native, dhcp, rootfs_native, ssh_forward::SshForward, vm,
+};
+use crate::run_ephemeral_windows::{EphemeralVmMetadata, RunEphemeralOpts};
 use crate::vm_helpers::{
     default_vcpus, parse_memory_to_mb, run_ssh_command, run_ssh_interactive, wait_for_ssh,
 };
@@ -70,17 +72,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
         .unwrap_or_else(|| parse_memory_to_mb(&opts.memory))?;
 
     // ── 3. rootfs VHDX (cached) ───────────────────────────────────
-    let rootfs_vhdx = rootfs_native::create_rootfs_vhdx(
-        &session,
-        &opts.image,
-        &digest_short,
-        &cache_base,
-    )?;
+    let rootfs_vhdx =
+        rootfs_native::create_rootfs_vhdx(&session, &opts.image, &digest_short, &cache_base)?;
     elapsed!("rootfs VHDX ready");
 
     // ── 4. Boot files (cached) ────────────────────────────────────
-    let boot_assets =
-        boot_files_native::fetch_boot_files_native(&rootfs_vhdx, &boot_cache)?;
+    let boot_assets = boot_files_native::fetch_boot_files_native(&rootfs_vhdx, &boot_cache)?;
     elapsed!("boot files ready");
 
     // ── 5. SSH keypair ────────────────────────────────────────────
@@ -96,8 +93,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let subnet = subnet_from_name(&name);
     let server_ip = format!("10.0.{subnet}.1");
     let switch_name = format!("bcvk-{name}");
-    let _switch_info =
-        vm::ensure_internal_switch(&switch_name, &server_ip, 24)?;
+    let _switch_info = vm::ensure_internal_switch(&switch_name, &server_ip, 24)?;
 
     vm::create_gen2_vm(&vm_name, memory_mb, vcpus, &switch_name)?;
     elapsed!("Hyper-V VM created");
@@ -118,15 +114,28 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     let client_ip = format!("10.0.{subnet}.100");
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let dhcp =
-            dhcp::DhcpServer::new(&server_ip, &client_ip, &switch_name)?;
+        let dhcp = dhcp::DhcpServer::new(&server_ip, &client_ip, &switch_name)?;
         let _dhcp_handle = dhcp.start_background();
 
         let ssh_fwd = SshForward::start(&client_ip).await?;
         let ssh_port = ssh_fwd.port();
         info!("SSH forward: localhost:{ssh_port} → {client_ip}:22");
 
-        // ── 10. Wait for SSH ──────────────────────────────────────
+        // ── 10. Save metadata ─────────────────────────────────────
+        let metadata = EphemeralVmMetadata {
+            name: name.clone(),
+            image: opts.image.clone(),
+            vm_name: vm_name.clone(),
+            ssh_port,
+            ssh_key: ssh_key_path.to_string_lossy().to_string(),
+            nbd_container: None,
+            vsock_port: None,
+            subnet,
+            created: chrono::Utc::now().to_rfc3339(),
+        };
+        metadata.save()?;
+
+        // ── 11. Wait for SSH ─────────────────────────────────────
         info!(port = ssh_port, "waiting for SSH...");
         wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
         elapsed!("SSH ready");
@@ -137,29 +146,36 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             ssh_key_path.display()
         );
 
-        // ── 11. Execute or interactive ────────────────────────────
+        // ── 12. Detach or execute or interactive ─────────────────
+        if opts.detach {
+            info!("VM running in background. Use: bcvk ephemeral ssh {name}");
+            // Don't cleanup — leave VM running
+            return Ok::<(), color_eyre::Report>(());
+        }
+
         if !opts.execute.is_empty() {
             for cmd in &opts.execute {
-                run_ssh_command(ssh_port, &ssh_key_path, "root", cmd)
-                    .map(|_| ())?;
+                run_ssh_command(ssh_port, &ssh_key_path, "root", cmd).map(|_| ())?;
             }
         } else if need_ssh {
-            let status =
-                run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
+            let status = run_ssh_interactive(ssh_port, &ssh_key_path, "root")?;
             dhcp.stop();
+            EphemeralVmMetadata::remove(&name);
             std::process::exit(status.code().unwrap_or(1));
         } else {
             info!("VM running. Use: bcvk ephemeral ssh {name}");
         }
 
         dhcp.stop();
+        EphemeralVmMetadata::remove(&name);
         Ok::<(), color_eyre::Report>(())
     })?;
 
-    // Cleanup
+    // Cleanup (only reached for non-detach, non-interactive)
     let _ = vm::stop_vm(&vm_name);
     let _ = vm::remove_vm(&vm_name);
     vm::remove_internal_switch(&switch_name);
+    EphemeralVmMetadata::remove(&name);
 
     Ok(())
 }

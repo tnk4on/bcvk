@@ -32,7 +32,11 @@ pub fn create_rootfs_vhdx(
         return Ok(vhdx_path);
     }
 
-    info!(image, digest = digest_short, "building rootfs VHDX (first time)");
+    info!(
+        image,
+        digest = digest_short,
+        "building rootfs VHDX (first time)"
+    );
 
     fs::create_dir_all(cache_dir)?;
     let tar_path = cache_dir.join(format!("rootfs-{digest_short}.tar"));
@@ -48,8 +52,7 @@ pub fn create_rootfs_vhdx(
     populate_vhdx_from_tar(&vhdx_tmp, &tar_path)?;
 
     // Step 4: Rename to final path (atomic on same volume)
-    fs::rename(&vhdx_tmp, &vhdx_path)
-        .context("failed to rename rootfs VHDX to final path")?;
+    fs::rename(&vhdx_tmp, &vhdx_path).context("failed to rename rootfs VHDX to final path")?;
 
     // Cleanup tar
     let _ = fs::remove_file(&tar_path);
@@ -66,7 +69,10 @@ fn export_rootfs_tar(
     tar_path: &Path,
 ) -> Result<()> {
     let container_name = format!("bcvk-export-{digest_short}");
-    info!(name = container_name, "creating temporary container for export");
+    info!(
+        name = container_name,
+        "creating temporary container for export"
+    );
 
     let container = session.create_container(image, &container_name)?;
 
@@ -156,7 +162,12 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
     if !mount_output.status.success() {
         let stderr = decode_wsl_output(&mount_output.stderr);
         let stdout = decode_wsl_output(&mount_output.stdout);
-        bail!("wsl --mount failed (exit {:?}): stderr={} stdout={}", mount_output.status.code(), stderr, stdout);
+        bail!(
+            "wsl --mount failed (exit {:?}): stderr={} stdout={}",
+            mount_output.status.code(),
+            stderr,
+            stdout
+        );
     }
 
     // Find the block device — wsl --mount attaches as /dev/sdX
@@ -181,9 +192,7 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
         .context("WSL rootfs extraction failed")?;
 
     // Always unmount
-    let _ = Command::new("wsl")
-        .args(["--unmount", &vhdx_str])
-        .output();
+    let _ = Command::new("wsl").args(["--unmount", &vhdx_str]).output();
 
     if !extract_result.status.success() {
         let stderr = String::from_utf8_lossy(&extract_result.stderr);
@@ -242,7 +251,11 @@ fn find_wsl_block_device() -> Result<String> {
     // Use lsblk to find the most recently added disk.
     let output = Command::new("wsl")
         .args([
-            "-u", "root", "-e", "sh", "-c",
+            "-u",
+            "root",
+            "-e",
+            "sh",
+            "-c",
             "lsblk -dpno NAME,SIZE | tail -1 | awk '{print $1}'",
         ])
         .stdout(Stdio::piped())

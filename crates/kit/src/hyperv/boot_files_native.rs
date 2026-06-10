@@ -24,10 +24,7 @@ pub struct BootAssets {
 }
 
 /// Fetch boot files from a rootfs VHDX via WSL mount.
-pub fn fetch_boot_files_native(
-    rootfs_vhdx: &Path,
-    cache_dir: &Path,
-) -> Result<BootAssets> {
+pub fn fetch_boot_files_native(rootfs_vhdx: &Path, cache_dir: &Path) -> Result<BootAssets> {
     let vmlinuz_cache = cache_dir.join("vmlinuz");
     let initramfs_cache = cache_dir.join("initramfs.img");
     let grub_cache = cache_dir.join("grubx64.efi");
@@ -69,9 +66,7 @@ pub fn fetch_boot_files_native(
 
     // Mount read-only and extract
     let mountpoint = "/mnt/bcvk-boot-extract";
-    let mount_script = format!(
-        "mkdir -p {mountpoint} && mount -o ro '{dev}' {mountpoint}"
-    );
+    let mount_script = format!("mkdir -p {mountpoint} && mount -o ro '{dev}' {mountpoint}");
     run_wsl_root(&mount_script)?;
 
     let result = extract_boot_files_from_mount(mountpoint, cache_dir);
@@ -87,9 +82,7 @@ pub fn fetch_boot_files_native(
 
 fn extract_boot_files_from_mount(mountpoint: &str, cache_dir: &Path) -> Result<BootAssets> {
     // Discover kernel version
-    let kver_output = run_wsl_root_capture(&format!(
-        "ls {mountpoint}/usr/lib/modules/ | head -1"
-    ))?;
+    let kver_output = run_wsl_root_capture(&format!("ls {mountpoint}/usr/lib/modules/ | head -1"))?;
     let kver = kver_output.trim().to_string();
     if kver.is_empty() {
         bail!("no kernel version found in /usr/lib/modules/");
@@ -144,8 +137,7 @@ fn extract_boot_files_from_mount(mountpoint: &str, cache_dir: &Path) -> Result<B
 }
 
 fn read_cached_kernel_version(cache_dir: &Path) -> Result<String> {
-    fs::read_to_string(cache_dir.join("kver"))
-        .context("failed to read cached kernel version")
+    fs::read_to_string(cache_dir.join("kver")).context("failed to read cached kernel version")
 }
 
 fn wsl_read_file(path: &str) -> Result<Vec<u8>> {
@@ -166,12 +158,8 @@ fn wsl_read_file(path: &str) -> Result<Vec<u8>> {
 fn wsl_decompress_ko(modules_dir: &str, name: &str) -> Result<Vec<u8>> {
     // Try .xz first, then .zst, then uncompressed
     for (ext, cmd) in [("xz", "xzcat"), ("zst", "zstdcat")] {
-        let path = format!(
-            "$(find {modules_dir} -name '{name}.{ext}' 2>/dev/null | head -1)"
-        );
-        let script = format!(
-            "p={path}; [ -n \"$p\" ] && {cmd} \"$p\" || exit 1"
-        );
+        let path = format!("$(find {modules_dir} -name '{name}.{ext}' 2>/dev/null | head -1)");
+        let script = format!("p={path}; [ -n \"$p\" ] && {cmd} \"$p\" || exit 1");
         if let Ok(data) = run_wsl_root_binary(&script) {
             if !data.is_empty() {
                 debug!(module = name, "decompressed from .{ext}");
@@ -181,9 +169,7 @@ fn wsl_decompress_ko(modules_dir: &str, name: &str) -> Result<Vec<u8>> {
     }
 
     // Try uncompressed
-    let path = format!(
-        "$(find {modules_dir} -name '{name}' 2>/dev/null | head -1)"
-    );
+    let path = format!("$(find {modules_dir} -name '{name}' 2>/dev/null | head -1)");
     let script = format!("p={path}; [ -n \"$p\" ] && cat \"$p\" || exit 1");
     run_wsl_root_binary(&script)
 }
@@ -236,7 +222,11 @@ fn run_wsl_root_binary(script: &str) -> Result<Vec<u8>> {
 fn find_wsl_block_device() -> Result<String> {
     let output = Command::new("wsl")
         .args([
-            "-u", "root", "-e", "sh", "-c",
+            "-u",
+            "root",
+            "-e",
+            "sh",
+            "-c",
             "lsblk -dpno NAME,SIZE | tail -1 | awk '{print $1}'",
         ])
         .stdout(Stdio::piped())
