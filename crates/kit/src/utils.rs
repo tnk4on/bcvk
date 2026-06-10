@@ -11,6 +11,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 #[cfg(target_os = "linux")]
 use cap_std_ext::cap_std::io_lifetimes::AsFilelike as _;
 #[cfg(target_os = "linux")]
+use color_eyre::eyre::Context as _;
+#[cfg(target_os = "linux")]
 use std::io::{Seek as _, Write as _};
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
