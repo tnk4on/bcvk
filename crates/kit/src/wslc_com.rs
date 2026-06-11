@@ -142,6 +142,11 @@ pub struct WslcSession {
 impl WslcSession {
     /// PullImage (vtable index 5)
     pub fn pull_image(&self, image: &str) -> Result<()> {
+        self.pull_image_with_auth(image, None)
+    }
+
+    /// PullImage with optional registry authentication token.
+    pub fn pull_image_with_auth(&self, image: &str, auth: Option<&str>) -> Result<()> {
         type Fn = unsafe extern "system" fn(
             *mut c_void,
             PCSTR,         // Image
@@ -152,18 +157,58 @@ impl WslcSession {
 
         info!(image, "pulling image via wslc COM");
         let image_cstr = std::ffi::CString::new(image)?;
+        let auth_cstr = auth.map(|a| std::ffi::CString::new(a).unwrap());
+        let auth_pcstr = auth_cstr
+            .as_ref()
+            .map(|c| PCSTR::from_raw(c.as_ptr() as *const u8))
+            .unwrap_or(PCSTR::null());
         unsafe {
             let f: Fn = self.com.vtable_fn(5);
             let hr = f(
                 self.com.as_ptr(),
                 PCSTR::from_raw(image_cstr.as_ptr() as *const u8),
-                PCSTR::null(),
+                auth_pcstr,
                 std::ptr::null(),
                 std::ptr::null(),
             );
             hr.ok().context("PullImage failed")?;
         }
         Ok(())
+    }
+
+    /// Authenticate with a container registry (vtable index 33).
+    /// Returns an identity token to pass to pull_image_with_auth.
+    pub fn authenticate(&self, server: &str, username: &str, password: &str) -> Result<String> {
+        type Fn = unsafe extern "system" fn(
+            *mut c_void,
+            PCSTR,        // ServerAddress
+            PCSTR,        // Username
+            PCSTR,        // Password
+            *mut *mut u8, // IdentityToken out
+        ) -> HRESULT;
+
+        let server_cstr = std::ffi::CString::new(server)?;
+        let user_cstr = std::ffi::CString::new(username)?;
+        let pass_cstr = std::ffi::CString::new(password)?;
+        let mut token: *mut u8 = std::ptr::null_mut();
+        unsafe {
+            let f: Fn = self.com.vtable_fn(33);
+            let hr = f(
+                self.com.as_ptr(),
+                PCSTR::from_raw(server_cstr.as_ptr() as *const u8),
+                PCSTR::from_raw(user_cstr.as_ptr() as *const u8),
+                PCSTR::from_raw(pass_cstr.as_ptr() as *const u8),
+                &mut token,
+            );
+            hr.ok().context("Authenticate failed")?;
+            if token.is_null() {
+                color_eyre::eyre::bail!("Authenticate returned null token");
+            }
+            let cstr = std::ffi::CStr::from_ptr(token as *const i8);
+            let result = cstr.to_str().context("token not valid UTF-8")?.to_string();
+            windows::Win32::System::Com::CoTaskMemFree(Some(token as *const c_void));
+            Ok(result)
+        }
     }
 
     /// InspectImage (vtable index 14)
@@ -351,6 +396,59 @@ impl WslcContainer {
 }
 
 // ── Public entry point ─────────────────────────────────────────────
+
+/// Try to authenticate for a registry using credentials from containers/auth.json.
+/// Returns the auth token if credentials are found, None otherwise.
+pub fn try_authenticate_from_auth_json(
+    session: &WslcSession,
+    image: &str,
+) -> Result<Option<String>> {
+    let registry = image.split('/').next().unwrap_or("");
+    if !registry.contains('.') {
+        return Ok(None); // docker.io default, no auth needed
+    }
+
+    let auth_path = dirs::config_dir()
+        .unwrap_or_default()
+        .join("containers")
+        .join("auth.json");
+    if !auth_path.exists() {
+        return Ok(None);
+    }
+
+    let auth_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&auth_path)?)?;
+    let auths = auth_json.get("auths").and_then(|a| a.as_object());
+    let Some(auths) = auths else {
+        return Ok(None);
+    };
+
+    let entry = auths.get(registry);
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+
+    let b64 = entry.get("auth").and_then(|a| a.as_str()).unwrap_or("");
+    if b64.is_empty() {
+        return Ok(None);
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(b64)?;
+    let creds = String::from_utf8(decoded)?;
+    let (user, pass) = creds
+        .split_once(':')
+        .ok_or_else(|| color_eyre::eyre::eyre!("invalid auth format"))?;
+
+    debug!(registry, "authenticating via auth.json");
+    let token = session.authenticate(registry, user, pass)?;
+    Ok(Some(token))
+}
+
+/// Pull an image, automatically using auth.json credentials if available.
+pub fn pull_image_auto_auth(session: &WslcSession, image: &str) -> Result<()> {
+    let auth = try_authenticate_from_auth_json(session, image)?;
+    session.pull_image_with_auth(image, auth.as_deref())
+}
 
 /// Create an IWSLCSessionManager via COM.
 pub fn create_session_manager() -> Result<WslcSessionManager> {

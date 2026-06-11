@@ -509,7 +509,7 @@ fn run_native(opts: ToDiskWindowsOpts) -> Result<()> {
     info!(image = %opts.image, output = %opts.output, "to-disk (native mode)");
 
     let session = crate::wslc_com::open_default_session()?;
-    session.pull_image(&opts.image)?;
+    crate::wslc_com::pull_image_auto_auth(&session, &opts.image)?;
     let digest_short = session.inspect_image_digest(&opts.image)?;
 
     let cache_dir = base_dir();

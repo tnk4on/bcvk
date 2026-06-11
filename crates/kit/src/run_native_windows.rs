@@ -111,7 +111,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
 
     // ── 1. wslc COM: pull + inspect ───────────────────────────────
     let session = wslc_com::open_default_session()?;
-    session.pull_image(&opts.image)?;
+    wslc_com::pull_image_auto_auth(&session, &opts.image)?;
     let digest_short = session.inspect_image_digest(&opts.image)?;
     elapsed!("image ready");
 

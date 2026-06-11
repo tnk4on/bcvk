@@ -198,7 +198,7 @@ pub fn run(opts: HypervRunOpts) -> Result<()> {
             if opts.native {
                 // Native mode: use wslc COM Export → rootfs VHDX
                 let session = crate::wslc_com::open_default_session()?;
-                session.pull_image(image)?;
+                crate::wslc_com::pull_image_auto_auth(&session, image)?;
                 let digest_short = session.inspect_image_digest(image)?;
                 let cache_dir = crate::to_disk_windows::base_dir();
                 let base_vhdx = super::rootfs_native::create_rootfs_vhdx(
