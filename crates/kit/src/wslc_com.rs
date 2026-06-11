@@ -408,13 +408,21 @@ pub fn try_authenticate_from_auth_json(
         return Ok(None); // docker.io default, no auth needed
     }
 
-    let auth_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("containers")
-        .join("auth.json");
-    if !auth_path.exists() {
+    // Search multiple locations for containers auth.json
+    let candidates = [
+        dirs::home_dir().map(|h| h.join(".config/containers/auth.json")),
+        dirs::config_dir().map(|c| c.join("containers/auth.json")),
+        Some(std::path::PathBuf::from(
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_default() + "/containers/auth.json",
+        )),
+    ];
+    let auth_path = candidates
+        .iter()
+        .filter_map(|p| p.as_ref())
+        .find(|p| p.exists());
+    let Some(auth_path) = auth_path else {
         return Ok(None);
-    }
+    };
 
     let auth_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&auth_path)?)?;
     let auths = auth_json.get("auths").and_then(|a| a.as_object());
@@ -439,8 +447,13 @@ pub fn try_authenticate_from_auth_json(
         .split_once(':')
         .ok_or_else(|| color_eyre::eyre::eyre!("invalid auth format"))?;
 
-    debug!(registry, "authenticating via auth.json");
-    let token = session.authenticate(registry, user, pass)?;
+    debug!(registry, "building X-Registry-Auth from auth.json");
+    let auth_json = serde_json::json!({
+        "username": user,
+        "password": pass,
+        "serveraddress": registry,
+    });
+    let token = base64::engine::general_purpose::STANDARD.encode(auth_json.to_string());
     Ok(Some(token))
 }
 

@@ -45,17 +45,19 @@ pub fn create_rootfs_vhdx(
     // Step 1: Export container rootfs to tar
     export_rootfs_tar(session, image, digest_short, &tar_path)?;
 
-    // Step 2: Create empty dynamic VHDX
-    create_empty_vhdx(&vhdx_tmp, "10GB")?;
+    // Step 2-3: Create VHDX and populate (cleanup tar on failure)
+    let vhdx_result = (|| -> Result<()> {
+        create_empty_vhdx(&vhdx_tmp, "10GB")?;
+        populate_vhdx_from_tar(&vhdx_tmp, &tar_path)?;
+        fs::rename(&vhdx_tmp, &vhdx_path).context("failed to rename rootfs VHDX to final path")?;
+        Ok(())
+    })();
 
-    // Step 3: Mount VHDX via WSL, format ext4, extract tar
-    populate_vhdx_from_tar(&vhdx_tmp, &tar_path)?;
-
-    // Step 4: Rename to final path (atomic on same volume)
-    fs::rename(&vhdx_tmp, &vhdx_path).context("failed to rename rootfs VHDX to final path")?;
-
-    // Cleanup tar
+    // Always cleanup tar (1-2 GB)
     let _ = fs::remove_file(&tar_path);
+    let _ = fs::remove_file(&vhdx_tmp);
+
+    vhdx_result?;
 
     info!(path = %vhdx_path.display(), "rootfs VHDX ready");
     Ok(vhdx_path)
@@ -105,6 +107,8 @@ fn export_rootfs_tar(
 /// Create an empty dynamic VHDX via PowerShell.
 fn create_empty_vhdx(path: &Path, size: &str) -> Result<()> {
     let path_str = path.to_string_lossy().replace('/', "\\");
+    // Remove stale tmp file from previous failed runs
+    let _ = fs::remove_file(path);
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
          New-VHD -Path '{}' -SizeBytes {} -Dynamic | Out-Null; \
@@ -141,8 +145,10 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
     // Convert tar path to WSL-accessible path (/mnt/c/...)
     let wsl_tar_path = windows_to_wsl_path(&tar_str)?;
 
+    // Snapshot block devices before mount
+    let devs_before = list_wsl_block_devices();
+
     // Mount VHDX via wsl --mount --bare
-    // Use the Windows-style path for wsl.exe
     let vhdx_win = vhdx_path.to_string_lossy().replace('/', "\\");
     info!(path = %vhdx_win, "mounting VHDX via wsl --mount...");
     let mount_output = Command::new("wsl")
@@ -170,12 +176,30 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
         );
     }
 
-    // Find the block device — wsl --mount attaches as /dev/sdX
-    let dev = find_wsl_block_device()?;
+    // Find the newly added block device by diffing before/after
+    let devs_after = list_wsl_block_devices();
+    let new_devs: Vec<_> = devs_after
+        .iter()
+        .filter(|d| !devs_before.contains(d))
+        .collect();
+    let dev = match new_devs.len() {
+        1 => new_devs[0].clone(),
+        0 => bail!("no new block device after wsl --mount"),
+        _ => bail!(
+            "multiple new block devices after wsl --mount: {:?}",
+            new_devs
+        ),
+    };
+    debug!(dev, "found new WSL block device");
 
-    // Format, mount, extract, unmount — all in one WSL command
+    // Format, mount, extract, unmount
+    // WSL may auto-mount the bare device, so force unmount + wipefs first.
+    // These cleanup steps must not fail the script, so run them before set -e.
     let script = format!(
-        "set -e && \
+        "umount '{dev}' 2>/dev/null; \
+         umount -f '{dev}' 2>/dev/null; \
+         wipefs -a '{dev}' 2>/dev/null; \
+         set -e && \
          mkfs.ext4 -q -F '{dev}' && \
          mkdir -p /mnt/bcvk-rootfs && \
          mount '{dev}' /mnt/bcvk-rootfs && \
@@ -245,10 +269,8 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_string()
 }
 
-/// Find the block device attached by `wsl --mount --bare`.
-fn find_wsl_block_device() -> Result<String> {
-    // `wsl --mount --bare` attaches as the last /dev/sd[a-z] device.
-    // Use lsblk to find the most recently added disk.
+/// List all block devices currently visible in WSL.
+pub(crate) fn list_wsl_block_devices() -> Vec<String> {
     let output = Command::new("wsl")
         .args([
             "-u",
@@ -256,17 +278,19 @@ fn find_wsl_block_device() -> Result<String> {
             "-e",
             "sh",
             "-c",
-            "lsblk -dpno NAME,SIZE | tail -1 | awk '{print $1}'",
+            "lsblk -dpno NAME 2>/dev/null",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .context("lsblk failed")?;
-
-    let dev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if dev.is_empty() || !dev.starts_with("/dev/") {
-        bail!("could not find block device after wsl --mount");
-    }
-    debug!(dev, "found WSL block device");
-    Ok(dev)
+        .ok();
+    output
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| l.starts_with("/dev/"))
+                .collect()
+        })
+        .unwrap_or_default()
 }

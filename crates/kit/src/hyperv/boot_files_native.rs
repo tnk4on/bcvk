@@ -46,7 +46,10 @@ pub fn fetch_boot_files_native(rootfs_vhdx: &Path, cache_dir: &Path) -> Result<B
     fs::create_dir_all(cache_dir)?;
     info!("extracting boot files from rootfs VHDX...");
 
-    let vhdx_str = rootfs_vhdx.to_string_lossy();
+    let vhdx_str = rootfs_vhdx.to_string_lossy().replace('/', "\\");
+
+    // Snapshot devices before mount
+    let devs_before = super::rootfs_native::list_wsl_block_devices();
 
     // Mount VHDX read-only
     let mount_output = Command::new("wsl")
@@ -61,8 +64,24 @@ pub fn fetch_boot_files_native(rootfs_vhdx: &Path, cache_dir: &Path) -> Result<B
         bail!("wsl --mount failed: {stderr}");
     }
 
-    // Find the device
-    let dev = find_wsl_block_device()?;
+    // Find the newly added device (retry a few times for WSL to settle)
+    let dev = {
+        let mut found = None;
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let devs_after = super::rootfs_native::list_wsl_block_devices();
+            let new_devs: Vec<_> = devs_after
+                .iter()
+                .filter(|d| !devs_before.contains(d))
+                .cloned()
+                .collect();
+            if new_devs.len() == 1 {
+                found = Some(new_devs[0].clone());
+                break;
+            }
+        }
+        found.ok_or_else(|| color_eyre::eyre::eyre!("no new block device after wsl --mount"))?
+    };
 
     // Mount read-only and extract
     let mountpoint = "/mnt/bcvk-boot-extract";
@@ -219,7 +238,7 @@ fn run_wsl_root_binary(script: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn find_wsl_block_device() -> Result<String> {
+fn _find_wsl_block_device_unused() -> Result<String> {
     let output = Command::new("wsl")
         .args([
             "-u",
