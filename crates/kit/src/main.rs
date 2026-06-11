@@ -69,6 +69,8 @@ mod nbd_macos;
 #[cfg(target_os = "macos")]
 mod run_ephemeral_macos;
 #[cfg(target_os = "macos")]
+mod run_native_macos;
+#[cfg(target_os = "macos")]
 mod to_disk_macos;
 #[cfg(target_os = "macos")]
 mod vfkit;

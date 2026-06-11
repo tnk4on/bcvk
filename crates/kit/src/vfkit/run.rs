@@ -101,6 +101,9 @@ pub struct VmRunOpts {
     /// Keep the VM running in background after creation (always true for vfkit)
     #[clap(long, short = 'd')]
     pub detach: bool,
+    /// Use native mode (apple/container CLI, no podman machine)
+    #[clap(long)]
+    pub native: bool,
 }
 
 fn validate_labels(labels: &[String]) -> Result<()> {
@@ -193,18 +196,30 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
         if !disk_path.exists() {
             info!("creating disk image for VM '{}'...", vm_name);
-            let machine = detect_machine_name()?;
-            let digest = ensure_image_and_get_digest(image)?;
-
-            let base_disk_path = crate::to_disk_macos::find_or_create_base_disk(
-                image,
-                &digest,
-                &opts.install,
-                &opts.disk_size,
-                &machine,
-                &None,
-                &[],
-            )?;
+            let base_disk_path = if opts.native {
+                crate::run_native_macos::check_prerequisites()?;
+                crate::run_native_macos::ensure_container_system()?;
+                let digest = crate::run_native_macos::pull_image(image)?;
+                crate::to_disk_macos::find_or_create_base_disk_native(
+                    image,
+                    &digest,
+                    &opts.install,
+                    &opts.disk_size,
+                    &None,
+                )?
+            } else {
+                let machine = detect_machine_name()?;
+                let digest = ensure_image_and_get_digest(image)?;
+                crate::to_disk_macos::find_or_create_base_disk(
+                    image,
+                    &digest,
+                    &opts.install,
+                    &opts.disk_size,
+                    &machine,
+                    &None,
+                    &opts.label,
+                )?
+            };
 
             crate::to_disk_macos::clone_base_disk(&base_disk_path, &disk_path)?;
 

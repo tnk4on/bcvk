@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lib]
+name = "bcvk_nbd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bcvk-nbd"
 path = "src/main.rs"

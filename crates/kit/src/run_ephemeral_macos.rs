@@ -62,6 +62,16 @@ pub struct EphemeralVmMetadata {
     /// NBD port allocated for this VM's rootfs.
     #[serde(default)]
     pub nbd_port: Option<u16>,
+    /// Backend used to launch this VM ("podman" or "native").
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Path to the rootfs.ext4 snapshot (native mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_path: Option<String>,
+}
+
+fn default_backend() -> String {
+    "podman".to_string()
 }
 
 #[allow(dead_code)]
@@ -156,24 +166,30 @@ pub struct RunEphemeralOpts {
     /// Enable debug mode (reserved for future use)
     #[clap(long)]
     pub debug: bool,
+    /// Use native mode (apple/container CLI + direct kernel boot, no podman machine)
+    #[clap(long)]
+    pub native: bool,
 }
 
 // --- RAII cleanup guard ---
 
-struct VmCleanup {
-    vfkit_pid: u32,
-    gvproxy_pid: u32,
-    nbd_container: Option<String>,
-    nbd_port: Option<u16>,
-    image: String,
-    vm_name: String,
+pub(crate) struct VmCleanup {
+    pub(crate) vfkit_pid: u32,
+    pub(crate) gvproxy_pid: u32,
+    pub(crate) nbd_container: Option<String>,
+    pub(crate) nbd_port: Option<u16>,
+    pub(crate) image: String,
+    pub(crate) vm_name: String,
+    pub(crate) backend: String,
 }
 
 impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
-        if let Some(ref name) = self.nbd_container {
-            crate::nbd_macos::stop_nbd_server(name, self.nbd_port);
+        if self.backend != "native" {
+            if let Some(ref name) = self.nbd_container {
+                crate::nbd_macos::stop_nbd_server(name, self.nbd_port);
+            }
         }
         if let Err(e) = rustix::process::kill_process(
             rustix::process::Pid::from_raw(self.vfkit_pid as i32).unwrap(),
@@ -187,26 +203,28 @@ impl Drop for VmCleanup {
         ) {
             tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
         }
-        // Release container image overlay mount
-        if let Ok(machine) = detect_machine_name() {
-            if let Err(e) = Command::new("podman")
-                .args([
-                    "machine",
-                    "ssh",
-                    &machine,
-                    "--",
-                    "podman",
-                    "image",
-                    "umount",
-                    &self.image,
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-            {
-                tracing::debug!("failed to umount image {}: {}", self.image, e);
+        // Release container image overlay mount (podman mode only)
+        if self.backend != "native" {
+            if let Ok(machine) = detect_machine_name() {
+                if let Err(e) = Command::new("podman")
+                    .args([
+                        "machine",
+                        "ssh",
+                        &machine,
+                        "--",
+                        "podman",
+                        "image",
+                        "umount",
+                        &self.image,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                {
+                    tracing::debug!("failed to umount image {}: {}", self.image, e);
+                }
             }
-        }
+        } // end if backend != "native"
         EphemeralVmMetadata::remove(&self.vm_name);
     }
 }
@@ -218,6 +236,9 @@ impl Drop for VmCleanup {
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together (GUI requires foreground process)");
+    }
+    if opts.native {
+        return crate::run_native_macos::run(opts);
     }
     run_vfkit(opts)
 }
@@ -386,6 +407,8 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: Some(nbd_container_name.clone()),
         nbd_port: Some(nbd_port),
+        backend: "podman".to_string(),
+        rootfs_path: None,
     };
     metadata.save()?;
 
@@ -396,6 +419,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         nbd_port: Some(nbd_port),
         image: opts.image.clone(),
         vm_name: vm_name.clone(),
+        backend: "podman".to_string(),
     };
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
@@ -525,6 +549,8 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         created: chrono::Utc::now().to_rfc3339(),
         nbd_container: None,
         nbd_port: None,
+        backend: if opts.native { "native" } else { "podman" }.to_string(),
+        rootfs_path: None,
     };
     metadata.save()?;
     println!("{}", vm_name);
@@ -700,6 +726,8 @@ mod tests {
             created: "2026-01-01T00:00:00Z".to_string(),
             nbd_container: Some("bcvk-nbd-test-vm".to_string()),
             nbd_port: Some(10841),
+            backend: "podman".to_string(),
+            rootfs_path: None,
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
         let loaded: EphemeralVmMetadata = serde_json::from_str(&json).unwrap();
@@ -709,6 +737,25 @@ mod tests {
         assert_eq!(loaded.nbd_container.as_deref(), Some("bcvk-nbd-test-vm"));
         assert_eq!(loaded.ssh_port, 2222);
         assert_eq!(loaded.log_path.as_deref(), Some("/tmp/test-vfkit.log"));
+        assert_eq!(loaded.backend, "podman");
+    }
+
+    #[test]
+    fn test_ephemeral_vm_metadata_backward_compat() {
+        // Old JSON without backend/rootfs_path fields should deserialize with defaults
+        let old_json = r#"{
+            "name": "old-vm",
+            "image": "test:latest",
+            "pid": 1,
+            "gvproxy_pid": 2,
+            "ssh_port": 2222,
+            "ssh_key": "/tmp/key",
+            "serial_log": "/tmp/serial.log",
+            "created": "2026-01-01T00:00:00Z"
+        }"#;
+        let loaded: EphemeralVmMetadata = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.backend, "podman");
+        assert!(loaded.rootfs_path.is_none());
     }
 
     #[test]
@@ -727,6 +774,8 @@ mod tests {
             created: "2026-05-04T00:00:00Z".to_string(),
             nbd_container: None,
             nbd_port: None,
+            backend: "podman".to_string(),
+            rootfs_path: None,
         };
         fs::write(&json_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
         let data = fs::read_to_string(&json_path).unwrap();
@@ -754,6 +803,8 @@ mod tests {
                 created: "2026-01-01T00:00:00Z".to_string(),
                 nbd_container: Some(format!("bcvk-nbd-vm-{i}")),
                 nbd_port: Some(10800 + i as u16),
+                backend: "podman".to_string(),
+                rootfs_path: None,
             };
             let path = dir.path().join(format!("vm-{i}.json"));
             fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();

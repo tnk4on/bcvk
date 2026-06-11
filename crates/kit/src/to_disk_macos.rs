@@ -1,12 +1,18 @@
-//! Install bootc images to disk on macOS using loopback devices via podman machine.
+//! Install bootc images to disk on macOS.
 //!
-//! Uses losetup inside podman machine to create loop devices from raw disk files
+//! Podman mode: uses losetup inside podman machine to create loop devices from raw disk files
 //! accessible via virtiofs, then runs `bootc install to-disk` targeting the loop device.
-//! Base disk caching with APFS clonefile (`cp -c`) provides fast VM creation.
+//!
+//! Native mode: boots a temporary vfkit VM from the source image, shares the apple/container
+//! content store via virtiofs as an OCI layout, and runs `bootc install to-disk` directly
+//! (no podman needed). The OCI blobs are read from the host via virtiofs without copying.
+//!
+//! Base disk caching with APFS clonefile (`cp -c`) provides fast VM creation in both modes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use clap::Parser;
 use color_eyre::eyre::{bail, Context};
@@ -14,10 +20,14 @@ use color_eyre::Result;
 use tracing::{debug, info};
 
 use crate::install_options::InstallOptions;
-use crate::run_ephemeral_macos::clear_xattr;
+use crate::run_ephemeral_macos::{
+    clear_xattr, ephemeral_base_dir, expose_port, find_available_ssh_port, find_vfkit,
+    generate_mac, start_gvproxy, VmCleanup,
+};
 use crate::vm_helpers::{
-    detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair, is_machine_rootful,
-    parse_size, remove_file_if_exists,
+    default_vcpus, detect_machine_name, ensure_image_and_get_digest, generate_ssh_keypair,
+    is_machine_rootful, parse_memory_to_mb, parse_size, remove_file_if_exists, run_ssh_command,
+    wait_for_ssh,
 };
 use sha2::{Digest, Sha256};
 
@@ -43,6 +53,9 @@ pub struct ToDiskMacosOpts {
     /// Check if the disk would be regenerated without actually creating it
     #[clap(long)]
     pub dry_run: bool,
+    /// Use native mode (apple/container CLI, no podman machine)
+    #[clap(long)]
+    pub native: bool,
 }
 
 fn base_dir() -> PathBuf {
@@ -293,6 +306,9 @@ pub fn clone_base_disk(base_path: &Path, vm_disk_path: &Path) -> Result<()> {
 
 /// Execute `bcvk to-disk` on macOS.
 pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
+    if opts.native {
+        return run_native(opts);
+    }
     let machine = detect_machine_name()?;
     let digest = ensure_image_and_get_digest(&opts.source_image)?;
     info!("image digest: {}...", &digest[..16.min(digest.len())]);
@@ -363,6 +379,363 @@ pub fn run(opts: ToDiskMacosOpts) -> Result<()> {
         opts.target_disk
     );
     Ok(())
+}
+
+/// Execute `bcvk to-disk --native` on macOS (no podman machine).
+fn run_native(opts: ToDiskMacosOpts) -> Result<()> {
+    crate::run_native_macos::check_prerequisites()?;
+    crate::run_native_macos::ensure_container_system()?;
+    let digest = crate::run_native_macos::pull_image(&opts.source_image)?;
+    info!("image digest: {}...", &digest[..16.min(digest.len())]);
+
+    let cache_hash = compute_cache_hash(&digest, &opts.source_image, &opts.install);
+    let short_hash: String = cache_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&cache_hash)
+        .chars()
+        .take(16)
+        .collect();
+    let base_disk_path = base_dir().join(format!("bootc-base-{}.raw", short_hash));
+
+    if opts.dry_run {
+        if base_disk_path.exists() {
+            if let Some(stored) = read_xattr(&base_disk_path, CACHE_HASH_XATTR) {
+                if stored == cache_hash {
+                    println!("Would reuse cached base disk: {}", base_disk_path.display());
+                    if Path::new(&opts.target_disk).exists() {
+                        println!("Output already exists: {}", opts.target_disk);
+                    } else {
+                        println!("Would create disk: {} (from base)", opts.target_disk);
+                    }
+                    return Ok(());
+                }
+            }
+            println!("Would regenerate base disk (hash mismatch)");
+        } else {
+            println!(
+                "Would create new base disk and output: {}",
+                opts.target_disk
+            );
+        }
+        return Ok(());
+    }
+
+    let base_disk_path = find_or_create_base_disk_native(
+        &opts.source_image,
+        &digest,
+        &opts.install,
+        &opts.disk_size,
+        &opts.install_log,
+    )?;
+
+    let target = Path::new(&opts.target_disk);
+    clone_base_disk(&base_disk_path, target)?;
+
+    let base_key = PathBuf::from(format!("{}.key", base_disk_path.display()));
+    let target_key = PathBuf::from(format!("{}.key", target.display()));
+    if base_key.exists() {
+        fs::copy(&base_key, &target_key).context("copying SSH key")?;
+        let base_pub = PathBuf::from(format!("{}.pub", base_key.display()));
+        let target_pub = PathBuf::from(format!("{}.pub", target_key.display()));
+        if base_pub.exists() {
+            fs::copy(&base_pub, &target_pub).context("copying SSH pubkey")?;
+        }
+    }
+
+    println!("Disk image created: {}", opts.target_disk);
+    println!("SSH key: {}", target_key.display());
+    println!(
+        "\nTo boot:  bcvk vm run --ssh-key {} {}",
+        target_key.display(),
+        opts.target_disk
+    );
+    Ok(())
+}
+
+/// Find or create a cached base disk using native mode (no podman machine).
+pub fn find_or_create_base_disk_native(
+    source_image: &str,
+    image_digest: &str,
+    install_options: &InstallOptions,
+    disk_size: &str,
+    install_log: &Option<String>,
+) -> Result<PathBuf> {
+    let cache_hash = compute_cache_hash(image_digest, source_image, install_options);
+    let short_hash = cache_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&cache_hash)
+        .chars()
+        .take(16)
+        .collect::<String>();
+
+    let base_dir = base_dir();
+    fs::create_dir_all(&base_dir)?;
+    let base_disk_name = format!("bootc-base-{}.raw", short_hash);
+    let base_disk_path = base_dir.join(&base_disk_name);
+
+    if base_disk_path.exists() {
+        debug!("checking existing base disk: {:?}", base_disk_path);
+        if let Some(stored_hash) = read_xattr(&base_disk_path, CACHE_HASH_XATTR) {
+            if stored_hash == cache_hash {
+                info!("reusing cached base disk: {:?}", base_disk_path);
+                return Ok(base_disk_path);
+            }
+            info!("base disk cache hash mismatch, recreating");
+        } else {
+            info!("base disk has no cache hash, recreating");
+        }
+        fs::remove_file(&base_disk_path)?;
+    }
+
+    info!("creating base disk (native mode): {:?}", base_disk_path);
+    let base_disk_str = base_disk_path.to_string_lossy().to_string();
+
+    let size_bytes = parse_size(disk_size)?;
+    create_raw_disk(&base_disk_str, size_bytes)?;
+
+    let key_path = PathBuf::from(format!("{}.key", base_disk_path.display()));
+    let ssh_pubkey = generate_ssh_keypair(&key_path)?;
+
+    if let Err(e) = run_bootc_install_in_native_vm(
+        source_image,
+        image_digest,
+        &base_disk_path,
+        &ssh_pubkey,
+        install_options,
+        install_log,
+    ) {
+        remove_file_if_exists(&base_disk_path);
+        remove_file_if_exists(&key_path);
+        remove_file_if_exists(&PathBuf::from(format!("{}.pub", key_path.display())));
+        return Err(e);
+    }
+
+    write_xattr(&base_disk_path, CACHE_HASH_XATTR, &cache_hash)?;
+
+    Ok(base_disk_path)
+}
+
+/// Boot a temporary native VM and run `bootc install to-disk` via virtiofs OCI layout.
+fn run_bootc_install_in_native_vm(
+    source_image: &str,
+    snapshot_digest: &str,
+    base_disk_path: &Path,
+    ssh_pubkey: &str,
+    install_options: &InstallOptions,
+    install_log: &Option<String>,
+) -> Result<()> {
+    let rootfs_path = crate::run_native_macos::find_rootfs_snapshot(snapshot_digest)?;
+    info!("rootfs snapshot: {}", rootfs_path.display());
+
+    let content_store = dirs::home_dir()
+        .expect("cannot determine home directory")
+        .join(crate::run_native_macos::CONTAINER_APP_ROOT)
+        .join("content");
+
+    let manifest_path = content_store.join("blobs/sha256").join(snapshot_digest);
+    let manifest_size = fs::metadata(&manifest_path)
+        .with_context(|| {
+            format!(
+                "manifest not found in content store: {}",
+                manifest_path.display()
+            )
+        })?
+        .len();
+
+    let (vmlinuz_data, initramfs_data, grub_data) =
+        crate::run_native_macos::read_boot_assets(&rootfs_path)?;
+    info!("read boot assets from ext4");
+
+    let combined_initramfs =
+        crate::run_native_macos::build_combined_initramfs_mem(&initramfs_data, ssh_pubkey)?;
+
+    let work_dir = ephemeral_base_dir().join(format!("todisk-install-{}", &snapshot_digest[..8]));
+    fs::create_dir_all(&work_dir)?;
+
+    let cmdline = "root=/dev/vdb ro rootfstype=ext4 console=tty0 console=hvc0 \
+                   loglevel=4 selinux=0 net.ifnames=0 systemd.journald.storage=volatile";
+    let esp_disk = work_dir.join("esp.img");
+    crate::run_native_macos::build_esp_disk_mem(
+        &vmlinuz_data,
+        &combined_initramfs,
+        &grub_data,
+        cmdline,
+        &esp_disk,
+    )?;
+
+    let efi_var_store = work_dir.join("efi-vars");
+    let serial_log = work_dir.join("serial.log");
+    let gvproxy_sock = work_dir.join("gvproxy.sock");
+    let services_sock = work_dir.join("gvproxy-svc.sock");
+    let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
+    let services_sock_str = services_sock.to_string_lossy().to_string();
+
+    info!("starting gvproxy for install VM...");
+    let gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
+
+    let mac = generate_mac();
+    let mac_str = format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
+    let vcpus = default_vcpus();
+    let memory_mb = parse_memory_to_mb("4G")?;
+
+    let vfkit_bin = find_vfkit()?;
+    let content_store_str = content_store.to_string_lossy().to_string();
+    let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());
+    let vfkit_args = vec![
+        "--cpus".to_string(),
+        vcpus.to_string(),
+        "--memory".to_string(),
+        memory_mb.to_string(),
+        "--bootloader".to_string(),
+        bootloader_arg,
+        "--device".to_string(),
+        format!("virtio-blk,path={}", esp_disk.display()),
+        "--device".to_string(),
+        format!("virtio-blk,path={},readonly", rootfs_path.display()),
+        "--device".to_string(),
+        format!("virtio-blk,path={}", base_disk_path.display()),
+        "--device".to_string(),
+        format!("virtio-fs,sharedDir={},mountTag=content", content_store_str),
+        "--device".to_string(),
+        format!(
+            "virtio-net,unixSocketPath={},mac={}",
+            gvproxy_sock_str, mac_str
+        ),
+        "--device".to_string(),
+        "virtio-rng".to_string(),
+        "--device".to_string(),
+        format!("virtio-serial,logFilePath={}", serial_log.display()),
+    ];
+
+    info!("launching install VM (virtiofs + OCI layout)...");
+    let vfkit_child = Command::new(&vfkit_bin)
+        .args(&vfkit_args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start vfkit for install VM")?;
+
+    let _cleanup = VmCleanup {
+        vfkit_pid: vfkit_child.id(),
+        gvproxy_pid: gvproxy_child.id(),
+        nbd_container: None,
+        nbd_port: None,
+        image: source_image.to_string(),
+        vm_name: format!("todisk-install-{}", &snapshot_digest[..8]),
+        backend: "native".to_string(),
+    };
+
+    let ssh_port = find_available_ssh_port();
+    info!("setting up SSH port forwarding (port {})...", ssh_port);
+    for attempt in 0..15u32 {
+        match expose_port(&services_sock_str, "192.168.127.2", ssh_port, 22) {
+            Ok(_) => {
+                info!("SSH port {} forwarded", ssh_port);
+                break;
+            }
+            Err(e) if attempt < 14 => {
+                debug!("SSH port forward attempt {}: {}", attempt, e);
+                let backoff = 200 * 2u64.pow(attempt.min(4));
+                std::thread::sleep(Duration::from_millis(backoff));
+            }
+            Err(e) => bail!("SSH port forward failed: {}", e),
+        }
+    }
+
+    let ssh_key_path = PathBuf::from(format!("{}.key", base_disk_path.display()));
+    wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
+
+    let index_json = format!(
+        r#"{{"schemaVersion":2,"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{digest}","size":{size},"platform":{{"architecture":"arm64","os":"linux"}}}}]}}"#,
+        digest = snapshot_digest,
+        size = manifest_size,
+    );
+
+    let script =
+        generate_native_bootc_install_script(&index_json, install_options, ssh_pubkey, install_log);
+
+    info!("running bootc install to-disk via virtiofs OCI layout...");
+    let status = run_ssh_command(ssh_port, &ssh_key_path, "root", &script)?;
+
+    if !status.success() {
+        bail!("bootc install to-disk failed in native VM");
+    }
+
+    info!("bootc install completed, shutting down install VM...");
+    drop(_cleanup);
+
+    if let Err(e) = fs::remove_dir_all(&work_dir) {
+        debug!("failed to clean up work dir: {}", e);
+    }
+
+    Ok(())
+}
+
+fn generate_native_bootc_install_script(
+    index_json: &str,
+    install_opts: &InstallOptions,
+    ssh_pubkey: &str,
+    install_log: &Option<String>,
+) -> String {
+    let bootc_args = install_opts
+        .to_bootc_args()
+        .iter()
+        .map(|a| {
+            shlex::try_quote(a)
+                .unwrap_or(std::borrow::Cow::Borrowed(a))
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    use base64::Engine;
+    let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(ssh_pubkey);
+
+    let rust_log_line = if let Some(ref level) = install_log {
+        format!(
+            "export RUST_LOG={}\n",
+            shlex::try_quote(level).unwrap_or(std::borrow::Cow::Borrowed(level))
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"set -euo pipefail
+{rust_log}
+printf '%s' '{b64}' | base64 -d > /dev/shm/bcvk-ssh-key.pub
+
+echo "Mounting OCI content store via virtiofs..."
+mkdir -p /mnt/content
+mount -t virtiofs content /mnt/content
+
+echo "Building OCI layout..."
+mkdir -p /tmp/oci/blobs
+ln -s /mnt/content/blobs/sha256 /tmp/oci/blobs/sha256
+printf '%s' '{{"imageLayoutVersion":"1.0.0"}}' > /tmp/oci/oci-layout
+cat > /tmp/oci/index.json << 'OCIEOF'
+{index_json}
+OCIEOF
+
+echo "Running bootc install to-disk..."
+bootc install to-disk \
+  --source-imgref oci:/tmp/oci \
+  --generic-image --skip-fetch-check --wipe \
+  --root-ssh-authorized-keys /dev/shm/bcvk-ssh-key.pub \
+  {bootc_args} /dev/vdc
+
+rm -f /dev/shm/bcvk-ssh-key.pub
+echo "Installation complete!"
+"#,
+        rust_log = rust_log_line,
+        b64 = pub_key_b64,
+        index_json = index_json,
+        bootc_args = bootc_args,
+    )
 }
 
 #[cfg(test)]
