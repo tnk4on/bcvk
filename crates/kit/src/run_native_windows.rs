@@ -17,6 +17,72 @@ use crate::vm_helpers::{
 };
 use crate::wslc_com;
 
+use std::process::{Command, Stdio};
+
+fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
+    let base = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("bcvk")
+        .join("ephemeral");
+    std::fs::create_dir_all(&base)?;
+
+    let vm_name = opts.name.clone().unwrap_or_else(|| {
+        format!(
+            "native-{:08x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32
+        )
+    });
+    let log_path = base.join(format!("bcvk-{vm_name}.log"));
+    let log_file = std::fs::File::create(&log_path)?;
+
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--detach" && a != "-d")
+        .collect();
+    if !args.contains(&"-K".to_string()) && !args.contains(&"--ssh-keygen".to_string()) {
+        args.push("-K".to_string());
+    }
+    if opts.name.is_none() {
+        args.push("--name".to_string());
+        args.push(vm_name.clone());
+    }
+    if opts.execute.is_empty() {
+        args.push("--execute".to_string());
+        args.push("sleep infinity".to_string());
+    }
+
+    let _child = Command::new(exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    let metadata = EphemeralVmMetadata {
+        name: vm_name.clone(),
+        image: opts.image.clone(),
+        vm_name: format!("bcvk-{vm_name}"),
+        ssh_port: 0,
+        ssh_key: base
+            .join(format!("{vm_name}-key"))
+            .to_string_lossy()
+            .to_string(),
+        nbd_container: None,
+        vsock_port: None,
+        subnet: 0,
+        created: chrono::Utc::now().to_rfc3339(),
+    };
+    metadata.save()?;
+
+    info!("started in background: {vm_name}");
+    info!("log: {}", log_path.display());
+    Ok(())
+}
+
 fn subnet_from_name(name: &str) -> u8 {
     let mut hash: u32 = 5381;
     for b in name.bytes() {
@@ -28,6 +94,10 @@ fn subnet_from_name(name: &str) -> u8 {
 pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     if opts.gui && opts.detach {
         bail!("--gui and --detach cannot be used together");
+    }
+
+    if opts.detach {
+        return run_detached(&opts);
     }
 
     let t_start = std::time::Instant::now();
@@ -146,13 +216,7 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
             ssh_key_path.display()
         );
 
-        // ── 12. Detach or execute or interactive ─────────────────
-        if opts.detach {
-            info!("VM running in background. Use: bcvk ephemeral ssh {name}");
-            // Don't cleanup — leave VM running
-            return Ok::<(), color_eyre::Report>(());
-        }
-
+        // ── 12. Execute or interactive ─────────────────────────────
         if !opts.execute.is_empty() {
             for cmd in &opts.execute {
                 run_ssh_command(ssh_port, &ssh_key_path, "root", cmd).map(|_| ())?;
