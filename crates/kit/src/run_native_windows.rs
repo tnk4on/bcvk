@@ -116,11 +116,10 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("image ready");
 
     // ── 2. Compute names and paths ────────────────────────────────
-    let vm_name_suffix = opts
+    let name = opts
         .name
         .clone()
-        .unwrap_or_else(|| digest_short[..8].to_string());
-    let name = format!("native-{vm_name_suffix}");
+        .unwrap_or_else(|| format!("native-{}", &digest_short[..8]));
     let vm_name = format!("bcvk-{name}");
 
     let cache_base = dirs::data_local_dir()
@@ -151,7 +150,12 @@ pub fn run(opts: RunEphemeralOpts) -> Result<()> {
     elapsed!("boot files ready");
 
     // ── 5. SSH keypair ────────────────────────────────────────────
-    let ssh_key_path = cache_base.join(format!("{name}-key"));
+    let ephemeral_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("bcvk")
+        .join("ephemeral");
+    std::fs::create_dir_all(&ephemeral_dir)?;
+    let ssh_key_path = ephemeral_dir.join(format!("{name}-key"));
     let need_ssh = opts.ssh_keygen || !opts.execute.is_empty();
     let ssh_pubkey = if need_ssh {
         crate::vm_helpers::generate_ssh_keypair(&ssh_key_path)?
