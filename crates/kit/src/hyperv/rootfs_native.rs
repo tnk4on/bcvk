@@ -200,7 +200,7 @@ fn populate_vhdx_from_tar(vhdx_path: &Path, tar_path: &Path) -> Result<()> {
          umount -f '{dev}' 2>/dev/null; \
          wipefs -a '{dev}' 2>/dev/null; \
          set -e && \
-         mkfs.ext4 -q -F '{dev}' && \
+         mkfs.ext4 -q -F -O ^orphan_file '{dev}' && \
          mkdir -p /mnt/bcvk-rootfs && \
          mount '{dev}' /mnt/bcvk-rootfs && \
          tar xf '{wsl_tar_path}' -C /mnt/bcvk-rootfs && \

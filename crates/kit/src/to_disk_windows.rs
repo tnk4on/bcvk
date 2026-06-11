@@ -506,21 +506,21 @@ fn list_wsl_block_devices(machine: &str) -> Result<Vec<String>> {
 /// Creates a bootable VHDX by exporting the container rootfs via
 /// IWSLCContainer::Export and writing it to an ext4 VHDX.
 fn run_native(opts: ToDiskWindowsOpts) -> Result<()> {
-    info!(image = %opts.image, output = %opts.output, "to-disk (native mode)");
+    info!(image = %opts.source_image, output = %opts.target_disk, "to-disk (native mode)");
 
     let session = crate::wslc_com::open_default_session()?;
-    crate::wslc_com::pull_image_auto_auth(&session, &opts.image)?;
-    let digest_short = session.inspect_image_digest(&opts.image)?;
+    crate::wslc_com::pull_image_auto_auth(&session, &opts.source_image)?;
+    let digest_short = session.inspect_image_digest(&opts.source_image)?;
 
     let cache_dir = base_dir();
     std::fs::create_dir_all(&cache_dir)?;
 
-    let output_path = std::path::PathBuf::from(opts.output.as_str());
+    let output_path = std::path::PathBuf::from(opts.target_disk.as_str());
 
     // Use rootfs_native to create the VHDX (with caching)
     let rootfs_vhdx = crate::hyperv::rootfs_native::create_rootfs_vhdx(
         &session,
-        &opts.image,
+        &opts.source_image,
         &digest_short,
         &cache_dir,
     )?;
