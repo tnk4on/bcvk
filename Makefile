@@ -67,4 +67,11 @@ update-manpages:
 
 update-generated: sync-manpages manpages
 
-.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options
+.PHONY: nbd-server-x86_64
+nbd-server-x86_64:
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+	  cargo build --target x86_64-unknown-linux-musl --release -p bcvk-nbd
+	cp target/x86_64-unknown-linux-musl/release/bcvk-nbd \
+	   crates/kit/bcvk-nbd-x86_64
+
+.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options nbd-server-x86_64

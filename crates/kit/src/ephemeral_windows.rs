@@ -1,0 +1,188 @@
+//! Windows ephemeral VM commands (Hyper-V backend).
+
+use clap::Subcommand;
+use color_eyre::Result;
+use std::io::Write;
+
+use crate::run_ephemeral_windows::{self, EphemeralVmMetadata, RunEphemeralOpts};
+use crate::vm_helpers::{run_ssh_command, run_ssh_interactive};
+
+#[derive(clap::Parser, Debug)]
+pub struct RunEphemeralSshOpts {
+    #[command(flatten)]
+    pub run_opts: RunEphemeralOpts,
+
+    /// SSH command to execute (optional, defaults to interactive shell)
+    #[arg(trailing_var_arg = true)]
+    pub ssh_args: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EphemeralCommands {
+    /// Run bootc containers as ephemeral Hyper-V VMs
+    #[clap(name = "run")]
+    Run(RunEphemeralOpts),
+
+    /// Run ephemeral VM and SSH into it
+    #[clap(name = "run-ssh")]
+    RunSsh(RunEphemeralSshOpts),
+
+    /// Connect to a running ephemeral VM via SSH
+    #[clap(name = "ssh")]
+    Ssh {
+        /// VM name
+        name: String,
+
+        /// Additional SSH arguments
+        #[clap(allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// List ephemeral VMs
+    #[clap(name = "ps")]
+    Ps {
+        /// Output as JSON
+        #[clap(long)]
+        json: bool,
+    },
+
+    /// Remove all ephemeral VMs
+    #[clap(name = "rm-all")]
+    RmAll {
+        /// Force removal without confirmation
+        #[clap(short, long)]
+        force: bool,
+    },
+}
+
+impl EphemeralCommands {
+    pub fn run(self) -> Result<()> {
+        match self {
+            Self::Run(opts) => run_ephemeral_windows::run(opts),
+            Self::RunSsh(mut opts) => {
+                opts.run_opts.ssh_keygen = true;
+                if !opts.ssh_args.is_empty() {
+                    let combined = shlex::try_join(opts.ssh_args.iter().map(|s| s.as_str()))
+                        .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH args: {}", e))?;
+                    opts.run_opts.execute.push(combined);
+                }
+                run_ephemeral_windows::run(opts.run_opts)
+            }
+            Self::Ssh { name, args } => cmd_ssh(&name, &args),
+            Self::Ps { json } => cmd_ps(json),
+            Self::RmAll { force } => cmd_rm_all(force),
+        }
+    }
+}
+
+fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
+    let vm = EphemeralVmMetadata::load(name)?;
+
+    let key_path = std::path::Path::new(&vm.ssh_key);
+    if args.is_empty() {
+        run_ssh_interactive(vm.ssh_port, key_path, "root")?;
+    } else {
+        let combined = shlex::try_join(args.iter().map(|s| s.as_str()))
+            .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH command: {}", e))?;
+        let status = run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_ps(json: bool) -> Result<()> {
+    let vms = EphemeralVmMetadata::list_all()?;
+
+    // Check VM state and remove dead entries
+    let live: Vec<_> = vms
+        .into_iter()
+        .filter(|vm| match crate::hyperv::vm::get_vm_state(&vm.vm_name) {
+            Ok(state) if state.contains("Running") => true,
+            _ => {
+                EphemeralVmMetadata::remove(&vm.name);
+                false
+            }
+        })
+        .collect();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&live)?);
+        return Ok(());
+    }
+
+    if live.is_empty() {
+        println!("No running ephemeral VMs.");
+        return Ok(());
+    }
+
+    println!("{:<24} {:<50} SSH", "NAME", "IMAGE");
+    for vm in &live {
+        println!(
+            "{:<24} {:<50} ssh -p {} -i {} root@localhost",
+            vm.name, vm.image, vm.ssh_port, vm.ssh_key
+        );
+    }
+    Ok(())
+}
+
+fn cmd_rm_all(force: bool) -> Result<()> {
+    let vms = EphemeralVmMetadata::list_all()?;
+    if vms.is_empty() {
+        println!("No ephemeral VMs found.");
+        return Ok(());
+    }
+
+    if !force {
+        println!("Found {} ephemeral VM(s):", vms.len());
+        for vm in &vms {
+            let state = crate::hyperv::vm::get_vm_state(&vm.vm_name)
+                .unwrap_or_else(|_| "unknown".to_string());
+            println!("  {} ({})", vm.name, state.to_lowercase());
+        }
+        print!("Remove all ephemeral VMs? [y/N]: ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Kill detached bcvk ephemeral processes before removing VMs.
+    // run_detached() spawns a child that may re-save metadata via
+    // start_vm_and_services(), so we must kill it first.
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \
+             \"Name='bcvk.exe' AND CommandLine LIKE '%ephemeral%run%' \
+             AND CommandLine NOT LIKE '%rm-all%'\" \
+             -EA SilentlyContinue | \
+             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    for vm in &vms {
+        if let Err(e) = crate::hyperv::vm::remove_vm(&vm.vm_name) {
+            tracing::debug!("failed to remove VM {}: {}", vm.vm_name, e);
+        }
+        crate::hyperv::vm::remove_internal_switch(&vm.vm_name);
+        if let Some(ref nbd) = vm.nbd_container {
+            crate::nbd_windows::stop_nbd_server(nbd);
+        }
+        EphemeralVmMetadata::remove(&vm.name);
+        println!("Removed {}", vm.name);
+    }
+
+    // Sweep orphaned bcvk-nbd systemd units
+    crate::nbd_windows::sweep_orphaned_nbd_units();
+
+    Ok(())
+}

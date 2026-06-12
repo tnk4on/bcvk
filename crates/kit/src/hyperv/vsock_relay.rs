@@ -1,0 +1,711 @@
+//! Hyper-V vsock relay with NBD caching: bridge hv_sock connections between two VMs.
+//!
+//! Parses NBD protocol to cache read responses on the Host side.
+//! Cache hits are served directly (2 VMBus hops instead of 4),
+//! improving throughput from ~400 MB/s to ~900 MB/s for cached data.
+//!
+//! ## Architecture: Host-initiated connections
+//!
+//! The relay initiates connections FROM the Host TO both VMs (podman + ephemeral).
+//! This is critical for performance: Hyper-V hv_sock has a ~10x throughput asymmetry
+//! based on connection direction (Guest-initiated ~120 MB/s vs Host-initiated ~1 GB/s)
+//! due to VMBus ring buffer handling differences.
+//!
+//! ## Data path
+//!
+//! ```text
+//! Cache miss (4 VMBus hops):
+//!   VM → Host relay → podman/nbdkit → Host relay → VM
+//!
+//! Cache hit (2 VMBus hops):
+//!   VM → Host relay (HashMap lookup) → VM
+//! ```
+//!
+//! The prefetch thread pre-populates the cache with the first 256 MB (boot-critical
+//! regions) via a dedicated podman connection, running in parallel with relay setup.
+
+use color_eyre::Result;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+use tracing::{debug, info};
+
+use std::io;
+use std::mem;
+use std::os::windows::io::RawSocket;
+use std::sync::{Mutex, RwLock};
+
+use windows::core::GUID;
+use windows::Win32::Networking::WinSock as ws;
+
+const AF_HYPERV: i32 = 34;
+const HV_PROTOCOL_RAW: i32 = 1;
+const SOCKET_BUF_SIZE: i32 = 4 * 1024 * 1024;
+
+const NBD_REQUEST_MAGIC: u32 = 0x25609513;
+const NBD_REPLY_MAGIC: u32 = 0x67446698;
+const NBD_CMD_READ: u16 = 0;
+
+#[repr(C)]
+struct SockaddrHv {
+    family: u16,
+    reserved: u16,
+    vm_id: GUID,
+    service_id: GUID,
+}
+
+fn vsock_service_id(port: u32) -> GUID {
+    GUID {
+        data1: port,
+        data2: 0xFACB,
+        data3: 0x11E6,
+        data4: [0xBD, 0x58, 0x64, 0x00, 0x6A, 0x79, 0x86, 0xD3],
+    }
+}
+
+fn parse_vm_guid(s: &str) -> Result<GUID> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        color_eyre::eyre::bail!("invalid VM GUID: {}", s);
+    }
+    let data1 = u32::from_str_radix(parts[0], 16)?;
+    let data2 = u16::from_str_radix(parts[1], 16)?;
+    let data3 = u16::from_str_radix(parts[2], 16)?;
+    let mut data4 = [0u8; 8];
+    let hi = u16::from_str_radix(parts[3], 16)?;
+    data4[0] = (hi >> 8) as u8;
+    data4[1] = (hi & 0xFF) as u8;
+    let lo_hex = parts[4];
+    for i in 0..6 {
+        data4[2 + i] = u8::from_str_radix(&lo_hex[i * 2..i * 2 + 2], 16)?;
+    }
+    Ok(GUID {
+        data1,
+        data2,
+        data3,
+        data4,
+    })
+}
+
+fn to_socket(sock: RawSocket) -> ws::SOCKET {
+    ws::SOCKET(sock as usize)
+}
+
+// --- NBD cache ---
+
+type NbdCache = Arc<RwLock<HashMap<u64, Vec<u8>>>>;
+type VmSockLock = Arc<Mutex<RawSocket>>;
+
+fn cache_new() -> NbdCache {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+// --- Socket helpers ---
+
+fn wsa_recv_exact(sock: RawSocket, buf: &mut [u8]) -> bool {
+    let mut done: usize = 0;
+    while done < buf.len() {
+        let n = unsafe { ws::recv(to_socket(sock), &mut buf[done..], ws::MSG_WAITALL) };
+        if n <= 0 {
+            return false;
+        }
+        done += n as usize;
+    }
+    true
+}
+
+fn wsa_send_all(sock: RawSocket, buf: &[u8]) -> bool {
+    let mut done: usize = 0;
+    while done < buf.len() {
+        let n = unsafe { ws::send(to_socket(sock), &buf[done..], ws::SEND_RECV_FLAGS(0)) };
+        if n <= 0 {
+            return false;
+        }
+        done += n as usize;
+    }
+    true
+}
+
+// --- Prefetch: read all sectors from podman into cache ---
+
+/// Prefetch boot-critical regions: GPT + ESP + EROFS metadata (~256 MB)
+/// Remaining sectors are cached on-demand as VM reads them.
+fn prefetch_boot_regions(podman_sock: RawSocket, cache: NbdCache) {
+    // Handshake
+    let mut hs = [0u8; 18];
+    if !wsa_recv_exact(podman_sock, &mut hs) {
+        return;
+    }
+    let mut client_hs = [0u8; 20];
+    client_hs[0..4].copy_from_slice(&1u32.to_be().to_ne_bytes());
+    client_hs[4..12].copy_from_slice(&0x49484156454F5054u64.to_be().to_ne_bytes());
+    client_hs[12..16].copy_from_slice(&1u32.to_be().to_ne_bytes());
+    client_hs[16..20].copy_from_slice(&0u32.to_be().to_ne_bytes());
+    if !wsa_send_all(podman_sock, &client_hs) {
+        return;
+    }
+    let mut reply = [0u8; 134];
+    if !wsa_recv_exact(podman_sock, &mut reply) {
+        return;
+    }
+    let export_size = u64::from_be_bytes(reply[0..8].try_into().unwrap());
+
+    // Prefetch head (GPT + ESP + early EROFS) and tail (EROFS metadata at image end)
+    const PREFETCH_HEAD: u64 = 256 * 1024 * 1024;
+    const PREFETCH_TAIL: u64 = 256 * 1024 * 1024;
+    let chunk_size: u32 = 512 * 1024;
+    let mut cached_bytes: u64 = 0;
+    let start = std::time::Instant::now();
+
+    let mut regions: Vec<(u64, u64)> = vec![(0, std::cmp::min(PREFETCH_HEAD, export_size))];
+    if export_size > PREFETCH_HEAD + PREFETCH_TAIL {
+        regions.push((export_size - PREFETCH_TAIL, export_size));
+    }
+
+    for (region_start, region_end) in &regions {
+        let mut offset = *region_start;
+        while offset < *region_end {
+            let len = std::cmp::min(chunk_size as u64, *region_end - offset) as u32;
+            let mut req = [0u8; 28];
+            req[0..4].copy_from_slice(&NBD_REQUEST_MAGIC.to_be_bytes());
+            req[8..16].copy_from_slice(&offset.to_be_bytes());
+            req[16..24].copy_from_slice(&offset.to_be_bytes());
+            req[24..28].copy_from_slice(&len.to_be_bytes());
+            if !wsa_send_all(podman_sock, &req) {
+                break;
+            }
+
+            let mut reply_hdr = [0u8; 16];
+            if !wsa_recv_exact(podman_sock, &mut reply_hdr) {
+                break;
+            }
+            if u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap()) != 0 {
+                break;
+            }
+
+            let mut data = vec![0u8; len as usize];
+            if !wsa_recv_exact(podman_sock, &mut data) {
+                break;
+            }
+
+            cache.write().unwrap().insert(offset, data);
+            cached_bytes += len as u64;
+            offset += len as u64;
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let speed = if elapsed.as_secs_f64() > 0.0 {
+        (cached_bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    info!(
+        "prefetch: boot regions {} MB in {:.1}s ({:.0} MB/s), {} entries",
+        cached_bytes / (1024 * 1024),
+        elapsed.as_secs_f64(),
+        speed,
+        cache.read().unwrap().len()
+    );
+
+    unsafe {
+        ws::closesocket(to_socket(podman_sock));
+    }
+}
+
+// --- NBD-aware caching relay with request tracking ---
+
+struct PendingRead {
+    offset: u64,
+    length: usize,
+}
+
+type PendingMap = Arc<RwLock<HashMap<u64, PendingRead>>>;
+
+fn relay_vm_to_podman_tracked(
+    vm_sock: RawSocket,
+    podman_sock: RawSocket,
+    cache: NbdCache,
+    pending: PendingMap,
+    vm_write: VmSockLock,
+) {
+    let mut handshake = [0u8; 20];
+    if !wsa_recv_exact(vm_sock, &mut handshake) {
+        tracing::warn!("vsock relay: NBD handshake recv from VM failed");
+        return;
+    }
+    if !wsa_send_all(podman_sock, &handshake) {
+        tracing::warn!("vsock relay: NBD handshake send to podman failed");
+        return;
+    }
+
+    let mut req_count: u64 = 0;
+    let mut cache_hits: u64 = 0;
+    let mut cache_misses: u64 = 0;
+    loop {
+        let mut hdr = [0u8; 28];
+        if !wsa_recv_exact(vm_sock, &mut hdr) {
+            info!(
+                "relay VM→podman: recv failed after {} requests ({} hits, {} misses)",
+                req_count, cache_hits, cache_misses
+            );
+            break;
+        }
+
+        let magic = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+        if magic != NBD_REQUEST_MAGIC {
+            if !wsa_send_all(podman_sock, &hdr) {
+                break;
+            }
+            continue;
+        }
+
+        let cmd = u16::from_be_bytes(hdr[6..8].try_into().unwrap());
+        let handle = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+        let offset = u64::from_be_bytes(hdr[16..24].try_into().unwrap());
+        let length = u32::from_be_bytes(hdr[24..28].try_into().unwrap()) as usize;
+
+        req_count += 1;
+        if cmd == NBD_CMD_READ {
+            let cache_hit = {
+                let c = cache.read().unwrap();
+                if let Some(d) = c.get(&offset) {
+                    if d.len() == length {
+                        Some(d.clone())
+                    } else if d.len() > length {
+                        Some(d[..length].to_vec())
+                    } else {
+                        None
+                    }
+                } else {
+                    let chunk_size: u64 = 512 * 1024;
+                    let chunk_start = (offset / chunk_size) * chunk_size;
+                    let inner_offset = (offset - chunk_start) as usize;
+                    c.get(&chunk_start).and_then(|d| {
+                        if inner_offset + length <= d.len() {
+                            Some(d[inner_offset..inner_offset + length].to_vec())
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
+            if let Some(cached_data) = cache_hit {
+                cache_hits += 1;
+                let mut reply_buf = vec![0u8; 16 + length];
+                reply_buf[0..4].copy_from_slice(&NBD_REPLY_MAGIC.to_be_bytes());
+                reply_buf[8..16].copy_from_slice(&handle.to_be_bytes());
+                reply_buf[16..].copy_from_slice(&cached_data);
+                let sock = vm_write.lock().unwrap();
+                if !wsa_send_all(*sock, &reply_buf) {
+                    break;
+                }
+                drop(sock);
+                continue;
+            }
+            cache_misses += 1;
+            debug!("relay cache MISS: offset={}, length={}", offset, length);
+            pending
+                .write()
+                .unwrap()
+                .insert(handle, PendingRead { offset, length });
+        }
+
+        if !wsa_send_all(podman_sock, &hdr) {
+            break;
+        }
+
+        if cmd == 1 {
+            let mut data = vec![0u8; length];
+            if !wsa_recv_exact(vm_sock, &mut data) {
+                break;
+            }
+            if !wsa_send_all(podman_sock, &data) {
+                break;
+            }
+        }
+    }
+}
+
+fn relay_podman_to_vm_tracked(
+    podman_sock: RawSocket,
+    cache: NbdCache,
+    pending: PendingMap,
+    vm_write: VmSockLock,
+) {
+    let mut hs1 = [0u8; 18];
+    if !wsa_recv_exact(podman_sock, &mut hs1) {
+        return;
+    }
+    {
+        let sock = vm_write.lock().unwrap();
+        if !wsa_send_all(*sock, &hs1) {
+            return;
+        }
+    }
+    let mut hs2 = [0u8; 134];
+    if !wsa_recv_exact(podman_sock, &mut hs2) {
+        return;
+    }
+    {
+        let sock = vm_write.lock().unwrap();
+        if !wsa_send_all(*sock, &hs2) {
+            return;
+        }
+    }
+
+    loop {
+        let mut reply_hdr = [0u8; 16];
+        if !wsa_recv_exact(podman_sock, &mut reply_hdr) {
+            break;
+        }
+
+        let magic = u32::from_be_bytes(reply_hdr[0..4].try_into().unwrap());
+        if magic != NBD_REPLY_MAGIC {
+            let sock = vm_write.lock().unwrap();
+            if !wsa_send_all(*sock, &reply_hdr) {
+                break;
+            }
+            continue;
+        }
+
+        let error = u32::from_be_bytes(reply_hdr[4..8].try_into().unwrap());
+        let handle = u64::from_be_bytes(reply_hdr[8..16].try_into().unwrap());
+
+        let pending_read = pending.write().unwrap().remove(&handle);
+
+        if let Some(pr) = pending_read {
+            if error == 0 {
+                let mut data = vec![0u8; pr.length];
+                if !wsa_recv_exact(podman_sock, &mut data) {
+                    break;
+                }
+
+                cache.write().unwrap().insert(pr.offset, data.clone());
+
+                let mut reply_buf = vec![0u8; 16 + pr.length];
+                reply_buf[0..16].copy_from_slice(&reply_hdr);
+                reply_buf[16..].copy_from_slice(&data);
+                let sock = vm_write.lock().unwrap();
+                if !wsa_send_all(*sock, &reply_buf) {
+                    break;
+                }
+            } else {
+                let sock = vm_write.lock().unwrap();
+                if !wsa_send_all(*sock, &reply_hdr) {
+                    break;
+                }
+            }
+        } else {
+            let sock = vm_write.lock().unwrap();
+            if !wsa_send_all(*sock, &reply_hdr) {
+                break;
+            }
+        }
+    }
+}
+
+// --- Public API ---
+
+#[derive(Debug)]
+pub struct VsockRelay {
+    stop: Arc<Notify>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl VsockRelay {
+    pub async fn start(
+        vsock_port: u32,
+        num_connections: u32,
+        podman_vm_guid: &str,
+        ephemeral_vm_guid: &str,
+    ) -> Result<Self> {
+        let podman_guid = parse_vm_guid(podman_vm_guid)?;
+        let ephemeral_guid = parse_vm_guid(ephemeral_vm_guid)?;
+        let stop = Arc::new(Notify::new());
+        let mut handles = Vec::new();
+        let cache = cache_new();
+
+        // Prefetch boot regions after relay's podman connection succeeds
+        let (prefetch_tx, prefetch_rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let pod_prefetch = podman_guid.clone();
+            let cache_prefetch = cache.clone();
+            tokio::task::spawn_blocking(move || {
+                if prefetch_rx.blocking_recv().is_err() {
+                    return;
+                }
+                info!("vsock relay: prefetching boot regions from podman");
+                let podman_sock =
+                    match unsafe { hvsock_connect_retry(&pod_prefetch, vsock_port, 10, 200) } {
+                        Ok(s) => s,
+                        Err(e) => {
+                            info!("vsock relay: prefetch connect failed: {}", e);
+                            return;
+                        }
+                    };
+                prefetch_boot_regions(podman_sock, cache_prefetch);
+            });
+        }
+
+        let mut connect_handles = Vec::new();
+        let prefetch_tx = std::sync::Mutex::new(Some(prefetch_tx));
+        let prefetch_tx = std::sync::Arc::new(prefetch_tx);
+        for i in 0..num_connections {
+            let pod_g = podman_guid.clone();
+            let eph_g = ephemeral_guid.clone();
+            let stop_clone = stop.clone();
+            let cache_clone = cache.clone();
+            let prefetch_tx_clone = prefetch_tx.clone();
+            connect_handles.push(tokio::task::spawn_blocking(
+                move || -> Option<JoinHandle<()>> {
+                    info!(
+                        "vsock relay[{}]: connecting to podman machine (port {})",
+                        i, vsock_port
+                    );
+                    let podman_sock =
+                        match unsafe { hvsock_connect_retry(&pod_g, vsock_port, 75, 200) } {
+                            Ok(s) => s,
+                            Err(e) => {
+                                info!("vsock relay[{}]: podman connect failed: {}", i, e);
+                                return None;
+                            }
+                        };
+                    if let Some(tx) = prefetch_tx_clone.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    info!(
+                        "vsock relay[{}]: connecting to ephemeral VM (port {}, with retry)",
+                        i, vsock_port
+                    );
+                    let vm_sock =
+                        match unsafe { hvsock_connect_retry(&eph_g, vsock_port, 300, 200) } {
+                            Ok(s) => s,
+                            Err(e) => {
+                                info!("vsock relay[{}]: VM connect failed: {}", i, e);
+                                unsafe {
+                                    ws::closesocket(to_socket(podman_sock));
+                                }
+                                return None;
+                            }
+                        };
+                    info!("vsock relay[{}]: connected both sides", i);
+                    let idx = i;
+                    let sc = stop_clone;
+                    let cc = cache_clone;
+                    let pod_g2 = pod_g.clone();
+                    let eph_g2 = eph_g.clone();
+                    Some(tokio::spawn(async move {
+                        let relay_task = tokio::task::spawn_blocking(move || {
+                            relay_one_connection_cached(vm_sock, podman_sock, cc.clone());
+                            // Connection dropped (e.g. switch_root) — retry VM only.
+                            // podman_sock is kept alive so nbdkit doesn't die.
+                            {
+                                info!(
+                                    "vsock relay[{}]: connection closed, attempting reconnect",
+                                    idx,
+                                );
+                                let new_vm = match unsafe {
+                                    hvsock_connect_retry(&eph_g2, vsock_port, 5, 200)
+                                } {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        info!("vsock relay[{}]: reconnect failed: {}", idx, e);
+                                        // skip relay retry
+                                        unsafe {
+                                            ws::closesocket(to_socket(podman_sock));
+                                        }
+                                        return;
+                                    }
+                                };
+                                info!("vsock relay[{}]: reconnected", idx);
+                                relay_one_connection_cached(new_vm, podman_sock, cc.clone());
+                            }
+                            // Final cleanup: close podman socket
+                            unsafe {
+                                ws::closesocket(to_socket(podman_sock));
+                            }
+                        });
+                        tokio::select! {
+                            _ = sc.notified() => { debug!("vsock relay[{}]: stop requested", idx); }
+                            _ = relay_task => { debug!("vsock relay[{}]: relay finished", idx); }
+                        }
+                    }))
+                },
+            ));
+        }
+
+        for ch in connect_handles {
+            if let Ok(Some(h)) = ch.await {
+                handles.push(h);
+            }
+        }
+
+        info!(
+            "vsock relay: {} connections established (NBD caching enabled)",
+            handles.len()
+        );
+
+        Ok(Self { stop, handles })
+    }
+
+    #[allow(dead_code)]
+    pub fn stop(&self) {
+        self.stop.notify_waiters();
+    }
+}
+
+impl Drop for VsockRelay {
+    fn drop(&mut self) {
+        self.stop.notify_waiters();
+        for h in &self.handles {
+            h.abort();
+        }
+    }
+}
+
+fn relay_one_connection_cached(vm_sock: RawSocket, podman_sock: RawSocket, cache: NbdCache) {
+    let pending: PendingMap = Arc::new(RwLock::new(HashMap::new()));
+    let vm_write: VmSockLock = Arc::new(Mutex::new(vm_sock));
+
+    let cache_req = cache.clone();
+    let pending_req = pending.clone();
+    let vm_w1 = vm_write.clone();
+    let t1 = std::thread::spawn(move || {
+        relay_vm_to_podman_tracked(vm_sock, podman_sock, cache_req, pending_req, vm_w1);
+    });
+
+    let cache_reply = cache.clone();
+    let pending_reply = pending.clone();
+    let vm_w2 = vm_write.clone();
+    let t2 = std::thread::spawn(move || {
+        relay_podman_to_vm_tracked(podman_sock, cache_reply, pending_reply, vm_w2);
+    });
+
+    if let Err(e) = t1.join() {
+        tracing::debug!("relay thread 1 panicked: {:?}", e);
+    }
+    if let Err(e) = t2.join() {
+        tracing::debug!("relay thread 2 panicked: {:?}", e);
+    }
+
+    // Only close the VM socket; keep podman socket alive so nbdkit survives
+    // across VM-side reconnections (e.g. after switch_root).
+    unsafe {
+        ws::closesocket(to_socket(vm_sock));
+    }
+}
+
+// --- Windows socket operations (via `windows` crate) ---
+
+static WSA_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_wsa() {
+    WSA_INIT.call_once(|| {
+        let mut data = ws::WSADATA::default();
+        unsafe {
+            ws::WSAStartup(0x0202, &mut data);
+        }
+    });
+}
+
+unsafe fn hvsock_connect(vm_guid: &GUID, port: u32) -> Result<RawSocket> {
+    ensure_wsa();
+    let sock = ws::socket(AF_HYPERV, ws::SOCK_STREAM, HV_PROTOCOL_RAW)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let raw = sock.0 as RawSocket;
+
+    let mut nonblock: u32 = 1;
+    ws::ioctlsocket(sock, ws::FIONBIO as i32, &mut nonblock);
+
+    let addr = SockaddrHv {
+        family: AF_HYPERV as u16,
+        reserved: 0,
+        vm_id: *vm_guid,
+        service_id: vsock_service_id(port),
+    };
+    let rc = ws::connect(
+        sock,
+        &addr as *const SockaddrHv as *const ws::SOCKADDR,
+        mem::size_of::<SockaddrHv>() as i32,
+    );
+    if rc != 0 {
+        let err = ws::WSAGetLastError();
+        const WSAEWOULDBLOCK: i32 = 10035;
+        if err.0 != WSAEWOULDBLOCK {
+            debug!(
+                "hvsock_connect: immediate error WSA {} ({})",
+                err.0,
+                io::Error::from_raw_os_error(err.0)
+            );
+            ws::closesocket(sock);
+            return Err(io::Error::from_raw_os_error(err.0).into());
+        }
+        let mut wfds = ws::FD_SET::default();
+        wfds.fd_count = 1;
+        wfds.fd_array[0] = sock;
+        let timeout = ws::TIMEVAL {
+            tv_sec: 0,
+            tv_usec: 200_000,
+        };
+        let n = ws::select(0, None, Some(&mut wfds), None, Some(&timeout));
+        if n <= 0 {
+            let select_err = if n < 0 { ws::WSAGetLastError().0 } else { 0 };
+            debug!(
+                "hvsock_connect: select returned {} (WSA err {}, timeout 200ms)",
+                n, select_err
+            );
+            ws::closesocket(sock);
+            return Err(color_eyre::eyre::eyre!("connect timed out (200ms)"));
+        }
+    }
+
+    let mut blocking: u32 = 0;
+    ws::ioctlsocket(sock, ws::FIONBIO as i32, &mut blocking);
+
+    let sockbuf: i32 = SOCKET_BUF_SIZE;
+    let buf_bytes = sockbuf.to_ne_bytes();
+    ws::setsockopt(
+        sock,
+        ws::SOL_SOCKET as i32,
+        ws::SO_RCVBUF as i32,
+        Some(&buf_bytes),
+    );
+    ws::setsockopt(
+        sock,
+        ws::SOL_SOCKET as i32,
+        ws::SO_SNDBUF as i32,
+        Some(&buf_bytes),
+    );
+    Ok(raw)
+}
+
+unsafe fn hvsock_connect_retry(
+    vm_guid: &GUID,
+    port: u32,
+    max_attempts: u32,
+    interval_ms: u64,
+) -> Result<RawSocket> {
+    for attempt in 1..=max_attempts {
+        match hvsock_connect(vm_guid, port) {
+            Ok(sock) => return Ok(sock),
+            Err(e) => {
+                if attempt == max_attempts {
+                    return Err(color_eyre::eyre::eyre!(
+                        "vsock relay: failed to connect after {} attempts: {}",
+                        max_attempts,
+                        e
+                    ));
+                }
+                debug!(
+                    "vsock relay: attempt {}/{} failed ({}), retrying in {}ms",
+                    attempt, max_attempts, e, interval_ms
+                );
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        }
+    }
+    unreachable!()
+}
