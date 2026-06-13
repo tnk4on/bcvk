@@ -158,7 +158,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
-        if let Some(ref name) = vm.nbd_container {
+        if let Some(ref name) = vm.nbd_unit {
             crate::nbd_macos::stop_nbd_server(name, vm.nbd_port);
         }
         EphemeralVmMetadata::remove(&vm.name);

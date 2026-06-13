@@ -2,7 +2,7 @@
 //!
 //! Boot flow (fully diskless):
 //! 1. Mount container image overlay (`podman image mount`)
-//! 2. Start nbdkit with erofs plugin in TCP mode (port forwarded via gvproxy)
+//! 2. Start bcvk-nbd server in TCP mode (port forwarded via gvproxy)
 //! 3. Launch vfkit with EFI boot via NBD TCP + virtio-net (gvproxy)
 //! 4. Wait for SSH and execute commands
 //!
@@ -56,9 +56,9 @@ pub struct EphemeralVmMetadata {
     pub log_path: Option<String>,
     /// ISO 8601 timestamp when the VM was created.
     pub created: String,
-    /// Name of the nbdkit podman container serving the rootfs.
+    /// Systemd unit name of the bcvk-nbd server serving the rootfs.
     #[serde(default)]
-    pub nbd_container: Option<String>,
+    pub nbd_unit: Option<String>,
     /// NBD port allocated for this VM's rootfs.
     #[serde(default)]
     pub nbd_port: Option<u16>,
@@ -163,7 +163,7 @@ pub struct RunEphemeralOpts {
 struct VmCleanup {
     vfkit_pid: u32,
     gvproxy_pid: u32,
-    nbd_container: Option<String>,
+    nbd_unit: Option<String>,
     nbd_port: Option<u16>,
     image: String,
     vm_name: String,
@@ -172,7 +172,7 @@ struct VmCleanup {
 impl Drop for VmCleanup {
     fn drop(&mut self) {
         tracing::debug!("cleaning up VM processes...");
-        if let Some(ref name) = self.nbd_container {
+        if let Some(ref name) = self.nbd_unit {
             crate::nbd_macos::stop_nbd_server(name, self.nbd_port);
         }
         if let Err(e) = rustix::process::kill_process(
@@ -281,7 +281,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
 
     let nbd_port = crate::nbd_macos::find_available_nbd_port();
     info!("NBD transport: TCP (port {})", nbd_port);
-    let nbd_container_name = crate::nbd_macos::start_nbd_server(
+    let nbd_unit_name = crate::nbd_macos::start_nbd_server(
         &machine,
         &merged_path,
         &cmdline,
@@ -384,7 +384,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         serial_log: serial_log.to_string_lossy().to_string(),
         log_path: None,
         created: chrono::Utc::now().to_rfc3339(),
-        nbd_container: Some(nbd_container_name.clone()),
+        nbd_unit: Some(nbd_unit_name.clone()),
         nbd_port: Some(nbd_port),
     };
     metadata.save()?;
@@ -392,7 +392,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let _cleanup = VmCleanup {
         vfkit_pid: vfkit_child.id(),
         gvproxy_pid: gvproxy_child.id(),
-        nbd_container: Some(nbd_container_name.clone()),
+        nbd_unit: Some(nbd_unit_name.clone()),
         nbd_port: Some(nbd_port),
         image: opts.image.clone(),
         vm_name: vm_name.clone(),
@@ -452,7 +452,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     std::mem::forget(_cleanup);
     let status = vfkit_child.wait()?;
     info!("vfkit exited: {}", status);
-    crate::nbd_macos::stop_nbd_server(&nbd_container_name, Some(nbd_port));
+    crate::nbd_macos::stop_nbd_server(&nbd_unit_name, Some(nbd_port));
     if let Err(e) = gvproxy_child.kill() {
         tracing::debug!("failed to kill gvproxy: {}", e);
     }
@@ -523,7 +523,7 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
         serial_log: String::new(),
         log_path: Some(log_path.to_string_lossy().to_string()),
         created: chrono::Utc::now().to_rfc3339(),
-        nbd_container: None,
+        nbd_unit: None,
         nbd_port: None,
     };
     metadata.save()?;
@@ -698,7 +698,7 @@ mod tests {
             serial_log: "/tmp/test-serial.log".to_string(),
             log_path: Some("/tmp/test-vfkit.log".to_string()),
             created: "2026-01-01T00:00:00Z".to_string(),
-            nbd_container: Some("bcvk-nbd-test-vm".to_string()),
+            nbd_unit: Some("bcvk-nbd-test-vm".to_string()),
             nbd_port: Some(10841),
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(loaded.name, "test-vm");
         assert_eq!(loaded.image, "quay.io/fedora/fedora-bootc:42");
         assert_eq!(loaded.pid, 12345);
-        assert_eq!(loaded.nbd_container.as_deref(), Some("bcvk-nbd-test-vm"));
+        assert_eq!(loaded.nbd_unit.as_deref(), Some("bcvk-nbd-test-vm"));
         assert_eq!(loaded.ssh_port, 2222);
         assert_eq!(loaded.log_path.as_deref(), Some("/tmp/test-vfkit.log"));
     }
@@ -725,7 +725,7 @@ mod tests {
             serial_log: "/tmp/serial.log".to_string(),
             log_path: None,
             created: "2026-05-04T00:00:00Z".to_string(),
-            nbd_container: None,
+            nbd_unit: None,
             nbd_port: None,
         };
         fs::write(&json_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
@@ -752,7 +752,7 @@ mod tests {
                 serial_log: "/tmp/serial.log".to_string(),
                 log_path: None,
                 created: "2026-01-01T00:00:00Z".to_string(),
-                nbd_container: Some(format!("bcvk-nbd-vm-{i}")),
+                nbd_unit: Some(format!("bcvk-nbd-vm-{i}")),
                 nbd_port: Some(10800 + i as u16),
             };
             let path = dir.path().join(format!("vm-{i}.json"));
