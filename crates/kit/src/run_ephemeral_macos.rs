@@ -36,7 +36,6 @@ pub fn ephemeral_base_dir() -> std::path::PathBuf {
 
 /// Metadata for a running ephemeral VM, persisted as JSON for `ps` and `ssh`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-#[allow(dead_code)]
 pub struct EphemeralVmMetadata {
     /// VM name used as identifier for resource isolation.
     pub name: String,
@@ -64,7 +63,6 @@ pub struct EphemeralVmMetadata {
     pub nbd_port: Option<u16>,
 }
 
-#[allow(dead_code)]
 impl EphemeralVmMetadata {
     /// Return the directory path for ephemeral VM metadata files.
     pub fn vms_dir() -> std::path::PathBuf {
@@ -116,8 +114,9 @@ impl EphemeralVmMetadata {
 
     /// Check if the VM process is still alive via kill(pid, 0).
     pub fn is_alive(&self) -> bool {
-        rustix::process::test_kill_process(rustix::process::Pid::from_raw(self.pid as i32).unwrap())
-            .is_ok()
+        rustix::process::Pid::from_raw(self.pid as i32)
+            .map(|pid| rustix::process::test_kill_process(pid).is_ok())
+            .unwrap_or(false)
     }
 }
 
@@ -175,17 +174,15 @@ impl Drop for VmCleanup {
         if let Some(ref name) = self.nbd_unit {
             crate::nbd_macos::stop_nbd_server(name, self.nbd_port);
         }
-        if let Err(e) = rustix::process::kill_process(
-            rustix::process::Pid::from_raw(self.vfkit_pid as i32).unwrap(),
-            rustix::process::Signal::TERM,
-        ) {
-            tracing::warn!("failed to kill vfkit (PID {}): {}", self.vfkit_pid, e);
+        if let Some(pid) = rustix::process::Pid::from_raw(self.vfkit_pid as i32) {
+            if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
+                tracing::warn!("failed to kill vfkit (PID {}): {}", self.vfkit_pid, e);
+            }
         }
-        if let Err(e) = rustix::process::kill_process(
-            rustix::process::Pid::from_raw(self.gvproxy_pid as i32).unwrap(),
-            rustix::process::Signal::TERM,
-        ) {
-            tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
+        if let Some(pid) = rustix::process::Pid::from_raw(self.gvproxy_pid as i32) {
+            if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
+                tracing::warn!("failed to kill gvproxy (PID {}): {}", self.gvproxy_pid, e);
+            }
         }
         // Release container image overlay mount
         if let Ok(machine) = detect_machine_name() {
@@ -250,8 +247,6 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("ephemeral-{}", &digest_short[..8]));
     let ssh_key_path = cache_base.join(format!("{}-key", vm_name));
-
-    fs::create_dir_all(&cache_base)?;
 
     let mut ssh_pubkey = String::new();
     if opts.ssh_keygen || !opts.execute.is_empty() {
@@ -344,13 +339,6 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         ),
     ];
 
-    if let Ok(bench_nbd) = std::env::var("BCVK_BENCH_NBD") {
-        vfkit_args.extend([
-            "--device".to_string(),
-            format!("nbd,uri={},readonly,timeout=5000,deviceId=bench", bench_nbd),
-        ]);
-    }
-
     let serial_log = cache_base.join(format!("{}-serial.log", vm_name));
     vfkit_args.extend([
         "--device".to_string(),
@@ -400,25 +388,22 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");
-        for attempt in 0..15u32 {
-            match expose_port(
+        crate::utils::wait_for_readiness(
+            indicatif::ProgressBar::hidden(),
+            "Setting up SSH port forwarding",
+            || match expose_port(
                 &services_sock_str,
                 crate::vm_helpers::GVPROXY_VM_IP,
                 ssh_port,
                 22,
             ) {
-                Ok(_) => {
-                    info!("SSH port {} forwarded", ssh_port);
-                    break;
-                }
-                Err(e) if attempt < 14 => {
-                    debug!("SSH port forward attempt {}: {}", attempt, e);
-                    let backoff = 200 * 2u64.pow(attempt.min(4));
-                    std::thread::sleep(Duration::from_millis(backoff));
-                }
-                Err(e) => bail!("SSH port forward failed: {}", e),
-            }
-        }
+                Ok(_) => Ok(true),
+                Err(_) => Ok(false),
+            },
+            Duration::from_secs(15),
+            Duration::from_millis(500),
+        )?;
+        info!("SSH port {} forwarded", ssh_port);
 
         wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
 
@@ -603,15 +588,13 @@ pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::pro
         .stderr(Stdio::null())
         .spawn()
         .context("failed to start gvproxy. Ensure gvproxy is installed (included in Podman)")?;
-    for _ in 0..50 {
-        if Path::new(gvproxy_sock).exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    if !Path::new(gvproxy_sock).exists() {
-        bail!("gvproxy socket did not appear");
-    }
+    crate::utils::wait_for_readiness(
+        indicatif::ProgressBar::hidden(),
+        "Waiting for gvproxy socket",
+        || Ok(Path::new(gvproxy_sock).exists()),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    )?;
     Ok(child)
 }
 
