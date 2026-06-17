@@ -88,9 +88,8 @@ pub struct RunEphemeralOpts {
     /// Number of vCPUs (overridden by --itype if specified)
     #[clap(long)]
     pub vcpus: Option<u32>,
-    /// Memory size (overridden by --itype if specified)
-    #[clap(long, default_value = "4G")]
-    pub memory: String,
+    #[clap(flatten)]
+    pub memory: crate::common_opts::MemoryOpts,
     /// Generate a temporary SSH key pair for VM access
     #[clap(long = "ssh-keygen", short = 'K')]
     pub ssh_keygen: bool,
@@ -264,7 +263,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
         .itype
         .map(|t| t.memory_mb())
         .map(Ok)
-        .unwrap_or_else(|| parse_memory_to_mb(&opts.memory))?;
+        .unwrap_or_else(|| parse_memory_to_mb(&opts.memory.memory))?;
 
     let mut vfkit_args = vec![
         "--cpus".to_string(),

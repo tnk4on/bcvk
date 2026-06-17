@@ -63,9 +63,8 @@ pub struct VmRunOpts {
     /// Number of vCPUs (overridden by --itype if specified)
     #[clap(long)]
     pub vcpus: Option<u32>,
-    /// Memory size (overridden by --itype if specified)
-    #[clap(long, default_value = "4G")]
-    pub memory: String,
+    #[clap(flatten)]
+    pub memory: crate::common_opts::MemoryOpts,
     /// Path to an existing SSH private key
     #[clap(long)]
     pub ssh_key: Option<String>,
@@ -255,7 +254,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
         .itype
         .map(|t| t.memory_mb())
         .map(Ok)
-        .unwrap_or_else(|| parse_memory_to_mb(&opts.memory))?;
+        .unwrap_or_else(|| parse_memory_to_mb(&opts.memory.memory))?;
 
     let vfkit_bin = find_vfkit()?;
     let mut vfkit_args = vec![
