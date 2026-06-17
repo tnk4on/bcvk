@@ -476,6 +476,22 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
+/// Set up SSH port forwarding via gvproxy with retry.
+pub fn setup_ssh_port_forwarding(services_sock: &str, ssh_port: u16) -> Result<()> {
+    crate::utils::wait_for_readiness(
+        indicatif::ProgressBar::hidden(),
+        "Setting up SSH port forwarding",
+        || match expose_port(services_sock, GVPROXY_VM_IP, ssh_port, 22) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(500),
+    )?;
+    info!("SSH port {} forwarded", ssh_port);
+    Ok(())
+}
+
 /// Construct gvproxy Unix socket paths for a given VM.
 pub fn gvproxy_socket_paths(base: &Path, vm_name: &str) -> (PathBuf, PathBuf) {
     (

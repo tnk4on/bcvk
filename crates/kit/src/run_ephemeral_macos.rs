@@ -10,7 +10,6 @@
 
 use std::fs;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use color_eyre::{
     eyre::{bail, Context},
@@ -19,7 +18,7 @@ use color_eyre::{
 use tracing::{debug, info};
 
 use crate::vm_helpers::{
-    default_vcpus, detect_machine_name, ensure_image_and_get_digest, expose_port,
+    default_vcpus, detect_machine_name, ensure_image_and_get_digest,
     find_available_ssh_port, find_vfkit, generate_mac, is_machine_rootful, parse_memory_to_mb,
     run_ssh_command, run_ssh_interactive, start_gvproxy, wait_for_ssh,
 };
@@ -383,22 +382,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
 
     if opts.ssh_keygen || !opts.execute.is_empty() {
         info!("setting up SSH port forwarding...");
-        crate::utils::wait_for_readiness(
-            indicatif::ProgressBar::hidden(),
-            "Setting up SSH port forwarding",
-            || match expose_port(
-                &services_sock_str,
-                crate::vm_helpers::GVPROXY_VM_IP,
-                ssh_port,
-                22,
-            ) {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
-            },
-            Duration::from_secs(15),
-            Duration::from_millis(500),
-        )?;
-        info!("SSH port {} forwarded", ssh_port);
+        crate::vm_helpers::setup_ssh_port_forwarding(&services_sock_str, ssh_port)?;
 
         wait_for_ssh(ssh_port, &ssh_key_path, "root")?;
 

@@ -292,22 +292,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     info!("SSH port: {}", ssh_port);
 
     info!("setting up SSH port forwarding...");
-    crate::utils::wait_for_readiness(
-        indicatif::ProgressBar::hidden(),
-        "Setting up SSH port forwarding",
-        || match expose_port(
-            &services_sock_str,
-            crate::vm_helpers::GVPROXY_VM_IP,
-            ssh_port,
-            22,
-        ) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        },
-        std::time::Duration::from_secs(15),
-        std::time::Duration::from_millis(500),
-    )?;
-    info!("SSH port {} forwarded", ssh_port);
+    crate::vm_helpers::setup_ssh_port_forwarding(&services_sock_str, ssh_port)?;
 
     for pm in &opts.port_mappings {
         expose_port(
