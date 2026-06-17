@@ -208,7 +208,10 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
 
     // Try to set up SSH port forwarding via VM-specific gvproxy socket
     let base = run_ephemeral_macos::ephemeral_base_dir();
-    let svc_sock = crate::vm_helpers::gvproxy_socket_paths(&base, name).1.to_string_lossy().to_string();
+    let svc_sock = crate::vm_helpers::gvproxy_socket_paths(&base, name)
+        .1
+        .to_string_lossy()
+        .to_string();
     if std::path::Path::new(&svc_sock).exists() {
         if let Err(e) = crate::vm_helpers::expose_port(
             &svc_sock,
@@ -226,8 +229,7 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     } else {
         let combined = shlex::try_join(args.iter().map(|s| s.as_str()))
             .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH command: {}", e))?;
-        let status =
-            crate::vm_helpers::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
+        let status = crate::vm_helpers::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
         if !status.success() {
             std::process::exit(status.code().unwrap_or(1));
         }

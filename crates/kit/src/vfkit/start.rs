@@ -40,7 +40,8 @@ pub fn run(opts: VmStartOpts) -> Result<()> {
     let vfkit_bin = find_vfkit()?;
     let vms_dir = VmMetadata::vms_dir();
 
-    let (gvproxy_sock, services_sock) = crate::vm_helpers::gvproxy_socket_paths(&vms_dir, &meta.name);
+    let (gvproxy_sock, services_sock) =
+        crate::vm_helpers::gvproxy_socket_paths(&vms_dir, &meta.name);
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
     let services_sock_str = services_sock.to_string_lossy().to_string();
 

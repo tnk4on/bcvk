@@ -445,7 +445,6 @@ pub fn is_nbd_unit_dead(machine: &str, unit_name: &str) -> bool {
     }
 }
 
-
 // --- macOS VM helpers (moved from run_ephemeral_macos.rs) ---
 
 /// Clear extended attributes from a file.
@@ -623,9 +622,8 @@ pub fn expose_port(
     guest_port: u16,
 ) -> Result<()> {
     use std::os::unix::net::UnixStream;
-    let body = format!(
-        r#"{{"local":":{host_port}","remote":"{vm_ip}:{guest_port}","protocol":"tcp"}}"#,
-    );
+    let body =
+        format!(r#"{{"local":":{host_port}","remote":"{vm_ip}:{guest_port}","protocol":"tcp"}}"#,);
     let mut stream = UnixStream::connect(services_sock)?;
     let request = format!(
         "POST /services/forwarder/expose HTTP/1.1\r\nHost: unix\r\n\

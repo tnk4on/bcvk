@@ -18,9 +18,9 @@ use color_eyre::{
 use tracing::{debug, info};
 
 use crate::vm_helpers::{
-    default_vcpus, detect_machine_name, ensure_image_and_get_digest, VmMetadataStore,
-    find_available_ssh_port, find_vfkit, generate_mac, is_machine_rootful, parse_memory_to_mb,
-    run_ssh_command, run_ssh_interactive, start_gvproxy, wait_for_ssh,
+    default_vcpus, detect_machine_name, ensure_image_and_get_digest, find_available_ssh_port,
+    find_vfkit, generate_mac, is_machine_rootful, parse_memory_to_mb, run_ssh_command,
+    run_ssh_interactive, start_gvproxy, wait_for_ssh, VmMetadataStore,
 };
 
 /// Base directory for ephemeral VM state on macOS host.
@@ -242,7 +242,8 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     )?;
 
     // gvproxy + vfkit (EFI boot)
-    let (gvproxy_sock, services_sock) = crate::vm_helpers::gvproxy_socket_paths(&cache_base, &vm_name);
+    let (gvproxy_sock, services_sock) =
+        crate::vm_helpers::gvproxy_socket_paths(&cache_base, &vm_name);
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
     let services_sock_str = services_sock.to_string_lossy().to_string();
     info!("starting gvproxy...");
@@ -455,11 +456,9 @@ fn run_detached(opts: &RunEphemeralOpts) -> Result<()> {
 
 // --- macOS-specific helpers (pub for vfkit/ module) ---
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_ephemeral_vm_metadata_roundtrip() {
