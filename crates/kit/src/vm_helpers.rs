@@ -480,9 +480,12 @@ pub fn find_vfkit() -> Result<String> {
 /// Implementors provide `vms_dir()` and `name()`, getting JSON-backed
 /// `save`/`load`/`remove`/`list_all` for free.
 pub trait VmMetadataStore: serde::Serialize + serde::de::DeserializeOwned + Sized {
+    /// Return the directory path for VM metadata files.
     fn vms_dir() -> PathBuf;
+    /// Return the VM name used as the JSON filename stem.
     fn name(&self) -> &str;
 
+    /// Save metadata to a JSON file in the VMs directory.
     fn save(&self) -> color_eyre::Result<()> {
         let dir = Self::vms_dir();
         std::fs::create_dir_all(&dir)?;
@@ -491,17 +494,20 @@ pub trait VmMetadataStore: serde::Serialize + serde::de::DeserializeOwned + Size
         Ok(())
     }
 
+    /// Load metadata for the named VM from its JSON file.
     fn load(name: &str) -> color_eyre::Result<Self> {
         let path = Self::vms_dir().join(format!("{}.json", name));
         let data = std::fs::read_to_string(&path)?;
         Ok(serde_json::from_str(&data)?)
     }
 
+    /// Remove metadata file for the named VM.
     fn remove(name: &str) {
         let path = Self::vms_dir().join(format!("{}.json", name));
         remove_file_if_exists(&path);
     }
 
+    /// List all VM metadata from the VMs directory.
     fn list_all() -> color_eyre::Result<Vec<Self>> {
         let dir = Self::vms_dir();
         if !dir.exists() {
