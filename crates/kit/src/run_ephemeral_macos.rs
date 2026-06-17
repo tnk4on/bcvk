@@ -293,10 +293,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     let mut gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
 
     let mac = generate_mac();
-    let mac_str = format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    );
+    let mac_str = crate::vm_helpers::format_mac_address(&mac);
 
     let efi_var_store = cache_base.join(format!("{}-efi-vars", vm_name));
     let bootloader_arg = format!("efi,variable-store={},create", efi_var_store.display());

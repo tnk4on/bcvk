@@ -249,10 +249,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
     let gvproxy_child = start_gvproxy(&gvproxy_sock_str, &services_sock_str)?;
 
     let mac = generate_mac();
-    let mac_str = format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    );
+    let mac_str = crate::vm_helpers::format_mac_address(&mac);
 
     let vcpus = opts.itype.map(|t| t.vcpus()).or(opts.vcpus).unwrap_or(2);
     let memory_mb = opts

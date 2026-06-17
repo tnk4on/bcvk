@@ -476,6 +476,14 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
+/// Format a 6-byte MAC address as a colon-separated hex string.
+pub fn format_mac_address(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
 /// Fixed MAC address matching gvproxy's DHCP static lease for [`GVPROXY_VM_IP`].
 const GVPROXY_STATIC_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
 
