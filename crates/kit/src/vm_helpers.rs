@@ -445,6 +445,143 @@ pub fn is_nbd_unit_dead(machine: &str, unit_name: &str) -> bool {
     }
 }
 
+
+// --- macOS VM helpers (moved from run_ephemeral_macos.rs) ---
+
+/// Clear extended attributes from a file.
+///
+/// Apple Virtualization.framework rejects disk images with xattrs like
+/// `security.selinux` or `user.containers.override_stat` that are added
+/// by podman/buildah when creating images inside containers.
+pub fn clear_xattr(path: &Path) {
+    if let Err(e) = Command::new("xattr")
+        .args(["-c", &path.to_string_lossy()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        tracing::debug!("failed to clear xattr on {}: {}", path.display(), e);
+    }
+}
+
+/// Find the vfkit binary, checking PATH and Podman PKG location.
+pub fn find_vfkit() -> Result<String> {
+    if let Ok(path) = which::which("vfkit") {
+        return Ok(path.to_string_lossy().to_string());
+    }
+    let podman_path = "/opt/podman/bin/vfkit";
+    if Path::new(podman_path).exists() {
+        return Ok(podman_path.to_string());
+    }
+    bail!("vfkit not found. Install: brew install vfkit")
+}
+
+/// Fixed MAC address matching gvproxy's DHCP static lease for [`GVPROXY_VM_IP`].
+const GVPROXY_STATIC_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
+
+/// Generate the fixed MAC address for gvproxy DHCP static lease.
+pub fn generate_mac() -> [u8; 6] {
+    GVPROXY_STATIC_MAC
+}
+
+/// Find the gvproxy binary, checking PATH and Podman installation paths.
+fn find_gvproxy() -> Result<String> {
+    if let Ok(path) = which::which("gvproxy") {
+        return Ok(path.to_string_lossy().to_string());
+    }
+    for candidate in [
+        "/opt/homebrew/opt/podman/libexec/podman/gvproxy",
+        "/opt/podman/bin/gvproxy",
+    ] {
+        if Path::new(candidate).exists() {
+            return Ok(candidate.to_string());
+        }
+    }
+    bail!("gvproxy not found. Ensure Podman is installed (brew install podman)")
+}
+
+/// Start a gvproxy instance with the given socket paths.
+pub fn start_gvproxy(gvproxy_sock: &str, services_sock: &str) -> Result<std::process::Child> {
+    let gvproxy_bin = find_gvproxy()?;
+    remove_file_if_exists(std::path::Path::new(gvproxy_sock));
+    remove_file_if_exists(std::path::Path::new(services_sock));
+    let child = Command::new(&gvproxy_bin)
+        .args([
+            "-listen-vfkit",
+            &format!("unixgram://{}", gvproxy_sock),
+            "-ssh-port",
+            "-1",
+            "-services",
+            &format!("unix://{}", services_sock),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start gvproxy. Ensure gvproxy is installed (included in Podman)")?;
+    crate::utils::wait_for_readiness(
+        indicatif::ProgressBar::hidden(),
+        "Waiting for gvproxy socket",
+        || Ok(Path::new(gvproxy_sock).exists()),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    )?;
+    Ok(child)
+}
+
+/// Expose a TCP port forwarding rule via gvproxy's HTTP API.
+pub fn expose_port(
+    services_sock: &str,
+    vm_ip: &str,
+    host_port: u16,
+    guest_port: u16,
+) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    let body = format!(
+        r#"{{"local":":{host_port}","remote":"{vm_ip}:{guest_port}","protocol":"tcp"}}"#,
+    );
+    let mut stream = UnixStream::connect(services_sock)?;
+    let request = format!(
+        "POST /services/forwarder/expose HTTP/1.1\r\nHost: unix\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    std::io::Write::write_all(&mut stream, request.as_bytes())?;
+    std::io::Write::flush(&mut stream)?;
+    let mut response = vec![0u8; 1024];
+    if let Err(e) = std::io::Read::read(&mut stream, &mut response) {
+        tracing::debug!("failed to read gvproxy response: {}", e);
+    }
+    let response_str = String::from_utf8_lossy(&response);
+    if !response_str.contains("200") {
+        bail!(
+            "gvproxy expose failed: {}",
+            response_str.trim_end_matches('\0')
+        );
+    }
+    Ok(())
+}
+
+/// Find an available TCP port for SSH forwarding in range 2222-3000.
+pub fn find_available_ssh_port() -> u16 {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    const PORT_RANGE_START: u16 = 2222;
+    const PORT_RANGE_END: u16 = 3000;
+    for _ in 0..100 {
+        let port = rng.random_range(PORT_RANGE_START..PORT_RANGE_END);
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    for port in PORT_RANGE_START..PORT_RANGE_END {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    PORT_RANGE_START
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +629,18 @@ mod tests {
         );
         assert_eq!(sanitize_vm_name("centos:stream10"), "centos-stream10");
         assert_eq!(sanitize_vm_name("simple"), "simple");
+    }
+
+    #[test]
+    fn test_generate_mac() {
+        let mac = generate_mac();
+        assert_eq!(mac, GVPROXY_STATIC_MAC);
+    }
+
+    #[test]
+    fn test_find_available_ssh_port() {
+        let port = find_available_ssh_port();
+        assert!((2222..3000).contains(&port));
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 }

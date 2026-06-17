@@ -7,10 +7,10 @@ use color_eyre::{eyre::bail, Result};
 use tracing::info;
 
 use super::VmMetadata;
-use crate::run_ephemeral_macos::{
-    clear_xattr, expose_port, find_vfkit, generate_mac, start_gvproxy,
+use crate::vm_helpers::{
+    clear_xattr, expose_port, find_vfkit, generate_mac, run_ssh_interactive, start_gvproxy,
+    wait_for_ssh,
 };
-use crate::vm_helpers::{run_ssh_interactive, wait_for_ssh};
 
 /// Options for `vm start`.
 #[derive(Parser, Debug)]

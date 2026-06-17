@@ -166,7 +166,7 @@ fn cmd_rm_all(force: bool) -> Result<()> {
     }
 
     // Sweep orphaned resources inside podman machine
-    if let Ok(machine) = run_ephemeral_macos::detect_machine_name() {
+    if let Ok(machine) = crate::vm_helpers::detect_machine_name() {
         // Stop orphaned bcvk-nbd systemd units
         if let Err(e) = Command::new("podman")
             .args([
@@ -209,7 +209,7 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
     let base = run_ephemeral_macos::ephemeral_base_dir();
     let svc_sock = format!("{}/{}-gvproxy-svc.sock", base.display(), name);
     if std::path::Path::new(&svc_sock).exists() {
-        if let Err(e) = run_ephemeral_macos::expose_port(
+        if let Err(e) = crate::vm_helpers::expose_port(
             &svc_sock,
             crate::vm_helpers::GVPROXY_VM_IP,
             vm.ssh_port,
@@ -221,12 +221,12 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
 
     let key_path = std::path::Path::new(&vm.ssh_key);
     if args.is_empty() {
-        run_ephemeral_macos::run_ssh_interactive(vm.ssh_port, key_path, "root")?;
+        crate::vm_helpers::run_ssh_interactive(vm.ssh_port, key_path, "root")?;
     } else {
         let combined = shlex::try_join(args.iter().map(|s| s.as_str()))
             .map_err(|e| color_eyre::eyre::eyre!("failed to escape SSH command: {}", e))?;
         let status =
-            run_ephemeral_macos::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
+            crate::vm_helpers::run_ssh_command(vm.ssh_port, key_path, "root", &combined)?;
         if !status.success() {
             std::process::exit(status.code().unwrap_or(1));
         }
