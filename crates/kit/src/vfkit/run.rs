@@ -165,7 +165,14 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
                             );
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    crate::vm_helpers::wait_for_process_exit(
+                        existing.vfkit_pid,
+                        std::time::Duration::from_millis(200),
+                    );
+                    crate::vm_helpers::wait_for_process_exit(
+                        existing.gvproxy_pid,
+                        std::time::Duration::from_millis(200),
+                    );
                 }
                 VmMetadata::remove(&vm_name);
             } else {

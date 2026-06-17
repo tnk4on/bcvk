@@ -34,8 +34,7 @@ pub fn run(opts: VmStopOpts) -> Result<()> {
             if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
                 tracing::debug!("failed to SIGTERM vfkit (PID {}): {}", meta.vfkit_pid, e);
             }
-            std::thread::sleep(Duration::from_secs(3));
-            if meta.is_alive() {
+            if !crate::vm_helpers::wait_for_process_exit(meta.vfkit_pid, Duration::from_secs(1)) {
                 if let Err(e) = rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
                     tracing::debug!("failed to SIGKILL vfkit (PID {}): {}", meta.vfkit_pid, e);
                 }

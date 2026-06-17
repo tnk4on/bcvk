@@ -112,32 +112,25 @@ pub fn wait_for_ssh(port: u16, key_path: &Path, user: &str) -> Result<()> {
     let ssh_opts = CommonSshOptions::default();
     let user_host = format!("{}@localhost", user);
     info!("waiting for SSH on port {}...", port);
-    let start = std::time::Instant::now();
-    let mut attempt = 0u32;
-    loop {
-        if start.elapsed() > SSH_TIMEOUT {
-            bail!("SSH connection timeout ({}s)", SSH_TIMEOUT.as_secs());
-        }
-        let mut cmd = Command::new("ssh");
-        cmd.args(["-p", &port.to_string(), "-i", &key_path.to_string_lossy()]);
-        ssh_opts.apply_to_command(&mut cmd);
-        cmd.args(["-o", "BatchMode=yes", &user_host, "true"]);
-        if let Ok(s) = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status() {
-            if s.success() {
-                info!("SSH connected after {}s", start.elapsed().as_secs());
-                return Ok(());
+    let key_str = key_path.to_string_lossy().to_string();
+    let (elapsed, _pb) = crate::utils::wait_for_readiness(
+        indicatif::ProgressBar::hidden(),
+        "Waiting for SSH",
+        || {
+            let mut cmd = Command::new("ssh");
+            cmd.args(["-p", &port.to_string(), "-i", &key_str]);
+            ssh_opts.apply_to_command(&mut cmd);
+            cmd.args(["-o", "BatchMode=yes", &user_host, "true"]);
+            match cmd.stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                Ok(s) if s.success() => Ok(true),
+                _ => Ok(false),
             }
-        }
-        let backoff = if attempt < 2 {
-            100
-        } else if attempt < 4 {
-            200
-        } else {
-            500
-        };
-        std::thread::sleep(Duration::from_millis(backoff));
-        attempt += 1;
-    }
+        },
+        SSH_TIMEOUT,
+        Duration::from_millis(200),
+    )?;
+    info!("SSH connected after {}s", elapsed.as_secs());
+    Ok(())
 }
 
 /// Execute a command via SSH and return the exit status.
@@ -536,6 +529,20 @@ pub fn bcvk_base_dir() -> PathBuf {
         .join(".local/share/bcvk")
 }
 
+/// Wait for a process to exit, polling with rustix.
+/// Returns true if process exited within timeout, false otherwise.
+pub fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match rustix::process::Pid::from_raw(pid as i32) {
+            Some(p) if rustix::process::test_kill_process(p).is_ok() => {}
+            _ => return true,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 /// Set up SSH port forwarding via gvproxy with retry.
 pub fn setup_ssh_port_forwarding(services_sock: &str, ssh_port: u16) -> Result<()> {
     crate::utils::wait_for_readiness(
@@ -546,7 +553,7 @@ pub fn setup_ssh_port_forwarding(services_sock: &str, ssh_port: u16) -> Result<(
             Err(_) => Ok(false),
         },
         Duration::from_secs(15),
-        Duration::from_millis(500),
+        Duration::from_millis(200),
     )?;
     info!("SSH port {} forwarded", ssh_port);
     Ok(())
