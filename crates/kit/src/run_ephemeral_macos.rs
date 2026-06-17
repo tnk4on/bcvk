@@ -25,9 +25,7 @@ use crate::vm_helpers::{
 
 /// Base directory for ephemeral VM state on macOS host.
 pub fn ephemeral_base_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".local/share/bcvk/ephemeral")
+    crate::vm_helpers::bcvk_base_dir().join("ephemeral")
 }
 
 // --- Data structures ---

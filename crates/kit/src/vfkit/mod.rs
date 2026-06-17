@@ -124,9 +124,7 @@ pub struct VmMetadata {
 impl VmMetadata {
     /// Return the directory path for persistent VM metadata files.
     pub fn vms_dir() -> PathBuf {
-        dirs::home_dir()
-            .expect("cannot determine home directory")
-            .join(".local/share/bcvk/vms")
+        crate::vm_helpers::bcvk_base_dir().join("vms")
     }
 
     /// Save metadata to a JSON file in the VMs directory.

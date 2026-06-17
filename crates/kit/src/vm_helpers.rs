@@ -476,6 +476,13 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
+/// Base directory for bcvk persistent state: `~/.local/share/bcvk`.
+pub fn bcvk_base_dir() -> PathBuf {
+    dirs::home_dir()
+        .expect("cannot determine home directory")
+        .join(".local/share/bcvk")
+}
+
 /// Set up SSH port forwarding via gvproxy with retry.
 pub fn setup_ssh_port_forwarding(services_sock: &str, ssh_port: u16) -> Result<()> {
     crate::utils::wait_for_readiness(

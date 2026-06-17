@@ -45,16 +45,12 @@ pub struct ToDiskMacosOpts {
 }
 
 fn base_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("cannot determine home directory")
-        .join(".local/share/bcvk/base")
+    crate::vm_helpers::bcvk_base_dir().join("base")
 }
 
 /// Directory for persistent VM disk images.
 pub fn vms_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("cannot determine home directory")
-        .join(".local/share/bcvk/vms")
+    crate::vm_helpers::bcvk_base_dir().join("vms")
 }
 
 fn resolve_path_in_machine(host_path: &str) -> String {
