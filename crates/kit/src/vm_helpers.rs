@@ -594,24 +594,35 @@ pub fn expose_port(
     Ok(())
 }
 
-/// Find an available TCP port for SSH forwarding in range 2222-3000.
-pub fn find_available_ssh_port() -> u16 {
+/// SSH port allocation range start (inclusive).
+const SSH_PORT_RANGE_START: u16 = 2222;
+/// SSH port allocation range end (exclusive).
+const SSH_PORT_RANGE_END: u16 = 3000;
+
+/// Maximum random port allocation attempts before sequential fallback.
+const PORT_FIND_MAX_ATTEMPTS: usize = 100;
+
+/// Find an available TCP port by random probing then sequential scan.
+pub fn find_available_port_in_range(start: u16, end: u16) -> u16 {
     use rand::Rng;
     let mut rng = rand::rng();
-    const PORT_RANGE_START: u16 = 2222;
-    const PORT_RANGE_END: u16 = 3000;
-    for _ in 0..100 {
-        let port = rng.random_range(PORT_RANGE_START..PORT_RANGE_END);
+    for _ in 0..PORT_FIND_MAX_ATTEMPTS {
+        let port = rng.random_range(start..end);
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
-    for port in PORT_RANGE_START..PORT_RANGE_END {
+    for port in start..end {
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
-    PORT_RANGE_START
+    start
+}
+
+/// Find an available TCP port for SSH forwarding in range 2222-3000.
+pub fn find_available_ssh_port() -> u16 {
+    find_available_port_in_range(SSH_PORT_RANGE_START, SSH_PORT_RANGE_END)
 }
 
 #[cfg(test)]
