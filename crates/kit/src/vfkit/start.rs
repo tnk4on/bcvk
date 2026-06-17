@@ -6,7 +6,7 @@ use clap::Parser;
 use color_eyre::{eyre::bail, Result};
 use tracing::info;
 
-use super::VmMetadata;
+use super::{VmMetadata, VmMetadataStore};
 use crate::vm_helpers::{
     clear_xattr, expose_port, find_vfkit, generate_mac, run_ssh_interactive, start_gvproxy,
     wait_for_ssh,

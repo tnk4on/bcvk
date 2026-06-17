@@ -8,6 +8,7 @@ use color_eyre::eyre::bail;
 use color_eyre::Result;
 
 use crate::run_ephemeral_macos::{self, EphemeralVmMetadata};
+use crate::vm_helpers::VmMetadataStore;
 
 /// Options for `ephemeral run-ssh`, combining run options with optional SSH arguments.
 #[derive(Debug, clap::Parser)]

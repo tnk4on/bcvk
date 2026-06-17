@@ -18,7 +18,7 @@ use color_eyre::{
 use tracing::{debug, info};
 
 use crate::vm_helpers::{
-    default_vcpus, detect_machine_name, ensure_image_and_get_digest,
+    default_vcpus, detect_machine_name, ensure_image_and_get_digest, VmMetadataStore,
     find_available_ssh_port, find_vfkit, generate_mac, is_machine_rootful, parse_memory_to_mb,
     run_ssh_command, run_ssh_interactive, start_gvproxy, wait_for_ssh,
 };
@@ -59,55 +59,16 @@ pub struct EphemeralVmMetadata {
     pub nbd_port: Option<u16>,
 }
 
-impl EphemeralVmMetadata {
-    /// Return the directory path for ephemeral VM metadata files.
-    pub fn vms_dir() -> std::path::PathBuf {
+impl crate::vm_helpers::VmMetadataStore for EphemeralVmMetadata {
+    fn vms_dir() -> std::path::PathBuf {
         ephemeral_base_dir().join("vms")
     }
-
-    /// Save metadata to a JSON file in the VMs directory.
-    pub fn save(&self) -> Result<()> {
-        let dir = Self::vms_dir();
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", self.name));
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        Ok(())
+    fn name(&self) -> &str {
+        &self.name
     }
+}
 
-    /// Remove metadata file for the named VM.
-    pub fn remove(name: &str) {
-        let path = Self::vms_dir().join(format!("{}.json", name));
-        crate::vm_helpers::remove_file_if_exists(&path);
-    }
-
-    /// Load metadata for the named VM from its JSON file.
-    pub fn load(name: &str) -> Result<Self> {
-        let path = Self::vms_dir().join(format!("{}.json", name));
-        let data = fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&data)?)
-    }
-
-    /// List all ephemeral VM metadata from the VMs directory.
-    pub fn list_all() -> Result<Vec<Self>> {
-        let dir = Self::vms_dir();
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut vms = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(meta) = serde_json::from_str::<Self>(&data) {
-                    vms.push(meta);
-                }
-            }
-        }
-        Ok(vms)
-    }
-
+impl EphemeralVmMetadata {
     /// Check if the VM process is still alive via kill(pid, 0).
     pub fn is_alive(&self) -> bool {
         rustix::process::Pid::from_raw(self.pid as i32)

@@ -8,7 +8,7 @@ use clap::Parser;
 use color_eyre::{eyre::bail, Result};
 use tracing::info;
 
-use super::VmMetadata;
+use super::{VmMetadata, VmMetadataStore};
 use crate::vm_helpers::{
     clear_xattr, detect_machine_name, ensure_image_and_get_digest, expose_port,
     find_available_ssh_port, find_vfkit, generate_mac, parse_memory_to_mb, remove_file_if_exists,

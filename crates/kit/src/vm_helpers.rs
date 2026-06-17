@@ -476,6 +476,54 @@ pub fn find_vfkit() -> Result<String> {
     bail!("vfkit not found. Install: brew install vfkit")
 }
 
+/// Shared persistence methods for VM metadata types.
+///
+/// Implementors provide `vms_dir()` and `name()`, getting JSON-backed
+/// `save`/`load`/`remove`/`list_all` for free.
+pub trait VmMetadataStore: serde::Serialize + serde::de::DeserializeOwned + Sized {
+    fn vms_dir() -> PathBuf;
+    fn name(&self) -> &str;
+
+    fn save(&self) -> color_eyre::Result<()> {
+        let dir = Self::vms_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", self.name()));
+        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    fn load(name: &str) -> color_eyre::Result<Self> {
+        let path = Self::vms_dir().join(format!("{}.json", name));
+        let data = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&data)?)
+    }
+
+    fn remove(name: &str) {
+        let path = Self::vms_dir().join(format!("{}.json", name));
+        remove_file_if_exists(&path);
+    }
+
+    fn list_all() -> color_eyre::Result<Vec<Self>> {
+        let dir = Self::vms_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut items = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(meta) = serde_json::from_str::<Self>(&data) {
+                    items.push(meta);
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
 /// Base directory for bcvk persistent state: `~/.local/share/bcvk`.
 pub fn bcvk_base_dir() -> PathBuf {
     dirs::home_dir()

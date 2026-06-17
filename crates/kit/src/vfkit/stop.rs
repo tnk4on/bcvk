@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::VmMetadata;
+use super::{VmMetadata, VmMetadataStore};
 use color_eyre::{eyre::bail, Result};
 use tracing::info;
 
