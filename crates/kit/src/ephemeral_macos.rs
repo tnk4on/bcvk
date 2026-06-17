@@ -21,6 +21,7 @@ pub struct RunEphemeralSshOpts {
     pub ssh_args: Vec<String>,
 }
 
+/// Subcommands for ephemeral VM management.
 #[derive(Debug, Subcommand)]
 pub enum EphemeralCommands {
     /// Run bootc containers as ephemeral VMs
