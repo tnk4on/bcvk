@@ -67,18 +67,18 @@ update-manpages:
 
 update-generated: sync-manpages manpages
 
-.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options nbd-server-aarch64 nbd-server-x86_64
+.PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options nbd-server
 
-.PHONY: nbd-server-aarch64
-nbd-server-aarch64:
-	PATH="$(HOME)/.rustup/toolchains/stable-$(shell rustc -vV | awk '/^host:/ {print $$2}')/bin:$(HOME)/.cargo/bin:$(PATH)" \
-	  cargo zigbuild --target aarch64-unknown-linux-gnu --release -p bcvk-nbd
-	cp target/aarch64-unknown-linux-gnu/release/bcvk-nbd \
-	   crates/kit/bcvk-nbd-aarch64
+# Auto-detect host arch for cross-compiling NBD server to Linux
+# macOS uname -m returns "arm64" → map to "aarch64" for Rust target triple
+NBD_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
+NBD_TARGET := $(NBD_ARCH)-unknown-linux-gnu
 
-.PHONY: nbd-server-x86_64
-nbd-server-x86_64:
+.PHONY: nbd-server
+nbd-server:
+ifeq ($(shell uname -s),Darwin)
 	PATH="$(HOME)/.rustup/toolchains/stable-$(shell rustc -vV | awk '/^host:/ {print $$2}')/bin:$(HOME)/.cargo/bin:$(PATH)" \
-	  cargo zigbuild --target x86_64-unknown-linux-gnu --release -p bcvk-nbd
-	cp target/x86_64-unknown-linux-gnu/release/bcvk-nbd \
-	   crates/kit/bcvk-nbd-x86_64
+	  cargo zigbuild --target $(NBD_TARGET) --release -p bcvk-nbd
+	mkdir -p target/nbd-server
+	cp target/$(NBD_TARGET)/release/bcvk-nbd target/nbd-server/bcvk-nbd
+endif
