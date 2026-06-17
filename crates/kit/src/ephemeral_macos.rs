@@ -207,7 +207,7 @@ fn cmd_ssh(name: &str, args: &[String]) -> Result<()> {
 
     // Try to set up SSH port forwarding via VM-specific gvproxy socket
     let base = run_ephemeral_macos::ephemeral_base_dir();
-    let svc_sock = format!("{}/{}-gvproxy-svc.sock", base.display(), name);
+    let svc_sock = crate::vm_helpers::gvproxy_socket_paths(&base, name).1.to_string_lossy().to_string();
     if std::path::Path::new(&svc_sock).exists() {
         if let Err(e) = crate::vm_helpers::expose_port(
             &svc_sock,

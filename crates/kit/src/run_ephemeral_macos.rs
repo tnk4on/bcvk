@@ -285,8 +285,7 @@ fn run_vfkit(opts: RunEphemeralOpts) -> Result<()> {
     )?;
 
     // gvproxy + vfkit (EFI boot)
-    let gvproxy_sock = cache_base.join(format!("{}-gvproxy.sock", vm_name));
-    let services_sock = cache_base.join(format!("{}-gvproxy-svc.sock", vm_name));
+    let (gvproxy_sock, services_sock) = crate::vm_helpers::gvproxy_socket_paths(&cache_base, &vm_name);
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
     let services_sock_str = services_sock.to_string_lossy().to_string();
     info!("starting gvproxy...");

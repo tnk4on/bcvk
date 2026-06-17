@@ -3,7 +3,7 @@
 //! Functions in this module are OS-independent (use `podman` and `ssh` CLI).
 //! Modelled after `ssh_options.rs` — designed for future cross-platform sharing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -474,6 +474,14 @@ pub fn find_vfkit() -> Result<String> {
         return Ok(podman_path.to_string());
     }
     bail!("vfkit not found. Install: brew install vfkit")
+}
+
+/// Construct gvproxy Unix socket paths for a given VM.
+pub fn gvproxy_socket_paths(base: &Path, vm_name: &str) -> (PathBuf, PathBuf) {
+    (
+        base.join(format!("{vm_name}-gvproxy.sock")),
+        base.join(format!("{vm_name}-gvproxy-svc.sock")),
+    )
 }
 
 /// Format a 6-byte MAC address as a colon-separated hex string.

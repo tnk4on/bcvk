@@ -239,8 +239,7 @@ pub fn run(opts: VmRunOpts) -> Result<()> {
 
     let efi_store = vms_dir.join(format!("{}-efi-vars", vm_name));
     let serial_log = vms_dir.join(format!("{}-serial.log", vm_name));
-    let gvproxy_sock = vms_dir.join(format!("{}-gvproxy.sock", vm_name));
-    let services_sock = vms_dir.join(format!("{}-gvproxy-svc.sock", vm_name));
+    let (gvproxy_sock, services_sock) = crate::vm_helpers::gvproxy_socket_paths(&vms_dir, &vm_name);
 
     let gvproxy_sock_str = gvproxy_sock.to_string_lossy().to_string();
     let services_sock_str = services_sock.to_string_lossy().to_string();
