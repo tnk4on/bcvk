@@ -69,14 +69,13 @@ update-generated: sync-manpages manpages
 
 .PHONY: all bin install manpages update-generated makesudoinstall sync-manpages update-manpages sync-cli-options nbd-server
 
-# Auto-detect host arch for cross-compiling NBD server to Linux
-# macOS uname -m returns "arm64" → map to "aarch64" for Rust target triple
-NBD_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
+# Cross-compile NBD server for podman machine (needed on macOS/Windows, no-op on Linux)
+NBD_ARCH := $(shell rustc -vV | awk '/^host:/ {split($$2, a, "-"); print a[1]}')
 NBD_TARGET := $(NBD_ARCH)-unknown-linux-gnu
 
 .PHONY: nbd-server
 nbd-server:
-ifeq ($(shell uname -s),Darwin)
+ifneq ($(shell uname -s),Linux)
 	PATH="$(HOME)/.rustup/toolchains/stable-$(shell rustc -vV | awk '/^host:/ {print $$2}')/bin:$(HOME)/.cargo/bin:$(PATH)" \
 	  cargo zigbuild --target $(NBD_TARGET) --release -p bcvk-nbd
 	mkdir -p target/nbd-server
