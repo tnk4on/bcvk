@@ -8,7 +8,6 @@ all: bin manpages
 
 .PHONY: bin
 bin:
-	cargo check --workspace
 	cargo build --release
 
 # Generate man pages from markdown sources
