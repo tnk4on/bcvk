@@ -1,8 +1,9 @@
 //! Build script: copy cross-compiled NBD server binary into OUT_DIR for include_bytes!.
 
 fn main() {
-    // NBD server binary is only needed on macOS (nbd_macos.rs is cfg-gated).
-    // On Linux/Windows builds, the file won't exist and that's OK.
+    // NBD server binary is needed on non-Linux hosts (macOS/Windows) where
+    // bcvk cross-compiles it for the podman machine. On Linux, the file
+    // won't exist and that's OK — nbd_macos.rs is cfg-gated.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_root = std::path::Path::new(&manifest_dir).join("../..");
     let nbd_src = workspace_root.join("target/nbd-server/bcvk-nbd");
